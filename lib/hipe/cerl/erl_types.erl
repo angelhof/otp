@@ -78,6 +78,7 @@
 	 t_from_range/2,
 	 t_from_range_unsafe/2,
 	 t_from_term/1,
+	 t_from_term_shallow/2,
 	 t_fun/0,
 	 t_fun/1,
 	 t_fun/2,
@@ -2323,6 +2324,37 @@ t_from_term(T) when is_port(T) ->      t_port();
 t_from_term(T) when is_reference(T) -> t_reference();
 t_from_term(T) when is_tuple(T) ->
   t_tuple([t_from_term(E) || E <- tuple_to_list(T)]).
+
+%%-----------------------------------------------------------------------------
+%% Make a type from a term. Maximum type depth enforced.
+%%
+-spec t_from_term_shallow(term(), non_neg_integer()) -> erl_type().
+
+t_from_term_shallow(_, 0) -> t_any();
+t_from_term_shallow([H|T], N) ->                  t_cons(t_from_term_shallow(H, N-1), t_from_term_shallow(T, N-1));
+t_from_term_shallow([], _N) ->                     t_nil();
+t_from_term_shallow(T, _N) when is_atom(T) ->      t_atom(T);
+t_from_term_shallow(T, _N) when is_bitstring(T) -> t_bitstr(0, erlang:bit_size(T));
+t_from_term_shallow(T, _N) when is_float(T) ->     t_float();
+t_from_term_shallow(T, _N) when is_function(T) ->
+  {arity, Arity} = erlang:fun_info(T, arity),
+  t_fun(Arity, t_any());
+t_from_term_shallow(T, _N) when is_integer(T) ->   t_integer(T);
+t_from_term_shallow(T, N) when is_map(T) ->
+  Pairs = [{t_from_term_shallow(K, N-1), ?mand, t_from_term_shallow(V, N-1)}
+	   || {K, V} <- maps:to_list(T)],
+  {Stons, Rest} = lists:partition(fun({K,_,_}) -> is_singleton_type(K) end,
+				  Pairs),
+  {DefK, DefV}
+    = lists:foldl(fun({K,_,V},{AK,AV}) -> {t_sup(K,AK), t_sup(V,AV)} end,
+		  {t_none(), t_none()}, Rest),
+  t_map(lists:keysort(1, Stons), DefK, DefV);
+t_from_term_shallow(T, _N) when is_pid(T) ->       t_pid();
+t_from_term_shallow(T, _N) when is_port(T) ->      t_port();
+t_from_term_shallow(T, _N) when is_reference(T) -> t_reference();
+t_from_term_shallow(T, N) when is_tuple(T) ->
+  t_tuple([t_from_term_shallow(E, N-1) || E <- tuple_to_list(T)]).
+
 
 %%-----------------------------------------------------------------------------
 %% Integer types from a range.
