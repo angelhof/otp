@@ -108,6 +108,7 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   IcodeCfg7 = icode_remove_trivial_bbs(IcodeCfg6, Options),
   pp(IcodeCfg7, MFA, icode, pp_opt_icode, Options, Servers),
   pp(IcodeCfg7, MFA, icode_liveness, pp_icode_liveness, Options, Servers),
+
   FinalIcode = hipe_icode_cfg:cfg_to_linear(IcodeCfg7),
   ?opt_stop_timer("Icode"),
   {LinearRTL, Roots} = ?option_time(icode_to_rtl(MFA, FinalIcode, Options, Servers),
@@ -256,7 +257,9 @@ icode_ssa(IcodeCfg0, MFA, Options, Servers) ->
   IcodeSSA2 = icode_ssa_dead_code_elimination(IcodeSSA1, Options),
   IcodeSSA3 = icode_ssa_copy_prop(IcodeSSA2, Options),
   IcodeSSA3a = icode_ssa_binary_pass(IcodeSSA3, Options),
+  % io:format("Pre type: ~p~n", [IcodeSSA3a]),
   IcodeSSA4 = icode_ssa_type(IcodeSSA3a, MFA, Options, Servers),
+  % io:format("After type: ~p~n", [IcodeSSA4]),
   IcodeSSA5 = icode_ssa_dead_code_elimination(IcodeSSA4, Options),
   IcodeSSA6 = icode_ssa_struct_reuse(IcodeSSA5, Options),
   icode_ssa_check(IcodeSSA6, Options), %% just for sanity
@@ -280,6 +283,7 @@ icode_ssa_type(IcodeSSA, MFA, Options, Servers) ->
       AnnIcode3 = icode_range_analysis(AnnIcode2, MFA, Options, Servers),
       AnnIcode4 = icode_eliminate_safe_calls(AnnIcode3, Options),
       pp(AnnIcode4, MFA, icode, pp_range_icode, Options, Servers),
+      % io:format("With annots: ~p~n", [AnnIcode4]),
       hipe_icode_type:unannotate_cfg(AnnIcode4)
   end.
 

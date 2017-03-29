@@ -108,6 +108,22 @@
 -spec cfg(cfg(), mfa(), comp_options(), #comp_servers{}) -> cfg().
 
 cfg(Cfg, MFA, Options, Servers) ->
+  case proplists:get_value(dynamic_type_annot, Options) of
+    undefined -> 
+      cfg1(Cfg, MFA, Options, Servers);      
+    List when is_list(List) ->
+      case proplists:get_value(MFA, List) of
+        undefined ->
+          cfg1(Cfg, MFA, Options, Servers);  
+        Arg_types ->
+          io:format(standard_error, "MFA: ~p, Types: ~p~n", [MFA, Arg_types]),
+          %% TODO: Append Arg_types to the list instead of just adding it
+          OCI = Cfg#cfg.info,
+          cfg1(Cfg#cfg{info = OCI#cfg_info{runtime_info = Arg_types}}, MFA, Options, Servers)
+      end
+  end.
+
+cfg1(Cfg, MFA, Options, Servers) ->
   case proplists:get_bool(concurrent_comp, Options) of
     true ->
       concurrent_cfg(Cfg, MFA, Servers#comp_servers.type);
@@ -115,10 +131,14 @@ cfg(Cfg, MFA, Options, Servers) ->
       ordinary_cfg(Cfg, MFA)
   end.
 
+
 concurrent_cfg(Cfg, MFA, CompServer) ->
   CompServer ! {ready, {MFA, self()}},
   {ArgsFun, CallFun, FinalFun} = do_analysis(Cfg, MFA),
+  % io:format(standard_error, "Cfg: ~p~n, MFA: ~p~n, ArgsFun: ~p~n, CallFun: ~p~n, FInalFun: ~p~n", [Cfg, MFA, ArgsFun, CallFun, FinalFun]),
+  % io:format(standard_error, "MFA: ~p~n, Param types: ~p~n", [MFA, CallFun(MFA, Cfg)]),
   Ans = do_rewrite(Cfg, MFA, ArgsFun, CallFun, FinalFun),
+  % io:format(standard_error, "After rewrite: ~p~n", [Ans]),
   CompServer ! {done_rewrite, MFA},
   Ans.
 
@@ -1869,7 +1889,7 @@ is_var_or_reg(X) ->
 new_state(Cfg, {MFA, GetCallFun, GetResFun, FinalAction}) ->
   Start = hipe_icode_cfg:start_label(Cfg),
   Params = hipe_icode_cfg:params(Cfg),
-  ParamTypes = GetCallFun(MFA, Cfg),
+  ParamTypes = get_param_types(MFA, Cfg, GetCallFun),
   case any_is_none(ParamTypes) of
     true ->
       FinalAction(MFA, [t_none()]),
@@ -1881,6 +1901,16 @@ new_state(Cfg, {MFA, GetCallFun, GetResFun, FinalAction}) ->
       #state{info_map = InfoMap, cfg = Cfg, liveness = Liveness, 
 	     arg_types = ParamTypes, lookupfun = GetResFun, 
 	     resultaction = FinalAction}
+  end.
+
+get_param_types(MFA, Cfg, GetCallFun) ->
+  Runtime_info = Cfg#cfg.info#cfg_info.runtime_info,
+  io:format(standard_error, "Normal: ~p~nMine: ~p~n", [GetCallFun(MFA, Cfg), Runtime_info]),
+  case Runtime_info of 
+    undefined ->
+      GetCallFun(MFA, Cfg);
+    _ ->
+      Runtime_info
   end.
 
 state__cfg(#state{cfg = Cfg}) ->

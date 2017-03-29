@@ -31,7 +31,9 @@
                    closure_arity = none :: 'none' | arity(),
                    is_leaf       :: boolean(),
                    params        :: list(),    %% XXX: refine
-                   info = []     :: list()}).  %% seems not needed; take out??
+                   info = []     :: list(),    %% seems not needed; take out??
+                   runtime_info = undefined :: 'undefined' | list() %% For now it contains just the runtime arg type information  
+                   }).
 -type cfg_info() :: #cfg_info{}.
 
 %%

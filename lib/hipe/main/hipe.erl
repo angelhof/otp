@@ -1347,6 +1347,7 @@ opt_keys() ->
      count_spills,
      count_temps,
      debug,
+     dynamic_type_annot,
      get_called_modules,
      split_arith,
      split_arith_unsafe,
