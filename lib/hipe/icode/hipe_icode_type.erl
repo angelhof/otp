@@ -116,7 +116,7 @@ cfg(Cfg, MFA, Options, Servers) ->
         undefined ->
           cfg1(Cfg, MFA, Options, Servers);  
         Arg_types ->
-          io:format(standard_error, "MFA: ~p, Types: ~p~n", [MFA, Arg_types]),
+          %%io:format(standard_error, "MFA: ~p, Types: ~p~n", [MFA, Arg_types]),
           %% TODO: Append Arg_types to the list instead of just adding it
           OCI = Cfg#cfg.info,
           cfg1(Cfg#cfg{info = OCI#cfg_info{runtime_info = Arg_types}}, MFA, Options, Servers)
@@ -281,7 +281,7 @@ analyse_insn(I, Info, LookupFun) ->
       do_move(I, Info);
     #icode_call{} ->
       NewInfo = do_call(I, Info, LookupFun),
-      %% io:format("Analysing Call: ~w~n~w~n", [I, NewInfo]),
+      % io:format(" -- Analysing Call: ~w~n -- ~w~n", [I, NewInfo]),
       update_call_arguments(I, NewInfo);
     #icode_phi{} ->
       Type = t_limit(join_list(hipe_icode:args(I), Info), ?TYPE_DEPTH),
@@ -1905,7 +1905,7 @@ new_state(Cfg, {MFA, GetCallFun, GetResFun, FinalAction}) ->
 
 get_param_types(MFA, Cfg, GetCallFun) ->
   Runtime_info = Cfg#cfg.info#cfg_info.runtime_info,
-  io:format(standard_error, "Normal: ~p~nMine: ~p~n", [GetCallFun(MFA, Cfg), Runtime_info]),
+  % io:format(standard_error, "Normal: ~p~nMine: ~p~n", [GetCallFun(MFA, Cfg), Runtime_info]),
   case Runtime_info of 
     undefined ->
       GetCallFun(MFA, Cfg);
@@ -2039,16 +2039,9 @@ annotate_bbs([Label|Left], State) ->
 annotate_bbs([], State) ->
   State.
 
-annotate_instr_list([I], Info, LookupFun, Acc) ->
-  NewInfo =
-    case I of
-      #icode_call{} ->
-	do_safe_call(I, Info, LookupFun);
-      _ ->
-	analyse_insn(I, Info, LookupFun)
-    end,
-  NewI = annotate_instr(I, NewInfo, Info),
-  lists:reverse([NewI|Acc]);
+
+annotate_instr_list([], _Info, _LookupFun, Acc) ->
+  lists:reverse(Acc);
 annotate_instr_list([I|Left], Info, LookupFun, Acc) ->
   NewInfo = 
     case I of
@@ -2122,6 +2115,8 @@ update_call_arguments(I, Info) ->
   Args = hipe_icode:call_args(I),
   ArgTypes = lookup_list(Args, Info),
   Signature = find_signature(hipe_icode:call_fun(I), length(Args)),
+  % io:format(standard_error, "Call fun: ~p~nSignature: ~p~nArg types: ~p~n", [hipe_icode:call_fun(I), Signature, ArgTypes]),
+  % io:format(standard_error, "MFA: ~p Signature: ~p~n", [hipe_icode:call_fun(I), Signature]),
   case t_fun_args(Signature) of
     unknown ->
       Info;
@@ -2138,7 +2133,25 @@ update_call_arguments(I, Info) ->
 find_signature(MFA = {_, _, _}, _) -> find_signature_mfa(MFA);
 find_signature(Primop, Arity) -> find_signature_primop(Primop, Arity).
 
-find_signature_mfa(MFA) ->
+%% Used to get the specs from a loaded beam
+% get_module_specs(_Mod) ->
+%    ok.
+
+%% Used to get the spec for a specific function
+% get_mfa_spec({_M, _F, _A}=MFA) ->
+%   %% Use dialyzer_utils and check its usage in dialyzer_analysis_callgraph
+%   test_type_server ! {get_mfa_type, MFA, self()},
+%   receive
+%     any -> any;
+%     Type -> Type
+%   end.
+  
+
+% is_spec({attribute, _, spec, _}) -> true;
+% is_spec(_) -> false.
+
+
+find_signature_mfa(MFA) ->  
   case get_mfa_arg_types(MFA) of
     any ->
       t_fun(get_mfa_type(MFA));
