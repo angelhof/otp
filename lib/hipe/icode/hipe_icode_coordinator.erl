@@ -224,6 +224,28 @@ final_funs(Pid,Mod) ->
   FinalFun = fun (_, _) -> ok end,
   {ArgsFun, GetResFun, FinalFun}. 
 
+check_rt_return_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {_, RetType}} -> RetType
+      end
+  end.
+check_rt_call_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {ArgTypes, _}} -> ArgTypes
+      end
+  end.
+
+runtime_server_running() ->
+  lists:member(runtime_type_server, erlang:registered()).
+
 info_server(Mod) ->
   info_server_loop(gb_trees:empty(), gb_trees:empty(), Mod).
 
@@ -237,25 +259,53 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
       info_server_loop(NewCallInfo, ReturnInfo, Mod);
     {get_return, MFA, Pid, Ref} ->
       Ans = 
-	case gb_trees:lookup(MFA, ReturnInfo) of 
-	  none ->
-	    Mod:return_none();
-	  {value, TypesComp} ->
-	    Mod:return__info((TypesComp))
-	end,
-      Pid ! {Ref, Ans},
+      	case gb_trees:lookup(MFA, ReturnInfo) of 
+      	  none ->
+      	    Mod:return_none();
+      	  {value, TypesComp} ->
+      	    Mod:return__info((TypesComp))
+      	end,
+      % Added for the runtime type info
+      Ans1 =
+        case Mod of
+          hipe_icode_type -> 
+            case check_rt_return_info(MFA)  of
+              none -> Ans;
+              RtAns -> 
+                {_, Res} = Mod:update__info([RtAns], Ans),
+                Res
+            end;
+          _ ->
+            Ans
+        end,
+      % TODO: Return the sup of runtimeand and ans
+      Pid ! {Ref, Ans1},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {get_call, MFA, Cfg, Pid, Ref} ->
       Ans = 
-	case gb_trees:lookup(MFA, CallInfo) of 
-	  none ->
-	    Mod:return_none_args(Cfg, MFA);
-	  {value, escaping} ->
-	    Mod:return_any_args(Cfg, MFA);
-	  {value, TypesComp} ->
-	    Mod:return__info(TypesComp)
-	end,
-      Pid ! {Ref, Ans},
+      	case gb_trees:lookup(MFA, CallInfo) of 
+      	  none ->
+      	    Mod:return_none_args(Cfg, MFA);
+      	  {value, escaping} ->
+      	    Mod:return_any_args(Cfg, MFA);
+      	  {value, TypesComp} ->
+      	    Mod:return__info(TypesComp)
+      	end,
+      % Added for the runtime type info
+      Ans1 =
+        case Mod of
+          hipe_icode_type -> 
+            case check_rt_call_info(MFA) of
+              none -> Ans;
+              RtAns -> 
+                {_, Res} = Mod:update__info(RtAns, Ans),
+                Res
+            end;
+          _ ->
+            Ans
+        end,
+      % TODO: Return the sup of runtimeand and ans
+      Pid ! {Ref, Ans1},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {set_escaping, MFA} ->
       NewCallInfo = gb_trees:enter(MFA, escaping, CallInfo),
@@ -268,15 +318,15 @@ handle_update(MFA, Tree, NewInfo, Pid, Ref, Mod) ->
   ResType = 
     case gb_trees:lookup(MFA, Tree) of
       none ->
-	%% io:format("First Type: ~w ~w~n", [NewType, MFA]),
+	% io:format("First Type: ~w ~w~n", [NewInfo, MFA]),
 	Pid ! {Ref, do_restart},
 	Mod:new__info(NewInfo);
       {value, escaping} ->
 	Pid ! {Ref, no_change},
 	escaping;
       {value, OldInfo} ->
-	%% io:format("New Type: ~w ~w~n", [NewType, MFA]),
-	%% io:format("Old Type: ~w ~w~n", [OldType, MFA]),
+	% io:format("New Type: ~w ~w~n", [NewInfo, MFA]),
+	% io:format("Old Type: ~w ~w~n", [OldInfo, MFA]),
 	case Mod:update__info(NewInfo, OldInfo) of
 	  {true, Type} ->
 	    Pid ! {Ref, no_change},

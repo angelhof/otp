@@ -213,6 +213,7 @@ analyse(Cfg, Data) ->
 safe_analyse(Cfg, {MFA,_,_,_}=Data) ->
   State = new_state(Cfg, Data),
   NewState = analyse_blocks(State,MFA),
+  % io:format("New mfa: ~p, Result type: ~p~n", [MFA, state__ret_type(NewState)]),
   (state__resultaction(NewState))(MFA,state__ret_type(NewState)),
   NewState.
 
@@ -321,7 +322,7 @@ do_basic_call(I, Info, LookupFun) ->
       local ->
 	MFA = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
-	%% io:format("Call:~p~nTypes: ~p~n",[I,ArgTypes]),
+	% io:format("Call:~p~nTypes: ~p~n",[MFA,ArgTypes]),
 	LookupFun(MFA,ArgTypes)
     end.
 
@@ -2130,7 +2131,7 @@ update_call_arguments(I, Info) ->
 %% PLT info
 %%
 
-find_signature(MFA = {_, _, _}, _) -> find_signature_mfa(MFA);
+find_signature(MFA = {_, _, _}, _) -> find_dynamic_signature_mfa(MFA);
 find_signature(Primop, Arity) -> find_signature_primop(Primop, Arity).
 
 %% Used to get the specs from a loaded beam
@@ -2146,10 +2147,30 @@ find_signature(Primop, Arity) -> find_signature_primop(Primop, Arity).
 %     Type -> Type
 %   end.
   
-
 % is_spec({attribute, _, spec, _}) -> true;
 % is_spec(_) -> false.
 
+check_rt_fun_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {ArgTypes, RetType}} -> {ArgTypes, RetType}
+      end
+  end.
+
+runtime_server_running() ->
+  lists:member(runtime_type_server, erlang:registered()).
+
+
+find_dynamic_signature_mfa(MFA) ->
+  case check_rt_fun_info(MFA) of
+    none ->
+      find_signature_mfa(MFA);
+    {ArgTypes, RetType} ->
+      t_fun(ArgTypes, RetType)
+  end.
 
 find_signature_mfa(MFA) ->  
   case get_mfa_arg_types(MFA) of
