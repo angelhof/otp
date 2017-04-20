@@ -488,6 +488,7 @@ get_spec_info([{attribute, Anno, Contract, {Id, TypeSpec}}|Left],
 	      SpecMap, CallbackMap, RecordsMap, ModName, OptCb, File)
   when ((Contract =:= 'spec') or (Contract =:= 'callback')),
        is_list(TypeSpec) ->
+  % io:format("Type spec: ~p~n", [TypeSpec]),
   Ln = erl_anno:line(Anno),
   MFA = case Id of
 	  {_, _, _} = T -> T;

@@ -312,18 +312,26 @@ do_basic_call(I, Info, LookupFun) ->
 	{M, F, A} = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
 	None = t_none(),
-	case erl_bif_types:type(M, F, A, ArgTypes) of
-	  None ->
-	    NewArgTypes = add_funs_to_arg_types(ArgTypes),
-	    erl_bif_types:type(M, F, A, NewArgTypes);
-	  Other ->
-	    Other
-	end;
+  case check_rt_return_info({M,F,A}) of
+    none ->
+      case erl_bif_types:type(M, F, A, ArgTypes) of
+        None -> 
+          NewArgTypes = add_funs_to_arg_types(ArgTypes),
+          erl_bif_types:type(M, F, A, NewArgTypes);
+        Other ->
+          Other
+      end;
+    RetType ->
+      % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
+      RetType
+  end;
       local ->
 	MFA = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
-	% io:format("Call:~p~nTypes: ~p~n",[MFA,ArgTypes]),
-	LookupFun(MFA,ArgTypes)
+	% io:format("~p -> Types: ~p~n",[MFA,ArgTypes]),
+	Ret = LookupFun(MFA,ArgTypes),
+  % io:format("~p -> Return: ~p~n", [MFA, Ret]),
+  Ret
     end.
 
 do_call(I, Info, LookupFun) ->
@@ -402,16 +410,24 @@ do_enter(I, Info, State, LookupFun) ->
     case hipe_icode:enter_type(I) of
       local ->
 	MFA = hipe_icode:enter_fun(I),
-	LookupFun(MFA,ArgTypes);
+  Ret = LookupFun(MFA,ArgTypes),
+  % io:format("~p -> Return: ~p~n", [MFA, Ret]),
+  Ret;
       remote ->
 	{M, F, A} = hipe_icode:enter_fun(I),
 	None = t_none(),
-	case erl_bif_types:type(M, F, A, ArgTypes) of
-	  None -> 
-	    NewArgTypes = add_funs_to_arg_types(ArgTypes),
-	    erl_bif_types:type(M, F, A, NewArgTypes);
-	  Other ->
-	    Other
+	case check_rt_return_info({M,F,A}) of
+    none ->
+      case erl_bif_types:type(M, F, A, ArgTypes) of
+    	  None -> 
+    	    NewArgTypes = add_funs_to_arg_types(ArgTypes),
+    	    erl_bif_types:type(M, F, A, NewArgTypes);
+    	  Other ->
+    	    Other
+      end;
+    RetType ->
+      % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
+      RetType
 	end;
       primop ->
 	Fun = hipe_icode:enter_fun(I),
@@ -1905,14 +1921,7 @@ new_state(Cfg, {MFA, GetCallFun, GetResFun, FinalAction}) ->
   end.
 
 get_param_types(MFA, Cfg, GetCallFun) ->
-  Runtime_info = Cfg#cfg.info#cfg_info.runtime_info,
-  % io:format(standard_error, "Normal: ~p~nMine: ~p~n", [GetCallFun(MFA, Cfg), Runtime_info]),
-  case Runtime_info of 
-    undefined ->
-      GetCallFun(MFA, Cfg);
-    _ ->
-      Runtime_info
-  end.
+  GetCallFun(MFA, Cfg).
 
 state__cfg(#state{cfg = Cfg}) ->
   Cfg.
@@ -2159,6 +2168,25 @@ check_rt_fun_info(MFA) ->
         {ok, {ArgTypes, RetType}} -> {ArgTypes, RetType}
       end
   end.
+
+check_rt_return_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {_, RetType}} -> RetType
+      end
+  end.
+% check_rt_call_info(MFA) ->
+%   case runtime_server_running() of 
+%     false -> none;
+%     true ->
+%       case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+%         not_found -> none;
+%         {ok, {ArgTypes, _}} -> ArgTypes
+%       end
+%   end.
 
 runtime_server_running() ->
   lists:member(runtime_type_server, erlang:registered()).

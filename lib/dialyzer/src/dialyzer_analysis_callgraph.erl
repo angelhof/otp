@@ -153,6 +153,31 @@ analysis_start(Parent, Analysis, LegalWarnings) ->
     catch
       throw:{error, _ErrorMsg} = Error -> exit(Error)
     end,
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%  
+  case lists:member(runtime_type_server, erlang:registered()) of 
+    false -> ok;
+    true ->
+      Contracts = dict:to_list(dialyzer_codeserver:get_contracts(NewCServer)),
+      lists:foreach(
+        fun({MFA, Con}) ->
+          {_Filename, #contract{contracts=ConList} = _Con1, _} = Con,
+          case ConList of
+            [] -> ok;
+            [{Signature,_}|_] -> 
+              Args = erl_types:t_fun_args(Signature),
+              Range = erl_types:t_fun_range(Signature),
+              hipe_runtime_type_server:add_mfa(runtime_type_server, {MFA, {Args, Range}})
+              % io:format(standard_error, "~p: ~p -> ~p~n", [MFA, Args, Range])
+          end
+        end, Contracts)
+      
+
+      % case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+      %   not_found -> none;
+      %   {ok, {ArgTypes, _}} -> ArgTypes
+      % end
+  end,
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   dump_callgraph(Callgraph, State, Analysis),
   %% Remove all old versions of the files being analyzed
   AllNodes = dialyzer_callgraph:all_nodes(Callgraph),

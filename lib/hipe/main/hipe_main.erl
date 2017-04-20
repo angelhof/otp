@@ -283,7 +283,7 @@ icode_ssa_type(IcodeSSA, MFA, Options, Servers) ->
       AnnIcode3 = icode_range_analysis(AnnIcode2, MFA, Options, Servers),
       AnnIcode4 = icode_eliminate_safe_calls(AnnIcode3, Options),
       pp(AnnIcode4, MFA, icode, pp_range_icode, Options, Servers),
-      % io:format("With annots: ~p~n", [AnnIcode4]),
+      % io:format("mfa: ~p, With annots: ~p~n", [MFA, AnnIcode4]),
       hipe_icode_type:unannotate_cfg(AnnIcode4)
   end.
 

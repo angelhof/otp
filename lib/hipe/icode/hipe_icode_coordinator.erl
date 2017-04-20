@@ -272,7 +272,9 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
             case check_rt_return_info(MFA)  of
               none -> Ans;
               RtAns -> 
-                {_, Res} = Mod:update__info([RtAns], Ans),
+                % {_, Res} = Mod:update__info([RtAns], Ans),
+                Res = lists:zipwith(fun(A,B) -> erl_types:t_inf(A,B) end, [RtAns], Ans),
+                % io:format("Return: ~p -> Runtype: ~p, Stattype:~p~n", [MFA, Res, Ans]),
                 Res
             end;
           _ ->
@@ -298,7 +300,9 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
             case check_rt_call_info(MFA) of
               none -> Ans;
               RtAns -> 
-                {_, Res} = Mod:update__info(RtAns, Ans),
+                % {_, Res} = Mod:update__info(RtAns, Ans),
+                Res = lists:zipwith(fun(A,B) -> erl_types:t_inf(A,B) end, RtAns, Ans),
+                % io:format("Call: ~p -> ~n\tRuntype: ~p, ~n\tStattype:~p~n", [MFA, Res, Ans]),
                 Res
             end;
           _ ->

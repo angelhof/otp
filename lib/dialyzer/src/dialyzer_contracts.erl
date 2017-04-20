@@ -439,9 +439,9 @@ insert_constraints([], Map) -> Map.
         contracts().
 
 store_tmp_contract(MFA, FileLine, {TypeSpec, Xtra}, SpecMap, RecordsDict) ->
-  %% io:format("contract from form: ~p\n", [TypeSpec]),
+  % io:format("contract from form: ~p\n", [TypeSpec]),
   TmpContract = contract_from_form(TypeSpec, MFA, RecordsDict, FileLine),
-  %% io:format("contract: ~p\n", [TmpContract]),
+  % io:format("contract: ~p\n", [TmpContract]),
   maps:put(MFA, {FileLine, TmpContract, Xtra}, SpecMap).
 
 contract_from_form(Forms, MFA, RecDict, FileLine) ->
