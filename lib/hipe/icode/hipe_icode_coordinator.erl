@@ -298,11 +298,13 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
         case Mod of
           hipe_icode_type -> 
             case check_rt_call_info(MFA) of
-              none -> Ans;
+              none -> 
+                % io:format("Call: ~p -> ~n\tStattype:~p~n", [MFA, Ans]),
+                Ans;
               RtAns -> 
                 % {_, Res} = Mod:update__info(RtAns, Ans),
                 Res = lists:zipwith(fun(A,B) -> erl_types:t_inf(A,B) end, RtAns, Ans),
-                % io:format("Call: ~p -> ~n\tRuntype: ~p, ~n\tStattype:~p~n", [MFA, Res, Ans]),
+                % io:format("Call: ~p -> ~n\tRuntype: ~p, ~n\tStattype:~p~n", [MFA, RtAns, Ans]),
                 Res
             end;
           _ ->

@@ -410,6 +410,7 @@ do_enter(I, Info, State, LookupFun) ->
     case hipe_icode:enter_type(I) of
       local ->
 	MFA = hipe_icode:enter_fun(I),
+  % io:format("~p -> Types: ~p~n",[MFA,ArgTypes]),
   Ret = LookupFun(MFA,ArgTypes),
   % io:format("~p -> Return: ~p~n", [MFA, Ret]),
   Ret;

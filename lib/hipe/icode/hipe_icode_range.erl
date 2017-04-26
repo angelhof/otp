@@ -1081,6 +1081,7 @@ analyse_call_or_enter_fun(Fun, Args, CallType, LookupFun) ->
       case CallType of
 	local ->
 	  Range = LookupFun(MFA, get_range_from_args(Args)),
+    % io:format("~p -> ~p~n", [MFA, get_range_from_args(Args)]),
 	  case range__is_none(Range) of
 	    true ->
 	      throw(none_range);
