@@ -58,7 +58,8 @@ start(#options{analysis_type = AnalysisType} = Options) ->
     plt_build  -> build_plt(Options);
     plt_add    -> add_to_plt(Options);
     plt_remove -> remove_from_plt(Options);
-    succ_typings -> do_analysis(Options)
+    succ_typings -> do_analysis(Options);
+    return_specs -> do_analysis(Options)
   end.
 
 %%--------------------------------------------------------------------
@@ -315,7 +316,8 @@ report_analysis_start(#options{analysis_type = Type,
 	    false -> io:format("Removing information from ~s to ~s...", 
 			       [InitPlt, OutputPlt])
 	  end;
-	succ_typings -> io:format("Proceeding with analysis...")
+	succ_typings -> io:format("Proceeding with analysis...");
+  return_specs -> ok
       end
   end.
 
@@ -410,7 +412,8 @@ convert_analysis_type(plt_build, true)   -> succ_typings;
 convert_analysis_type(plt_build, false)  -> plt_build;
 convert_analysis_type(plt_remove, true)  -> succ_typings;
 convert_analysis_type(plt_remove, false) -> plt_build;
-convert_analysis_type(succ_typings, _)   -> succ_typings.
+convert_analysis_type(succ_typings, _)   -> succ_typings;
+convert_analysis_type(return_specs, _)   -> return_specs.
 
 %%--------------------------------------------------------------------
 
@@ -637,6 +640,8 @@ cl_loop(State, LogCache) ->
       cl_loop(NewState, LogCache);
     {BackendPid, done, NewMiniPlt, _NewDocPlt} ->
       return_value(State, NewMiniPlt);
+    {BackendPid, done_types, NewMiniPlt, _NewDocPlt} ->
+      return_types(State, NewMiniPlt);
     {BackendPid, ext_calls, ExtCalls} ->
       cl_loop(State#cl_state{external_calls = ExtCalls}, LogCache);
     {BackendPid, ext_types, ExtTypes} ->
@@ -651,7 +656,7 @@ cl_loop(State, LogCache) ->
       Msg = failed_anal_msg(io_lib:format("~p", [Reason]), LogCache),
       cl_error(State, Msg);
     _Other ->
-      %% io:format("Received ~p\n", [_Other]),
+      % io:format("Received ~p\n", [_Other]),
       cl_loop(State, LogCache)
   end.
 
@@ -692,6 +697,22 @@ cl_error(State, Msg) ->
   maybe_close_output_file(State),
   throw({dialyzer_error, lists:flatten(Msg)}).
 
+return_types(#cl_state{code_server = CodeServer},
+       MiniPlt) -> 
+  %% Delete the codeserver if it still exists
+  case CodeServer =:= none of
+    true ->
+      ok;
+    false ->
+      dialyzer_codeserver:delete(CodeServer)
+  end,
+  ResultPlt = dialyzer_plt:restore_full_plt(MiniPlt),
+  Contracts = dict:to_list(dialyzer_plt:get_contracts(ResultPlt)),
+  [{MFA, 
+    {dialyzer_contracts:get_contract_args(Con),
+     dialyzer_contracts:get_contract_return(Con)}} 
+      || {MFA, {_F, Con, _L}} <- Contracts].
+  
 return_value(State = #cl_state{code_server = CodeServer,
                                erlang_mode = ErlangMode,
 			       mod_deps = ModDeps,

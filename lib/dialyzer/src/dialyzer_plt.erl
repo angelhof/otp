@@ -33,7 +33,8 @@
 	 get_default_plt/0,
          get_module_types/2,
          get_exported_types/1,
-	 insert_list/2,
+	 get_contracts/1,
+   insert_list/2,
 	 insert_contract_list/2,
 	 insert_callbacks/2,
 	 insert_types/2,
@@ -209,6 +210,10 @@ get_module_types(#plt{types = Types}, M) when is_atom(M) ->
 
 get_exported_types(#plt{exported_types = ExpTypes}) ->
   ExpTypes.
+
+-spec get_contracts(plt()) -> dict:dict().
+get_contracts(#plt{contracts = Contracts}) ->
+  Contracts. 
 
 -type mfa_types() :: {mfa(), erl_types:erl_type(), [erl_types:erl_type()]}.
 

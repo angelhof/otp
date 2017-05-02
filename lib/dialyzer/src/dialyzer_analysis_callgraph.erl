@@ -97,6 +97,9 @@ loop(#server_state{parent = Parent} = State,
     {AnalPid, done, MiniPlt, DocPlt} ->
       send_ext_calls(Parent, ExtCalls),
       send_analysis_done(Parent, MiniPlt, DocPlt);
+    {AnalPid, done_types, MiniPlt, DocPlt} ->
+      send_ext_calls(Parent, ExtCalls),
+      send_analysis_done_types(Parent, MiniPlt, DocPlt);
     {AnalPid, ext_calls, NewExtCalls} ->
       loop(State, Analysis, NewExtCalls);
     {AnalPid, ext_types, ExtTypes} ->
@@ -153,32 +156,53 @@ analysis_start(Parent, Analysis, LegalWarnings) ->
     catch
       throw:{error, _ErrorMsg} = Error -> exit(Error)
     end,
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%  
-  case lists:member(runtime_type_server, erlang:registered()) of 
-    false -> ok;
-    true ->
-      Contracts = dict:to_list(dialyzer_codeserver:get_contracts(NewCServer)),
-      lists:foreach(
-        fun({MFA, Con}) ->
-          {_Filename, #contract{contracts=ConList} = _Con1, _} = Con,
-          case ConList of
-            [] -> ok;
-            [{Signature,_}|_] -> 
-              Args = erl_types:t_fun_args(Signature),
-              Range = erl_types:t_fun_range(Signature),
-              hipe_runtime_type_server:add_mfa(runtime_type_server, {MFA, {Args, Range}})
-              % io:format(standard_error, "~p: ~p -> ~p~n", [MFA, Args, Range])
-          end
-        end, Contracts)
-      
-
-      % case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
-      %   not_found -> none;
-      %   {ok, {ArgTypes, _}} -> ArgTypes
-      % end
-  end,
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   dump_callgraph(Callgraph, State, Analysis),
+  case Analysis#analysis.type of
+    return_specs ->
+      return_types_before_analysis(Parent, NewCServer, State);
+    _ ->
+      analysis_cont(Parent, Analysis, Callgraph, State, Plt, NewCServer)
+  end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+return_types_before_analysis(Parent, NewCServer, State) -> 
+  #analysis_state{plt = MiniPlt0,
+                  doc_plt = DocPlt} = State,    
+  Contracts = dict:to_list(dialyzer_codeserver:get_contracts(NewCServer)),
+  % case lists:member(runtime_type_server, erlang:registered()) of 
+  %   false -> ok;
+  %   true ->
+  %     lists:foreach(
+  %       fun({MFA, Con}) ->
+  %         {_Filename, #contract{contracts=ConList} = _Con1, _} = Con,
+  %         case ConList of
+  %           [] -> ok;
+  %           [{Signature,_}|_] -> 
+  %             Args = erl_types:t_fun_args(Signature),
+  %             Range = erl_types:t_fun_range(Signature),
+  %             hipe_runtime_type_server:add_mfa(runtime_type_server, {MFA, {Args, Range}})
+  %             % io:format(standard_error, "~p: ~p -> ~p~n", [MFA, Args, Range])
+  %         end
+  %       end, Contracts)
+  % end,
+  MiniPlt1 = dialyzer_plt:insert_contract_list(MiniPlt0, Contracts),
+  MiniPlt = dialyzer_plt:get_mini_plt(MiniPlt1),
+  %% JUST DEBUG
+  % io:format("Callbacks: ~p~n", [dialyzer_codeserver:get_callbacks(NewCServer)]),
+  % io:format("Exported Types: ~p~n", [dialyzer_codeserver:get_exported_types(NewCServer)]),
+  % io:format("Exports: ~p~n", [dialyzer_codeserver:get_exports(NewCServer)]),
+  % io:format("Records table: ~p~n", [dialyzer_codeserver:get_records_table(NewCServer)]),
+  % io:format("Contracts: ~p~n", [dialyzer_codeserver:get_contracts(NewCServer)]),
+  % MiniPlt1 = dialyzer_plt:get_mini_plt(MiniPlt0),
+  % {_Codeserver, MiniPlt} = move_data(NewCServer, MiniPlt1),
+  %% TODO:
+  %% Find out what this does and if this is useful 
+  rcv_and_send_ext_types(Parent),
+  send_analysis_done_types(Parent, MiniPlt, DocPlt).
+
+%% TODO: Finc out which arguments does it need
+analysis_cont(Parent, Analysis, Callgraph, State, Plt, NewCServer) ->
   %% Remove all old versions of the files being analyzed
   AllNodes = dialyzer_callgraph:all_nodes(Callgraph),
   Plt1_a = dialyzer_plt:delete_list(Plt, AllNodes),
@@ -204,6 +228,9 @@ analysis_start(Parent, Analysis, LegalWarnings) ->
   send_codeserver_plt(Parent, Codeserver, DummyPlt),
   MiniPlt4 = dialyzer_plt:delete_list(MiniPlt3, NonExportsList),
   send_analysis_done(Parent, MiniPlt4, DocPlt).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 
 contracts_and_records(CodeServer) ->
   Fun = contrs_and_recs(CodeServer),
@@ -615,6 +642,11 @@ is_ok_tag(Tag, {_F, _L, MorMFA}, Codeserver) ->
 send_analysis_done(Parent, MiniPlt, DocPlt) ->
   ok = dialyzer_plt:give_away(MiniPlt, Parent),
   Parent ! {self(), done, MiniPlt, DocPlt},
+  ok.
+
+send_analysis_done_types(Parent, MiniPlt, DocPlt) ->
+  ok = dialyzer_plt:give_away(MiniPlt, Parent),
+  Parent ! {self(), done_types, MiniPlt, DocPlt},
   ok.
 
 send_ext_calls(_Parent, none) ->
