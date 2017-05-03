@@ -89,7 +89,7 @@
                    exported_types :: ets:tid()
 		  }).
 
--opaque plt() :: #plt{} | #mini_plt{}.
+-opaque plt() :: #plt{} | #mini_plt{} | 'undefined'.
 
 -include("dialyzer.hrl").
 
