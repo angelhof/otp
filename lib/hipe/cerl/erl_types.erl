@@ -5203,7 +5203,7 @@ cache_put(Key, Type, DeltaL, #cache{types = Types} = Cache) ->
   NewTypes = maps:put(Key, {Type, DeltaL}, Types),
   Cache#cache{types = NewTypes}.
 
--spec t_var_names([erl_type()]) -> [atom()].
+-spec t_var_names([parse_form()]) -> [atom()].
 
 t_var_names([{var, _, Name}|L]) when L =/= '_' ->
   [Name|t_var_names(L)];
