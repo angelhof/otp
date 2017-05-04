@@ -280,7 +280,6 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
           _ ->
             Ans
         end,
-      % TODO: Return the sup of runtimeand and ans
       Pid ! {Ref, Ans1},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {get_call, MFA, Cfg, Pid, Ref} ->
@@ -310,7 +309,6 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
           _ ->
             Ans
         end,
-      % TODO: Return the sup of runtimeand and ans
       Pid ! {Ref, Ans1},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {set_escaping, MFA} ->

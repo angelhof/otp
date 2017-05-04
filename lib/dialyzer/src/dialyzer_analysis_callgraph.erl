@@ -201,7 +201,6 @@ return_types_before_analysis(Parent, NewCServer, State) ->
   rcv_and_send_ext_types(Parent),
   send_analysis_done_types(Parent, MiniPlt, DocPlt).
 
-%% TODO: Finc out which arguments does it need
 analysis_cont(Parent, Analysis, Callgraph, State, Plt, NewCServer) ->
   %% Remove all old versions of the files being analyzed
   AllNodes = dialyzer_callgraph:all_nodes(Callgraph),
@@ -339,6 +338,7 @@ compile_and_store(Files, #analysis_state{codeserver = CServer,
                     dict:new(), Files),
       check_for_duplicate_modules(ModDict);
     false ->
+      io:format("Failed: ~p~n", [Failed]),
       Msg = io_lib:format("Could not scan the following file(s):~n~s",
       			  [[Reason || {_Filename, Reason} <- Failed]]),
       exit({error, Msg})

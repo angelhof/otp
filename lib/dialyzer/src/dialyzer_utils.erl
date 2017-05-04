@@ -253,6 +253,7 @@ add_new_type(TypeOrOpaque, Name, TypeForm, ArgForms, Module, FN,
       Msg = flat_format("Type ~s/~w already defined\n", [Name, Arity]),
       throw({error, Msg});
     false ->
+      % io:format("ArgForms: ~p~n", [ArgForms]),
       try erl_types:t_var_names(ArgForms) of
         ArgNames ->
 	  maps:put({TypeOrOpaque, Name, Arity},
