@@ -20,36 +20,36 @@
 
 %%
 
--module(x509_test).
+ -module(x509_test).
 
--include_lib("public_key/include/public_key.hrl").
+ -include_lib("public_key/include/public_key.hrl").
 
--export([gen_test_certs/1, gen_pem_config_files/4]).
+ -export([gen_test_certs/1, gen_pem_config_files/3]).
 
-gen_test_certs(Opts) ->
-    SRootKey = gen_key(proplists:get_value(server_key_gen, Opts)),
-    CRootKey = gen_key(proplists:get_value(client_key_gen, Opts)),
-    ServerRoot = root_cert("server", SRootKey, Opts),
-    ClientRoot = root_cert("client", CRootKey, Opts),
-    [{ServerCert, ServerKey} | ServerCAsKeys] = config(server, ServerRoot, SRootKey, Opts),
-    [{ClientCert, ClientKey} | ClientCAsKeys] = config(client, ClientRoot, CRootKey, Opts),
-    ServerCAs = ca_config(ClientRoot, ServerCAsKeys),
-    ClientCAs = ca_config(ServerRoot, ClientCAsKeys),
-    [{server_config, [{cert, ServerCert}, {key, ServerKey}, {cacerts, ServerCAs}]}, 
-     {client_config, [{cert, ClientCert}, {key, ClientKey}, {cacerts, ClientCAs}]}].
+ gen_test_certs(Opts) ->
+     SRootKey = gen_key(proplists:get_value(server_key_gen, Opts)),
+     CRootKey = gen_key(proplists:get_value(client_key_gen, Opts)),
+     ServerRoot = root_cert("server", SRootKey, Opts),
+     ClientRoot = root_cert("client", CRootKey, Opts),
+     [{ServerCert, ServerKey} | ServerCAsKeys] = config(server, ServerRoot, SRootKey, Opts),
+     [{ClientCert, ClientKey} | ClientCAsKeys] = config(client, ClientRoot, CRootKey, Opts),
+     ServerCAs = ca_config(ClientRoot, ServerCAsKeys),
+     ClientCAs = ca_config(ServerRoot, ClientCAsKeys),
+     [{server_config, [{cert, ServerCert}, {key, ServerKey}, {cacerts, ServerCAs}]}, 
+      {client_config, [{cert, ClientCert}, {key, ClientKey}, {cacerts, ClientCAs}]}].
 
-gen_pem_config_files(GenCertData, CertFileBase, KeyFileBase, CAFileBase) ->
+gen_pem_config_files(GenCertData, ClientBase, ServerBase) ->
     ServerConf = proplists:get_value(server_config, GenCertData),
     ClientConf = proplists:get_value(client_config, GenCertData),
     
-    ServerCaCertFile = filename:join("server_", CAFileBase),
-    ServerCertFile = filename:join("server_", CertFileBase),
-    ServerKeyFile = filename:join("server_", KeyFileBase),
+    ServerCaCertFile = ServerBase ++ "_server_cacerts.pem",
+    ServerCertFile = ServerBase ++ "_server_cert.pem",
+    ServerKeyFile = ServerBase ++ "_server_key.pem",
     
-    ClientCaCertFile = filename:join("client_", CAFileBase),
-    ClientCertFile = filename:join("client_", CertFileBase),
-    ClientKeyFile = filename:join("client_", KeyFileBase),
-    
+    ClientCaCertFile = ClientBase ++ "_client_cacerts.pem",
+    ClientCertFile =  ClientBase ++ "_client_cert.pem",
+    ClientKeyFile = ClientBase ++ "_client_key.pem",
+
     do_gen_pem_config_files(ServerConf,
                             ServerCertFile,
                             ServerKeyFile,
@@ -58,59 +58,60 @@ gen_pem_config_files(GenCertData, CertFileBase, KeyFileBase, CAFileBase) ->
                             ClientCertFile,
                             ClientKeyFile,
                             ClientCaCertFile),
-    [{server_config, [{certfile, ServerCertFile}, {keyfile, ServerKeyFile}, {cacertfile, ServerCaCertFile}]}, 
-     {client_config, [{certfile, ClientCertFile}, {keyfile, ClientKeyFile}, {cacertfile, ClientCaCertFile}]}].
+    [{server_config, [{certfile, ServerCertFile}, 
+                      {keyfile, ServerKeyFile}, {cacertfile, ServerCaCertFile}]}, 
+     {client_config, [{certfile, ClientCertFile}, 
+                      {keyfile, ClientKeyFile}, {cacertfile, ClientCaCertFile}]}].
 
-    
-do_gen_pem_config_files(Config, CertFile, KeyFile, CAFile) ->
-    CAs = proplists:get_value(cacerts, Config),
-    Cert = proplists:get_value(cert, Config),
-    Key = proplists:get_value(key, Config),
-    der_to_pem(CertFile, [cert_entry(Cert)]),
-    der_to_pem(KeyFile, [key_entry(Key)]),
-    der_to_pem(CAFile, ca_entries(CAs)).
-   
-cert_entry(Cert) ->
-    {'Certificate', Cert, not_encrypted}.
 
-key_entry(Key = #'RSAPrivateKey'{}) ->
-    Der = public_key:der_encode('RSAPrivateKey', Key),
-    {'RSAPrivateKey', Der, not_encrypted};
-key_entry(Key = #'DSAPrivateKey'{}) ->
-    Der =  public_key:der_encode('DSAPrivateKey', Key),
-    {'DSAPrivateKey', Der, not_encrypted};
-key_entry(Key = #'ECPrivateKey'{}) ->
-    Der =  public_key:der_encode('ECPrivateKey', Key),
-    {'ECPrivateKey', Der, not_encrypted}.
+ do_gen_pem_config_files(Config, CertFile, KeyFile, CAFile) ->
+     CAs = proplists:get_value(cacerts, Config),
+     Cert = proplists:get_value(cert, Config),
+     Key = proplists:get_value(key, Config),
+     der_to_pem(CertFile, [cert_entry(Cert)]),
+     der_to_pem(KeyFile, [key_entry(Key)]),
+     der_to_pem(CAFile, ca_entries(CAs)).
 
-ca_entries(CAs) ->
-    [{'Certificate', CACert, not_encrypted} || CACert <- CAs].
+ cert_entry(Cert) ->
+     {'Certificate', Cert, not_encrypted}.
 
-gen_key(KeyGen) ->
-    case is_key(KeyGen) of
-        true ->
-            KeyGen;
-        false ->
-            public_key:generate_key(KeyGen)
-    end.
+ key_entry(Key = #'RSAPrivateKey'{}) ->
+     Der = public_key:der_encode('RSAPrivateKey', Key),
+     {'RSAPrivateKey', Der, not_encrypted};
+ key_entry(Key = #'DSAPrivateKey'{}) ->
+     Der =  public_key:der_encode('DSAPrivateKey', Key),
+     {'DSAPrivateKey', Der, not_encrypted};
+ key_entry(Key = #'ECPrivateKey'{}) ->
+     Der =  public_key:der_encode('ECPrivateKey', Key),
+     {'ECPrivateKey', Der, not_encrypted}.
+
+ ca_entries(CAs) ->
+     [{'Certificate', CACert, not_encrypted} || CACert <- CAs].
+
+ gen_key(KeyGen) ->
+     case is_key(KeyGen) of
+         true ->
+             KeyGen;
+         false ->
+             public_key:generate_key(KeyGen)
+     end.
 
 root_cert(Role, PrivKey, Opts) ->
-    TBS = cert_template(),
-    Issuer = issuer("root", Role, " ROOT CA"),
-    OTPTBS = TBS#'OTPTBSCertificate'{
-               signature = sign_algorithm(PrivKey, Opts),
-               issuer = Issuer,
-               validity = validity(Opts),  
-               subject = Issuer,
-               subjectPublicKeyInfo = public_key(PrivKey),
-               extensions = extensions(Opts)
-              },
-    public_key:pkix_sign(OTPTBS, PrivKey).
+     TBS = cert_template(),
+     Issuer = issuer("root", Role, " ROOT CA"),
+     OTPTBS = TBS#'OTPTBSCertificate'{
+                signature = sign_algorithm(PrivKey, Opts),
+                issuer = Issuer,
+                validity = validity(Opts),  
+                subject = Issuer,
+                subjectPublicKeyInfo = public_key(PrivKey),
+                extensions = extensions(ca, Opts)
+               },
+     public_key:pkix_sign(OTPTBS, PrivKey).
 
 config(Role, Root, Key, Opts) ->
-    KeyGenOpt = list_to_atom(atom_to_list(Role) ++ "key_gen_chain"),
-    KeyGens = proplists:get_value(KeyGenOpt, Opts, [{namedCurve, hd(tls_v1:ecc_curves(0))}, 
-                                                    {namedCurve, hd(tls_v1:ecc_curves(0))}]),
+    KeyGenOpt = list_to_atom(atom_to_list(Role) ++ "_key_gen_chain"),
+    KeyGens = proplists:get_value(KeyGenOpt, Opts, default_key_gen()),
     Keys = lists:map(fun gen_key/1, KeyGens),
     cert_chain(Role, Root, Key, Opts, Keys).
 
@@ -174,32 +175,31 @@ validity(Opts) ->
     #'Validity'{notBefore={generalTime, Format(DefFrom)},
 		notAfter ={generalTime, Format(DefTo)}}.
 
-extensions(Opts) ->
-    case proplists:get_value(extensions, Opts, []) of
-	false -> 
-	    asn1_NOVALUE;
-	Exts  -> 
-	    lists:flatten([extension(Ext) || Ext <- default_extensions(Exts)])
-    end.
+extensions(Type, Opts) ->
+    Exts  = proplists:get_value(extensions, Opts, []),
+    lists:flatten([extension(Ext) || Ext <- default_extensions(Type, Exts)]).
 
-default_extensions(Exts) ->
-    Def = [{key_usage,undefined}, 
-	   {subject_altname, undefined},
-	   {issuer_altname, undefined},
-	   {basic_constraints, default},
-	   {name_constraints, undefined},
-	   {policy_constraints, undefined},
-	   {ext_key_usage, undefined},
-	   {inhibit_any, undefined},
-	   {auth_key_id, undefined},
-	   {subject_key_id, undefined},
-	   {policy_mapping, undefined}],
+%% Common extension: name_constraints, policy_constraints, ext_key_usage, inhibit_any, 
+%% auth_key_id, subject_key_id, policy_mapping,
+
+default_extensions(ca, Exts) ->
+    Def = [{key_usage,  [keyCertSign, cRLSign]}, 
+	   {basic_constraints, default}],
+    add_default_extensions(Def, Exts);
+
+default_extensions(peer, Exts) ->
+    Def = [{key_usage, [digitalSignature, keyAgreement]}],
+    add_default_extensions(Def, Exts).
+    
+add_default_extensions(Def, Exts) ->
     Filter = fun({Key, _}, D) -> 
-                     lists:keydelete(Key, 1, D) 
+                     lists:keydelete(Key, 1, D); 
+                ({Key, _, _}, D) -> 
+                     lists:keydelete(Key, 1, D)
              end,
     Exts ++ lists:foldl(Filter, Def, Exts).
-       	
-extension({_, undefined}) -> 
+
+extension({_, undefined}) ->
     [];
 extension({basic_constraints, Data}) ->
     case Data of
@@ -217,6 +217,17 @@ extension({basic_constraints, Data}) ->
 	    #'Extension'{extnID = ?'id-ce-basicConstraints',
 			 extnValue = Data}
     end;
+extension({auth_key_id, {Oid, Issuer, SNr}}) ->
+    #'Extension'{extnID = ?'id-ce-authorityKeyIdentifier',
+                 extnValue = #'AuthorityKeyIdentifier'{
+                                keyIdentifier = Oid,	    
+                                authorityCertIssuer = Issuer,     
+                                authorityCertSerialNumber = SNr},
+                 critical = false};
+extension({key_usage, Value}) ->
+    #'Extension'{extnID = ?'id-ce-keyUsage',
+                 extnValue = Value,
+                 critical = false};
 extension({Id, Data, Critical}) ->
     #'Extension'{extnID = Id, extnValue = Data, critical = Critical}.
 
@@ -276,23 +287,31 @@ cert_chain(Role, Root, RootKey, Opts, Keys) ->
     cert_chain(Role, Root, RootKey, Opts, Keys, 0, []).
 
 cert_chain(Role, IssuerCert, IssuerKey, Opts, [Key], _, Acc) ->
-    Cert = cert(Role, public_key:pkix_decode_cert(IssuerCert, otp), IssuerKey, Key, "admin", " Peer cert", Opts),
+    PeerOpts = list_to_atom(atom_to_list(Role) ++ "_peer_opts"),
+    Cert = cert(Role, public_key:pkix_decode_cert(IssuerCert, otp), 
+                IssuerKey, Key, "admin", " Peer cert", Opts, PeerOpts, peer),
     [{Cert, Key}, {IssuerCert, IssuerKey} | Acc];
 cert_chain(Role, IssuerCert, IssuerKey, Opts, [Key | Keys], N, Acc) ->
+    CAOpts = list_to_atom(atom_to_list(Role) ++ "_ca_" ++ integer_to_list(N)),
     Cert = cert(Role, public_key:pkix_decode_cert(IssuerCert, otp), IssuerKey, Key, "webadmin", 
-                " Intermidiate CA " ++ integer_to_list(N), Opts),
+                " Intermidiate CA " ++ integer_to_list(N), Opts, CAOpts, ca),
     cert_chain(Role, Cert, Key, Opts, Keys, N+1, [{IssuerCert, IssuerKey} | Acc]).
         
-cert(Role, #'OTPCertificate'{tbsCertificate = #'OTPTBSCertificate'{subject = Issuer}}, 
-     PrivKey, Key, Contact, Name, Opts) ->
+cert(Role, #'OTPCertificate'{tbsCertificate = #'OTPTBSCertificate'{subject = Issuer,
+                                                                   serialNumber = SNr
+                                                                  }}, 
+     PrivKey, Key, Contact, Name, Opts, CertOptsName, Type) ->
+    CertOpts = proplists:get_value(CertOptsName, Opts, []),
     TBS = cert_template(),         
     OTPTBS = TBS#'OTPTBSCertificate'{
                signature = sign_algorithm(PrivKey, Opts),
                issuer =  Issuer,
-               validity = validity(Opts),  
+               validity = validity(CertOpts),  
                subject = subject(Contact, atom_to_list(Role) ++ Name),
                subjectPublicKeyInfo = public_key(Key),
-               extensions = extensions(Opts)
+               extensions = extensions(Type, 
+                                       add_default_extensions([{auth_key_id, {auth_key_oid(Role), Issuer, SNr}}],
+                                                              CertOpts))
               },
     public_key:pkix_sign(OTPTBS, PrivKey).
 
@@ -308,3 +327,17 @@ is_key(_) ->
 der_to_pem(File, Entries) ->
     PemBin = public_key:pem_encode(Entries),
     file:write_file(File, PemBin).
+
+default_key_gen() ->
+    case tls_v1:ecc_curves(0) of
+        [] ->
+            [{rsa, 2048, 17}, {rsa, 2048, 17}];
+        [_|_] ->
+            [{namedCurve, hd(tls_v1:ecc_curves(0))},
+             {namedCurve, hd(tls_v1:ecc_curves(0))}]
+    end.
+
+auth_key_oid(server) ->
+    ?'id-kp-serverAuth';
+auth_key_oid(client) ->
+    ?'id-kp-clientAuth'.

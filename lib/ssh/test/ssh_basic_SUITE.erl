@@ -46,7 +46,8 @@
 	 exec_key_differs2/1,
 	 exec_key_differs3/1,
 	 exec_key_differs_fail/1,
-	 idle_time/1,
+	 idle_time_client/1,
+	 idle_time_server/1,
 	 inet6_option/1,
 	 inet_option/1,
 	 internal_error/1,
@@ -139,7 +140,7 @@ basic_tests() ->
      exec, exec_compressed, 
      shell, shell_no_unicode, shell_unicode_string,
      cli, known_hosts, 
-     idle_time, openssh_zlib_basic_test, 
+     idle_time_client, idle_time_server, openssh_zlib_basic_test, 
      misc_ssh_options, inet_option, inet6_option].
 
 
@@ -522,8 +523,8 @@ exec_compressed(Config) when is_list(Config) ->
     end.
 
 %%--------------------------------------------------------------------
-%%% Idle timeout test
-idle_time(Config) ->
+%%% Idle timeout test, client 
+idle_time_client(Config) ->
     SystemDir = filename:join(proplists:get_value(priv_dir, Config), system),
     UserDir = proplists:get_value(priv_dir, Config),
 
@@ -535,6 +536,28 @@ idle_time(Config) ->
 					  {user_dir, UserDir},
 					  {user_interaction, false},
 					  {idle_time, 2000}]),
+    {ok, Id} = ssh_connection:session_channel(ConnectionRef, 1000),
+    ssh_connection:close(ConnectionRef, Id),
+    receive
+    after 10000 ->
+	    {error, closed} = ssh_connection:session_channel(ConnectionRef, 1000)
+    end,
+    ssh:stop_daemon(Pid).
+
+%%--------------------------------------------------------------------
+%%% Idle timeout test, server
+idle_time_server(Config) ->
+    SystemDir = filename:join(proplists:get_value(priv_dir, Config), system),
+    UserDir = proplists:get_value(priv_dir, Config),
+
+    {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SystemDir},
+					     {user_dir, UserDir},
+                                             {idle_time, 2000},
+					     {failfun, fun ssh_test_lib:failfun/2}]),
+    ConnectionRef =
+	ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
+					  {user_dir, UserDir},
+					  {user_interaction, false}]),
     {ok, Id} = ssh_connection:session_channel(ConnectionRef, 1000),
     ssh_connection:close(ConnectionRef, Id),
     receive
@@ -628,6 +651,7 @@ exec_key_differs_fail(Config) when is_list(Config) ->
 
     IO = ssh_test_lib:start_io_server(),
     ssh_test_lib:start_shell(Port, IO, [{user_dir,UserDir},
+                                        {recv_ext_info, false},
 					{preferred_algorithms,[{public_key,['ssh-rsa']}]},
 					{pref_public_key_algs,['ssh-dss']}]),
     receive
@@ -719,7 +743,8 @@ known_hosts(Config) when is_list(Config) ->
     Lines = string:tokens(binary_to_list(Binary), "\n"),
     [Line] = Lines,
     [HostAndIp, Alg, _KeyData] = string:tokens(Line, " "),
-    [Host, _Ip] = string:tokens(HostAndIp, ","),
+    [StoredHost, _Ip] = string:tokens(HostAndIp, ","),
+    true = ssh_test_lib:match_ip(StoredHost, Host),
     "ssh-" ++ _ = Alg,
     ssh:stop_daemon(Pid).
 %%--------------------------------------------------------------------
@@ -1342,13 +1367,25 @@ new_do_shell(IO, N, Ops=[{Order,Arg}|More]) ->
 	    ct:log("Skip newline ~p",[_X]),
 	    new_do_shell(IO, N, Ops);
 	
-	<<Pfx:PfxSize/binary,P1,"> ">> when (P1-$0)==N -> 
+	<<P1,"> ">> when (P1-$0)==N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"(",Pfx:PfxSize/binary,")",P1,"> ">> when (P1-$0)==N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"('",Pfx:PfxSize/binary,"')",P1,"> ">> when (P1-$0)==N -> 
 	    new_do_shell_prompt(IO, N, Order, Arg, More);
 
-	<<Pfx:PfxSize/binary,P1,P2,"> ">> when (P1-$0)*10 + (P2-$0) == N -> 
+	<<P1,P2,"> ">> when (P1-$0)*10 + (P2-$0) == N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"(",Pfx:PfxSize/binary,")",P1,P2,"> ">> when (P1-$0)*10 + (P2-$0) == N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"('",Pfx:PfxSize/binary,"')",P1,P2,"> ">> when (P1-$0)*10 + (P2-$0) == N -> 
 	    new_do_shell_prompt(IO, N, Order, Arg, More);
 
-	<<Pfx:PfxSize/binary,P1,P2,P3,"> ">> when (P1-$0)*100 + (P2-$0)*10 + (P3-$0) == N -> 
+	<<P1,P2,P3,"> ">> when (P1-$0)*100 + (P2-$0)*10 + (P3-$0) == N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"(",Pfx:PfxSize/binary,")",P1,P2,P3,"> ">> when (P1-$0)*100 + (P2-$0)*10 + (P3-$0) == N -> 
+	    new_do_shell_prompt(IO, N, Order, Arg, More);
+	<<"('",Pfx:PfxSize/binary,"')",P1,P2,P3,"> ">> when (P1-$0)*100 + (P2-$0)*10 + (P3-$0) == N -> 
 	    new_do_shell_prompt(IO, N, Order, Arg, More);
 
 	Err when element(1,Err)==error ->
@@ -1384,7 +1421,7 @@ prompt_prefix() ->
     case node() of
 	nonode@nohost -> <<>>;
 	Node -> list_to_binary(
-		  lists:concat(["(",Node,")"]))
+                  atom_to_list(Node))
     end.
 	    
 

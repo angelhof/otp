@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -229,8 +229,9 @@ server_loop(N0, Eval_0, Bs00, RT, Ds00, History0, Results0) ->
     {Eval_1,Bs0,Ds0,Prompt} = prompt(N, Eval_0, Bs00, RT, Ds00),
     {Res,Eval0} = get_command(Prompt, Eval_1, Bs0, RT, Ds0),
     case Res of 
-	{ok,Es0} ->
-            case expand_hist(Es0, N) of
+	{ok,Es0,XBs} ->
+            Es1 = lib:subst_values_for_vars(Es0, XBs),
+            case expand_hist(Es1, N) of
                 {ok,Es} ->
                     {V,Eval,Bs,Ds} = shell_cmd(Es, Eval0, Bs0, RT, Ds0, cmd),
                     {History,Results} = check_and_get_history_and_results(),
@@ -276,10 +277,10 @@ get_command(Prompt, Eval, Bs, RT, Ds) ->
         fun() ->
                 exit(
                   case
-                      io:scan_erl_exprs(group_leader(), Prompt, 1)
+                      io:scan_erl_exprs(group_leader(), Prompt, 1, [text])
                   of
                       {ok,Toks,_EndPos} ->
-                          erl_parse:parse_exprs(Toks);
+                          lib:extended_parse_exprs(Toks);
                       {eof,_EndPos} ->
                           eof;
                       {error,ErrorInfo,_EndPos} ->
@@ -967,10 +968,11 @@ local_func(f, [{var,_,Name}], Bs, _Shell, _RT, _Lf, _Ef) ->
     {value,ok,erl_eval:del_binding(Name, Bs)};
 local_func(f, [_Other], _Bs, _Shell, _RT, _Lf, _Ef) ->
     erlang:raise(error, function_clause, [{shell,f,1}]);
-local_func(rd, [{atom,_,RecName},RecDef0], Bs, _Shell, RT, _Lf, _Ef) ->
+local_func(rd, [{atom,_,RecName0},RecDef0], Bs, _Shell, RT, _Lf, _Ef) ->
     RecDef = expand_value(RecDef0),
     RDs = lists:flatten(erl_pp:expr(RecDef)),
-    Attr = lists:concat(["-record('", RecName, "',", RDs, ")."]),
+    RecName = io_lib:write_atom_as_latin1(RecName0),
+    Attr = lists:concat(["-record(", RecName, ",", RDs, ")."]),
     {ok, Tokens, _} = erl_scan:string(Attr),
     case erl_parse:parse_form(Tokens) of
         {ok,AttrForm} ->
@@ -1417,9 +1419,11 @@ columns() ->
         {ok,N} -> N;
         _ -> 80
     end.
+
 encoding() ->
     [{encoding, Encoding}] = enc(),
     Encoding.
+
 enc() ->
     case lists:keyfind(encoding, 1, io:getopts()) of
 	false -> [{encoding,latin1}]; % should never happen

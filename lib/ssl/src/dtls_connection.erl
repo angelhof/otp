@@ -250,7 +250,7 @@ init({call, From}, {start, Timeout},
 					Cache, CacheCb, Renegotiation, Cert),
 
     Version = Hello#client_hello.client_version,
-    HelloVersion = dtls_record:lowest_protocol_version(SslOpts#ssl_options.versions),
+    HelloVersion = dtls_record:hello_version(Version, SslOpts#ssl_options.versions),
     State1 = prepare_flight(State0#state{negotiated_version = Version}),
     {State2, Actions} = send_handshake(Hello, State1#state{negotiated_version = HelloVersion}),  
     State3 = State2#state{negotiated_version = Version, %% Requested version
@@ -263,9 +263,14 @@ init({call, From}, {start, Timeout},
     {Record, State} = next_record(State3),
     next_event(hello, Record, State, Actions);
 init({call, _} = Type, Event, #state{role = server, transport_cb = gen_udp} = State) ->
-    ssl_connection:init(Type, Event, 
-			State#state{flight_state = {retransmit, ?INITIAL_RETRANSMIT_TIMEOUT}},
-			?MODULE);
+    Result = ssl_connection:init(Type, Event, 
+                                 State#state{flight_state = {retransmit, ?INITIAL_RETRANSMIT_TIMEOUT},
+                                             protocol_specific = #{current_cookie_secret => dtls_v1:cookie_secret(), 
+                                                                   previous_cookie_secret => <<>>}},
+                                 ?MODULE),
+    erlang:send_after(dtls_v1:cookie_timeout(), self(), new_cookie_secret),
+    Result;
+                                     
 init({call, _} = Type, Event, #state{role = server} = State) ->
     %% I.E. DTLS over sctp
     ssl_connection:init(Type, Event, State#state{flight_state = reliable}, ?MODULE);
@@ -288,10 +293,10 @@ error(_, _, _) ->
 hello(internal, #client_hello{cookie = <<>>,
 			      client_version = Version} = Hello, #state{role = server,
 									transport_cb = Transport,
-									socket = Socket} = State0) ->
-    %% TODO: not hard code key
+									socket = Socket,
+                                                                        protocol_specific = #{current_cookie_secret := Secret}} = State0) ->
     {ok, {IP, Port}} = dtls_socket:peername(Transport, Socket),
-    Cookie = dtls_handshake:cookie(<<"secret">>, IP, Port, Hello),
+    Cookie = dtls_handshake:cookie(Secret, IP, Port, Hello),
     VerifyRequest = dtls_handshake:hello_verify_request(Cookie, Version),
     State1 = prepare_flight(State0#state{negotiated_version = Version}),
     {State2, Actions} = send_handshake(VerifyRequest, State1),
@@ -299,15 +304,21 @@ hello(internal, #client_hello{cookie = <<>>,
     next_event(hello, Record, State#state{tls_handshake_history = ssl_handshake:init_handshake_history()}, Actions);
 hello(internal, #client_hello{cookie = Cookie} = Hello, #state{role = server,
 							       transport_cb = Transport,
-							       socket = Socket} = State0) ->
+							       socket = Socket,
+                                                               protocol_specific = #{current_cookie_secret := Secret,
+                                                                                     previous_cookie_secret := PSecret}} = State0) ->
     {ok, {IP, Port}} = dtls_socket:peername(Transport, Socket),
-    %% TODO: not hard code key
-    case dtls_handshake:cookie(<<"secret">>, IP, Port, Hello) of
+    case dtls_handshake:cookie(Secret, IP, Port, Hello) of
 	Cookie ->
 	    handle_client_hello(Hello, State0);
 	_ ->
-	    %% Handle bad cookie as new cookie request RFC 6347 4.1.2
-	    hello(internal, Hello#client_hello{cookie = <<>>}, State0) 
+            case dtls_handshake:cookie(PSecret, IP, Port, Hello) of
+               	Cookie -> 
+                    handle_client_hello(Hello, State0);
+                _ ->
+                    %% Handle bad cookie as new cookie request RFC 6347 4.1.2
+                    hello(internal, Hello#client_hello{cookie = <<>>}, State0) 
+            end
     end;
 hello(internal, #hello_verify_request{cookie = Cookie}, #state{role = client,
 							       host = Host, port = Port, 
@@ -453,26 +464,45 @@ handle_info({Protocol, _, _, _, Data}, StateName,
 	    {stop, {shutdown, own_alert}}
     end;
 handle_info({CloseTag, Socket}, StateName,
-	    #state{socket = Socket, close_tag = CloseTag,
+	    #state{socket = Socket, 
+                   socket_options = #socket_options{active = Active},
+                   protocol_buffers = #protocol_buffers{dtls_cipher_texts = CTs},
+                   close_tag = CloseTag,
 		   negotiated_version = Version} = State) ->
     %% Note that as of DTLS 1.2 (TLS 1.1),
     %% failure to properly close a connection no longer requires that a
     %% session not be resumed.	This is a change from DTLS 1.0 to conform
     %% with widespread implementation practice.
-    case Version of
-	{254, N} when N =< 253 ->
-	    ok;
-	_ ->
-	    %% As invalidate_sessions here causes performance issues,
-	    %% we will conform to the widespread implementation
-	    %% practice and go aginst the spec
-	    %%invalidate_session(Role, Host, Port, Session)
-	    ok
-    end,
-    ssl_connection:handle_normal_shutdown(?ALERT_REC(?FATAL, ?CLOSE_NOTIFY), StateName, State),
-    {stop, {shutdown, transport_closed}};
+    case (Active == false) andalso (CTs =/= []) of
+        false ->
+            case Version of
+                {254, N} when N =< 253 ->
+                    ok;
+                _ ->
+                    %% As invalidate_sessions here causes performance issues,
+                    %% we will conform to the widespread implementation
+                    %% practice and go aginst the spec
+                    %%invalidate_session(Role, Host, Port, Session)
+                    ok
+            end,
+            ssl_connection:handle_normal_shutdown(?ALERT_REC(?FATAL, ?CLOSE_NOTIFY), StateName, State),
+            {stop, {shutdown, transport_closed}};
+        true ->
+            %% Fixes non-delivery of final DTLS record in {active, once}.
+            %% Basically allows the application the opportunity to set {active, once} again
+            %% and then receive the final message.
+            next_event(StateName, no_record, State)
+    end;
+
+handle_info(new_cookie_secret, StateName, 
+            #state{protocol_specific = #{current_cookie_secret := Secret} = CookieInfo} = State) ->
+    erlang:send_after(dtls_v1:cookie_timeout(), self(), new_cookie_secret),
+    {next_state, StateName, State#state{protocol_specific = 
+                                            CookieInfo#{current_cookie_secret => dtls_v1:cookie_secret(),
+                                                        previous_cookie_secret => Secret}}};
 handle_info(Msg, StateName, State) ->
     ssl_connection:handle_info(Msg, StateName, State).
+
 
 handle_call(Event, From, StateName, State) ->
     ssl_connection:handle_call(Event, From, StateName, State, ?MODULE).

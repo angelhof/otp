@@ -1080,9 +1080,6 @@ type(hipe_bifs, ref_get, 1, Xs, Opaques) ->
   strict(hipe_bifs, ref_get, 1, Xs, fun (_) -> t_immediate() end, Opaques);
 type(hipe_bifs, ref_set, 2, Xs, Opaques) ->
   strict(hipe_bifs, ref_set, 2, Xs, fun (_) -> t_nil() end, Opaques);
-type(hipe_bifs, remove_refs_from, 1, Xs, Opaques) ->
-  strict(hipe_bifs, remove_refs_from, 1, Xs,
-	 fun (_) -> t_atom('ok') end, Opaques);
 type(hipe_bifs, set_funinfo_native_address, 3, Xs, Opaques) ->
   strict(hipe_bifs, set_funinfo_native_address, 3, Xs,
 	 fun (_) -> t_nil() end, Opaques);
@@ -2029,17 +2026,14 @@ arith_rem(Min1, Max1, Min2, Max2) ->
   Min1_geq_zero = infinity_geq(Min1, 0),
   Max1_leq_zero = infinity_geq(0, Max1),
   Max_range2 = infinity_max([infinity_abs(Min2), infinity_abs(Max2)]),
-  Max_range2_leq_zero = infinity_geq(0, Max_range2),
-  New_min = 
+  New_min =
     if Min1_geq_zero -> 0;
        Max_range2 =:= 0 -> 0;
-       Max_range2_leq_zero -> infinity_add(Max_range2, 1);
        true -> infinity_add(infinity_inv(Max_range2), 1)
     end,
   New_max = 
     if Max1_leq_zero -> 0;
        Max_range2 =:= 0 -> 0;
-       Max_range2_leq_zero -> infinity_add(infinity_inv(Max_range2), -1);
        true -> infinity_add(Max_range2, -1)
     end,
   {New_min, New_max}.
@@ -2521,8 +2515,6 @@ arg_types(hipe_bifs, ref_get, 1) ->
   [t_hiperef()];
 arg_types(hipe_bifs, ref_set, 2) ->
   [t_hiperef(), t_immediate()];
-arg_types(hipe_bifs, remove_refs_from, 1) ->
-  [t_sup([t_mfa(), t_atom('all')])];
 arg_types(hipe_bifs, set_funinfo_native_address, 3) ->
   arg_types(hipe_bifs, set_native_address, 3);
 arg_types(hipe_bifs, commit_patch_load, 1) ->

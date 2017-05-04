@@ -479,9 +479,15 @@ delay_garbage_collection(Process *p, ErlHeapFragment *live_hf_end, int need, int
 	p->live_hf_end = live_hf_end;
     }
 
-    if (need == 0)
+    if (need == 0) {
+#ifdef ERTS_DIRTY_SCHEDULERS
+        if (p->flags & (F_DIRTY_MAJOR_GC|F_DIRTY_MINOR_GC)) {
+            ASSERT(!ERTS_SCHEDULER_IS_DIRTY(erts_proc_sched_data(p)));
+            goto force_reschedule;
+        }
+#endif
 	return 1;
-
+    }
     /*
      * Satisfy need in a heap fragment...
      */
@@ -532,6 +538,10 @@ delay_garbage_collection(Process *p, ErlHeapFragment *live_hf_end, int need, int
 #ifdef CHECK_FOR_HOLES
     p->last_htop = p->htop;
     p->heap_hfrag = hfrag;
+#endif
+
+#ifdef ERTS_DIRTY_SCHEDULERS
+force_reschedule:
 #endif
 
     /* Make sure that we do a proper GC as soon as possible... */
@@ -1242,7 +1252,7 @@ erts_garbage_collect_literals(Process* p, Eterm* literals,
 	     * link it into the MSO list for the process.
 	     */
 
-	    erts_refc_inc(&bptr->refc, 1);
+	    erts_refc_inc(&bptr->intern.refc, 1);
 	    *prev = ptr;
 	    prev = &ptr->next;
 	}
@@ -2879,9 +2889,7 @@ sweep_off_heap(Process *p, int fullsweep)
 	    case REFC_BINARY_SUBTAG:
 		{
 		    Binary* bptr = ((ProcBin*)ptr)->val;	
-		    if (erts_refc_dectest(&bptr->refc, 0) == 0) {
-			erts_bin_free(bptr);
-		    }
+                    erts_bin_release(bptr);
 		    break;
 		}
 	    case FUN_SUBTAG:
@@ -2897,8 +2905,7 @@ sweep_off_heap(Process *p, int fullsweep)
 		    ErtsMagicBinary *bptr;
 		    ASSERT(is_magic_ref_thing(ptr));
 		    bptr = ((ErtsMRefThing *) ptr)->mb;
-		    if (erts_refc_dectest(&bptr->refc, 0) == 0)
-			erts_bin_free((Binary *) bptr);		    
+                    erts_bin_release((Binary *) bptr);
 		    break;
 		}
 	    default:
@@ -3599,7 +3606,7 @@ erts_check_off_heap2(Process *p, Eterm *htop)
 	erts_aint_t refc;
 	switch (thing_subtag(u.hdr->thing_word)) {
 	case REFC_BINARY_SUBTAG:
-	    refc = erts_refc_read(&u.pb->val->refc, 1);		
+	    refc = erts_refc_read(&u.pb->val->intern.refc, 1);
 	    break;
 	case FUN_SUBTAG:
 	    refc = erts_smp_refc_read(&u.fun->fe->refc, 1);
@@ -3611,7 +3618,7 @@ erts_check_off_heap2(Process *p, Eterm *htop)
 	    break;
 	case REF_SUBTAG:
 	    ASSERT(is_magic_ref_thing(u.hdr));
-	    refc = erts_refc_read(&u.mref->mb->refc, 1);
+	    refc = erts_refc_read(&u.mref->mb->intern.refc, 1);
 	    break;
 	default:
 	    ASSERT(!"erts_check_off_heap2: Invalid thing_word");

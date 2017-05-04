@@ -152,7 +152,7 @@ analysis_start(Parent, Analysis, LegalWarnings) ->
         dialyzer_codeserver:finalize_exported_types(MergedExpTypes, TmpCServer1),
       erlang:garbage_collect(), % reduce heap size
       ?timing(State#analysis_state.timing_server, "remote",
-              contracts_and_records(TmpCServer2))
+              contracts_and_records(TmpCServer2, Parent))
     catch
       throw:{error, _ErrorMsg} = Error -> exit(Error)
     end,
@@ -221,18 +221,14 @@ analysis_cont(Parent, Analysis, Callgraph, State, Plt, NewCServer) ->
                   codeserver = Codeserver0} = State2,
   {Codeserver, MiniPlt3} = move_data(Codeserver0, MiniPlt2),
   dialyzer_callgraph:dispose_race_server(NewCallgraph),
-  rcv_and_send_ext_types(Parent),
   %% Since the PLT is never used, a dummy is sent:
   DummyPlt = dialyzer_plt:new(),
   send_codeserver_plt(Parent, Codeserver, DummyPlt),
   MiniPlt4 = dialyzer_plt:delete_list(MiniPlt3, NonExportsList),
   send_analysis_done(Parent, MiniPlt4, DocPlt).
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% JUST A PROTOTYPE %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-
-contracts_and_records(CodeServer) ->
-  Fun = contrs_and_recs(CodeServer),
+contracts_and_records(CodeServer, Parent) ->
+  Fun = contrs_and_recs(CodeServer, Parent),
   {Pid, Ref} = erlang:spawn_monitor(Fun),
   dialyzer_codeserver:give_away(CodeServer, Pid),
   Pid ! {self(), go},
@@ -240,16 +236,17 @@ contracts_and_records(CodeServer) ->
       Return
   end.
 
--spec contrs_and_recs(dialyzer_codeserver:codeserver()) ->
+-spec contrs_and_recs(dialyzer_codeserver:codeserver(), pid()) ->
                          fun(() -> no_return()).
 
-contrs_and_recs(TmpCServer2) ->
+contrs_and_recs(TmpCServer2, Parent) ->
   fun() ->
-      Parent = receive {Pid, go} -> Pid end,
+      Caller = receive {Pid, go} -> Pid end,
       TmpCServer3 = dialyzer_utils:process_record_remote_types(TmpCServer2),
       TmpServer4 =
         dialyzer_contracts:process_contract_remote_types(TmpCServer3),
-      dialyzer_codeserver:give_away(TmpServer4, Parent),
+      dialyzer_codeserver:give_away(TmpServer4, Caller),
+      rcv_and_send_ext_types(Caller, Parent),
       exit(TmpServer4)
   end.
 
@@ -437,68 +434,46 @@ compile_src(File, Includes, Defines, Callgraph, CServer, UseContracts,
   DefaultIncludes = default_includes(filename:dirname(File)),
   SrcCompOpts = dialyzer_utils:src_compiler_opts(),
   CompOpts = SrcCompOpts ++ Includes ++ Defines ++ DefaultIncludes,
-  case dialyzer_utils:get_abstract_code_from_src(File, CompOpts) of
+  case dialyzer_utils:get_core_from_src(File, CompOpts) of
     {error, _Msg} = Error -> Error;
-    {ok, AbstrCode} ->
-      compile_common(File, AbstrCode, CompOpts, Callgraph, CServer,
-                     UseContracts, LegalWarnings)
+    {ok, Core} ->
+      compile_common(Core, Callgraph, CServer, UseContracts, LegalWarnings)
   end.
 
 compile_byte(File, Callgraph, CServer, UseContracts, LegalWarnings) ->
-  case dialyzer_utils:get_abstract_code_from_beam(File) of
-    error ->
-      {error, "  Could not get abstract code for: " ++ File ++ "\n" ++
-	 "  Recompile with +debug_info or analyze starting from source code"};
-    {ok, AbstrCode} ->
-      compile_byte(File, AbstrCode, Callgraph, CServer, UseContracts,
-                   LegalWarnings)
-  end.
-
-compile_byte(File, AbstrCode, Callgraph, CServer, UseContracts,
-             LegalWarnings) ->
-  case dialyzer_utils:get_compile_options_from_beam(File) of
-    error ->
-      {error, "  Could not get compile options for: " ++ File ++ "\n" ++
-	 "  Recompile or analyze starting from source code"};
-    {ok, CompOpts} ->
-      compile_common(File, AbstrCode, CompOpts, Callgraph, CServer,
-                     UseContracts, LegalWarnings)
-  end.
-
-compile_common(File, AbstrCode, CompOpts, Callgraph, CServer,
-               UseContracts, LegalWarnings) ->
-  case dialyzer_utils:get_core_from_abstract_code(AbstrCode, CompOpts) of
-    error -> {error, "  Could not get core Erlang code for: " ++ File};
+  case dialyzer_utils:get_core_from_beam(File) of
+    {error, _} = Error -> Error;
     {ok, Core} ->
-      Mod = cerl:concrete(cerl:module_name(Core)),
-      case dialyzer_utils:get_record_and_type_info(AbstrCode) of
+      compile_common(Core, Callgraph, CServer, UseContracts, LegalWarnings)
+  end.
+
+compile_common(Core, Callgraph, CServer, UseContracts, LegalWarnings) ->
+  Mod = cerl:concrete(cerl:module_name(Core)),
+  case dialyzer_utils:get_record_and_type_info(Core) of
+    {error, _} = Error -> Error;
+    {ok, RecInfo} ->
+      CServer1 =
+	dialyzer_codeserver:store_temp_records(Mod, RecInfo, CServer),
+      case dialyzer_utils:get_fun_meta_info(Mod, Core, LegalWarnings) of
 	{error, _} = Error -> Error;
-	{ok, RecInfo} ->
-	  CServer1 =
-	    dialyzer_codeserver:store_temp_records(Mod, RecInfo, CServer),
-          case
-            dialyzer_utils:get_fun_meta_info(Mod, AbstrCode, LegalWarnings)
-          of
-            {error, _} = Error -> Error;
-            MetaFunInfo ->
-              CServer2 =
-                dialyzer_codeserver:insert_fun_meta_info(MetaFunInfo, CServer1),
-              case UseContracts of
-                true ->
-                  case dialyzer_utils:get_spec_info(Mod, AbstrCode, RecInfo) of
-                    {error, _} = Error -> Error;
-                    {ok, SpecInfo, CallbackInfo} ->
-                      CServer3 =
-                        dialyzer_codeserver:store_temp_contracts(Mod, SpecInfo,
-                                                                 CallbackInfo,
-                                                                 CServer2),
-                      store_core(Mod, Core, Callgraph, CServer3)
-                  end;
-                false ->
-                  store_core(Mod, Core, Callgraph, CServer2)
-              end
-          end
+	MetaFunInfo ->
+	  CServer2 =
+	    dialyzer_codeserver:insert_fun_meta_info(MetaFunInfo, CServer1),
+	  case UseContracts of
+	    true ->
+	      case dialyzer_utils:get_spec_info(Mod, Core, RecInfo) of
+	        {error, _} = Error -> Error;
+	        {ok, SpecInfo, CallbackInfo} ->
+	          CServer3 =
+	            dialyzer_codeserver:store_temp_contracts(Mod, SpecInfo,
+	                                                     CallbackInfo,
+	                                                     CServer2),
+	          store_core(Mod, Core, Callgraph, CServer3)
+	      end;
+	    false ->
+	      store_core(Mod, Core, Callgraph, CServer2)
       end
+    end
   end.
 
 store_core(Mod, Core, Callgraph, CServer) ->
@@ -599,13 +574,13 @@ default_includes(Dir) ->
 %% Handle Messages
 %%-------------------------------------------------------------------
 
-rcv_and_send_ext_types(Parent) ->
+rcv_and_send_ext_types(SendTo, Parent) ->
   Self = self(),
   Self ! {Self, done},
   case rcv_ext_types(Self, []) of
     [] -> ok;
     ExtTypes ->
-      Parent ! {Self, ext_types, ExtTypes},
+      Parent ! {SendTo, ext_types, ExtTypes},
       ok
   end.
 

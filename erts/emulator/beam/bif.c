@@ -3109,7 +3109,7 @@ BIF_RETTYPE integer_to_list_1(BIF_ALIST_1)
  * On error returns: {error,not_a_list}, or {error, no_integer}
  */
 
-BIF_RETTYPE string_to_integer_1(BIF_ALIST_1)
+BIF_RETTYPE string_list_to_integer_1(BIF_ALIST_1)
 {
      Eterm res;
      Eterm tail;
@@ -3295,7 +3295,7 @@ BIF_RETTYPE float_to_binary_2(BIF_ALIST_2)
 #define LOAD_E(xi,xim,xl,xlm) ((xi)=(xim), (xl)=(xlm))
 
 #define STRING_TO_FLOAT_BUF_INC_SZ (128)
-BIF_RETTYPE string_to_float_1(BIF_ALIST_1)
+BIF_RETTYPE string_list_to_float_1(BIF_ALIST_1)
 {
     Eterm orig = BIF_ARG_1;
     Eterm list = orig;
@@ -4254,6 +4254,75 @@ BIF_RETTYPE list_to_pid_1(BIF_ALIST_1)
     BIF_ERROR(BIF_P, BADARG);
 }
 
+BIF_RETTYPE list_to_port_1(BIF_ALIST_1)
+{
+    /*
+     * A valid port identifier is on the format
+     * "#Port<N.P>" where N is node and P is
+     * the port id. Both N and P are of type Uint32.
+     */
+    Uint32 n, p;
+    char* cp;
+    int i;
+    DistEntry *dep = NULL;
+    char buf[6 /* #Port< */
+             + (2)*(10 + 1) /* N.P> */
+             + 1 /* \0 */];
+
+    /* walk down the list and create a C string */
+    if ((i = intlist_to_buf(BIF_ARG_1, buf, sizeof(buf)-1)) < 0)
+	goto bad;
+
+    buf[i] = '\0';		/* null terminal */
+
+    cp = &buf[0];
+    if (strncmp("#Port<", cp, 6) != 0)
+        goto bad;
+
+    cp += 6; /* strlen("#Port<") */
+
+    if (sscanf(cp, "%u.%u>", &n, &p) < 2)
+        goto bad;
+
+    if (p > ERTS_MAX_PORT_NUMBER)
+	goto bad;
+
+    dep = erts_channel_no_to_dist_entry(n);
+
+    if (!dep)
+	goto bad;
+
+    if(dep == erts_this_dist_entry) {
+	erts_deref_dist_entry(dep);
+	BIF_RET(make_internal_port(p));
+    }
+    else {
+      ExternalThing *etp;
+      ErlNode *enp;
+
+      if (is_nil(dep->cid))
+	  goto bad;
+
+      enp = erts_find_or_insert_node(dep->sysname, dep->creation);
+      ASSERT(enp != erts_this_node);
+
+      etp = (ExternalThing *) HAlloc(BIF_P, EXTERNAL_THING_HEAD_SIZE + 1);
+      etp->header = make_external_port_header(1);
+      etp->next = MSO(BIF_P).first;
+      etp->node = enp;
+      etp->data.ui[0] = p;
+
+      MSO(BIF_P).first = (struct erl_off_heap_header*) etp;
+      erts_deref_dist_entry(dep);
+      BIF_RET(make_external_port(etp));
+    }
+
+ bad:
+    if (dep)
+	erts_deref_dist_entry(dep);
+    BIF_ERROR(BIF_P, BADARG);
+}
+
 BIF_RETTYPE list_to_ref_1(BIF_ALIST_1)
 {
     /*
@@ -4506,41 +4575,37 @@ BIF_RETTYPE system_flag_2(BIF_ALIST_2)
 			 || BIF_ARG_2 == am_block_normal);
 	    int normal = (BIF_ARG_2 == am_block_normal
 			  || BIF_ARG_2 == am_unblock_normal);
-	    if (erts_no_schedulers == 1)
-		BIF_RET(am_disabled);
-	    else {
-		switch (erts_block_multi_scheduling(BIF_P,
-						    ERTS_PROC_LOCK_MAIN,
-						    block,
-						    normal,
-						    0)) {
-		case ERTS_SCHDLR_SSPND_DONE_MSCHED_BLOCKED:
-		    BIF_RET(am_blocked);
-		case ERTS_SCHDLR_SSPND_DONE_NMSCHED_BLOCKED:
-		    BIF_RET(am_blocked_normal);
-		case ERTS_SCHDLR_SSPND_YIELD_DONE_MSCHED_BLOCKED:
-		    ERTS_BIF_YIELD_RETURN_X(BIF_P, am_blocked,
-					    am_multi_scheduling);
-		case ERTS_SCHDLR_SSPND_YIELD_DONE_NMSCHED_BLOCKED:
-		    ERTS_BIF_YIELD_RETURN_X(BIF_P, am_blocked_normal,
-					    am_multi_scheduling);
-		case ERTS_SCHDLR_SSPND_DONE:
-		    BIF_RET(am_enabled);
-		case ERTS_SCHDLR_SSPND_YIELD_RESTART:
-		    ERTS_VBUMP_ALL_REDS(BIF_P);
-		    BIF_TRAP2(bif_export[BIF_system_flag_2],
-			      BIF_P, BIF_ARG_1, BIF_ARG_2);
-		case ERTS_SCHDLR_SSPND_YIELD_DONE:
-		    ERTS_BIF_YIELD_RETURN_X(BIF_P, am_enabled,
-					    am_multi_scheduling);
-		case ERTS_SCHDLR_SSPND_EINVAL:
-		    goto error;
-		default:
-		    ASSERT(0);
-		    BIF_ERROR(BIF_P, EXC_INTERNAL_ERROR);
-		    break;
-		}
-	    }
+            switch (erts_block_multi_scheduling(BIF_P,
+                                                ERTS_PROC_LOCK_MAIN,
+                                                block,
+                                                normal,
+                                                0)) {
+            case ERTS_SCHDLR_SSPND_DONE_MSCHED_BLOCKED:
+                BIF_RET(am_blocked);
+            case ERTS_SCHDLR_SSPND_DONE_NMSCHED_BLOCKED:
+                BIF_RET(am_blocked_normal);
+            case ERTS_SCHDLR_SSPND_YIELD_DONE_MSCHED_BLOCKED:
+                ERTS_BIF_YIELD_RETURN_X(BIF_P, am_blocked,
+                                        am_multi_scheduling);
+            case ERTS_SCHDLR_SSPND_YIELD_DONE_NMSCHED_BLOCKED:
+                ERTS_BIF_YIELD_RETURN_X(BIF_P, am_blocked_normal,
+                                        am_multi_scheduling);
+            case ERTS_SCHDLR_SSPND_DONE:
+                BIF_RET(am_enabled);
+            case ERTS_SCHDLR_SSPND_YIELD_RESTART:
+                ERTS_VBUMP_ALL_REDS(BIF_P);
+                BIF_TRAP2(bif_export[BIF_system_flag_2],
+                          BIF_P, BIF_ARG_1, BIF_ARG_2);
+            case ERTS_SCHDLR_SSPND_YIELD_DONE:
+                ERTS_BIF_YIELD_RETURN_X(BIF_P, am_enabled,
+                                        am_multi_scheduling);
+            case ERTS_SCHDLR_SSPND_EINVAL:
+                goto error;
+            default:
+                ASSERT(0);
+                BIF_ERROR(BIF_P, EXC_INTERNAL_ERROR);
+                break;
+            }
 #endif
 	}
     } else if (BIF_ARG_1 == am_schedulers_online) {

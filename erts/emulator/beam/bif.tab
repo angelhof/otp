@@ -88,6 +88,7 @@ bif erlang:list_to_binary/1
 bif erlang:list_to_float/1
 bif erlang:list_to_integer/1
 bif erlang:list_to_pid/1
+bif erlang:list_to_port/1
 bif erlang:list_to_ref/1
 bif erlang:list_to_tuple/1
 bif erlang:loaded/0
@@ -361,6 +362,7 @@ bif ets:select_reverse/1
 bif ets:select_reverse/2
 bif ets:select_reverse/3
 bif ets:select_delete/2
+bif ets:select_replace/2
 bif ets:match_spec_compile/1
 bif ets:match_spec_run_r/3
 
@@ -392,6 +394,7 @@ bif erl_ddll:demonitor/1
 #
 # Bifs in the re module 
 #
+bif re:version/0
 bif re:compile/1
 bif re:compile/2
 bif re:run/2
@@ -458,8 +461,8 @@ bif error_logger:warning_map/0
 bif erlang:get_module_info/1
 bif erlang:get_module_info/2
 ubif erlang:is_boolean/1
-bif string:to_integer/1
-bif string:to_float/1
+bif string:list_to_integer/1
+bif string:list_to_float/1
 bif erlang:make_fun/3
 bif erlang:iolist_size/1
 bif erlang:iolist_to_binary/1

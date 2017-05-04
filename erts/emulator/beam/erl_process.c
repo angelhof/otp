@@ -194,7 +194,10 @@ static UWord thr_prgr_later_cleanup_op_threshold = ERTS_THR_PRGR_LATER_CLEANUP_O
 ErtsPTab erts_proc erts_align_attribute(ERTS_CACHE_LINE_SIZE);
 
 int erts_sched_thread_suggested_stack_size = -1;
-
+#ifdef ERTS_DIRTY_SCHEDULERS
+int erts_dcpu_sched_thread_suggested_stack_size = -1;
+int erts_dio_sched_thread_suggested_stack_size = -1;
+#endif
 #ifdef ERTS_ENABLE_LOCK_CHECK
 ErtsLcPSDLocks erts_psd_required_locks[ERTS_PSD_SIZE];
 #endif
@@ -280,6 +283,7 @@ schdlr_sspnd_get_nscheds(ErtsSchedTypeCounters *valp,
     }
 }
 
+#ifdef DEBUG
 static ERTS_INLINE Uint32
 schdlr_sspnd_get_nscheds_tot(ErtsSchedTypeCounters *valp)
 {
@@ -290,6 +294,7 @@ schdlr_sspnd_get_nscheds_tot(ErtsSchedTypeCounters *valp)
 #endif
     return res;
 }
+#endif
 
 static ERTS_INLINE void
 schdlr_sspnd_dec_nscheds(ErtsSchedTypeCounters *valp,
@@ -560,7 +565,6 @@ static int stack_element_dump(fmtfn_t to, void *to_arg, Eterm* sp, int yreg);
 
 static void aux_work_timeout(void *unused);
 static void aux_work_timeout_early_init(int no_schedulers);
-static void aux_work_timeout_late_init(void);
 static void setup_aux_work_timer(ErtsSchedulerData *esdp);
 
 static int execute_sys_tasks(Process *c_p,
@@ -2790,6 +2794,9 @@ typedef struct {
 
     int initialized;
     erts_atomic32_t refc;
+#ifdef DEBUG
+    erts_atomic32_t used;
+#endif
     erts_atomic32_t type[1];
 } ErtsAuxWorkTmo;
 
@@ -2799,6 +2806,13 @@ static ERTS_INLINE void
 start_aux_work_timer(ErtsSchedulerData *esdp)
 {
     ErtsMonotonicTime tmo = erts_get_monotonic_time(esdp);
+#ifdef DEBUG
+    Uint no = (Uint) erts_atomic32_xchg_mb(&aux_work_tmo->used,
+                                           (erts_aint32_t) esdp->no);
+    ASSERT(esdp->type == ERTS_SCHED_NORMAL);
+    ASSERT(!no);
+#endif
+
     tmo = ERTS_MONOTONIC_TO_CLKTCKS(tmo-1);
     tmo += ERTS_MSEC_TO_CLKTCKS(1000) + 1;
     erts_twheel_init_timer(&aux_work_tmo->timer.data);
@@ -2806,7 +2820,6 @@ start_aux_work_timer(ErtsSchedulerData *esdp)
     erts_twheel_set_timer(esdp->timer_wheel,
 			  &aux_work_tmo->timer.data,
 			  aux_work_timeout,
-			  NULL,
 			  (void *) esdp,
 			  tmo);
 }
@@ -2835,16 +2848,19 @@ aux_work_timeout_early_init(int no_schedulers)
     aux_work_tmo = (ErtsAuxWorkTmo *) p;
     aux_work_tmo->initialized = 0;
     erts_atomic32_init_nob(&aux_work_tmo->refc, 0);
+#ifdef DEBUG
+    erts_atomic32_init_nob(&aux_work_tmo->used, 0);
+#endif
     for (i = 0; i <= no_schedulers; i++)
 	erts_atomic32_init_nob(&aux_work_tmo->type[i], 0);
 }
 
 void
-aux_work_timeout_late_init(void)
+erts_aux_work_timeout_late_init(ErtsSchedulerData *esdp)
 {
     aux_work_tmo->initialized = 1;
-    if (erts_atomic32_read_nob(&aux_work_tmo->refc))
-	start_aux_work_timer(erts_get_scheduler_data());
+    if (erts_atomic32_read_acqb(&aux_work_tmo->refc))
+	start_aux_work_timer(esdp);
 }
 
 static void
@@ -2852,6 +2868,13 @@ aux_work_timeout(void *vesdp)
 {
     erts_aint32_t refc;
     int i;
+#ifdef DEBUG
+    ErtsSchedulerData *esdp = erts_get_scheduler_data();
+    Uint no = (Uint) erts_atomic32_xchg_mb(&aux_work_tmo->used, 0);
+    ASSERT(no == esdp->no);
+    ASSERT(esdp == (ErtsSchedulerData *) vesdp);
+#endif
+
 #ifdef ERTS_SMP
     i = 0;
 #else
@@ -5947,14 +5970,30 @@ erts_sched_set_wake_cleanup_threshold(char *str)
 static void
 init_aux_work_data(ErtsAuxWorkData *awdp, ErtsSchedulerData *esdp, char *dawwp)
 {
-    if (!esdp)
-	awdp->sched_id = 0;
+    int id = 0;
+    if (esdp) {
+        switch (esdp->type) {
+        case ERTS_SCHED_NORMAL:
+            id = (int) esdp->no;
+            break;
 #ifdef ERTS_DIRTY_SCHEDULERS
-    else if (ERTS_SCHEDULER_IS_DIRTY(esdp))
-	awdp->sched_id = (int) ERTS_DIRTY_SCHEDULER_NO(esdp);
+        case ERTS_SCHED_DIRTY_CPU:
+            id = (int) erts_no_schedulers;
+            id += (int) esdp->dirty_no;
+            break;
+        case ERTS_SCHED_DIRTY_IO:
+            id = (int) erts_no_schedulers;
+            id += (int) erts_no_dirty_cpu_schedulers;
+            id += (int) esdp->dirty_no;
+            break;
 #endif
-    else
-	awdp->sched_id = (int) esdp->no;
+        default:
+            ERTS_INTERNAL_ERROR("Invalid scheduler type");
+            break;
+        }
+    }
+
+    awdp->sched_id = id;
     awdp->esdp = esdp;
     awdp->ssi = esdp ? esdp->ssi : NULL;
 #ifdef ERTS_SMP
@@ -6027,7 +6066,7 @@ init_scheduler_data(ErtsSchedulerData* esdp, int num,
             ASSERT(runq == ERTS_DIRTY_IO_RUNQ);
             esdp->type = ERTS_SCHED_DIRTY_IO;
         }
-	ERTS_DIRTY_SCHEDULER_NO(esdp) = (Uint) num;
+        esdp->dirty_no = (Uint) num;
         if (num == 1) {
             /*
              * Multi-scheduling block functionality depends
@@ -6039,7 +6078,7 @@ init_scheduler_data(ErtsSchedulerData* esdp, int num,
     else {
         esdp->type = ERTS_SCHED_NORMAL;
 	esdp->no = (Uint) num;
-	ERTS_DIRTY_SCHEDULER_NO(esdp) = 0;
+	esdp->dirty_no = 0;
         runq->scheduler = esdp;
     }
     esdp->dirty_shadow_process = shadow_proc;
@@ -6055,6 +6094,7 @@ init_scheduler_data(ErtsSchedulerData* esdp, int num,
     runq->scheduler = esdp;
     esdp->run_queue = runq;
     esdp->no = (Uint) num;
+    esdp->type = ERTS_SCHED_NORMAL;
 #endif
 
     esdp->ssi = ssi;
@@ -6448,8 +6488,6 @@ erts_init_scheduling(int no_schedulers, int no_schedulers_online
 
     /* init port tasks */
     erts_port_task_init();
-
-    aux_work_timeout_late_init();
 
 #ifndef ERTS_SMP
 #ifdef ERTS_DO_VERIFY_UNUSED_TEMP_ALLOC
@@ -7776,11 +7814,11 @@ suspend_scheduler(ErtsSchedulerData *esdp)
         break;
     case ERTS_SCHED_DIRTY_CPU:
         online_flag = ERTS_SCHDLR_SSPND_CHNG_DCPU_ONLN;
-        no = ERTS_DIRTY_SCHEDULER_NO(esdp);
+        no = esdp->dirty_no;
         break;
     case ERTS_SCHED_DIRTY_IO:
         online_flag = 0;
-	no = ERTS_DIRTY_SCHEDULER_NO(esdp);
+	no = esdp->dirty_no;
         break;
     default:
         ERTS_INTERNAL_ERROR("Invalid scheduler type");
@@ -8515,8 +8553,9 @@ erts_block_multi_scheduling(Process *p, ErtsProcLocks plocks, int on, int normal
 	    p->flags |= have_blckd_flg;
 	    goto wait_until_msb;
 	}
-	else if (msbp->blckrs) {
-	    ASSERT(msbp->ongoing);
+	else if (msbp->blckrs || (normal && erts_no_schedulers == 1)) {
+	    ASSERT(!msbp->blckrs || msbp->ongoing);
+	    msbp->ongoing = 1;
 	    plp = proclist_create(p);
 	    erts_proclist_store_last(&msbp->blckrs, plp);
 	    p->flags |= have_blckd_flg;
@@ -8530,7 +8569,7 @@ erts_block_multi_scheduling(Process *p, ErtsProcLocks plocks, int on, int normal
 	    else
 		res = ERTS_SCHDLR_SSPND_DONE_NMSCHED_BLOCKED;
 	}
-	else {
+        else {
 	    int online = (int) schdlr_sspnd_get_nscheds(&schdlr_sspnd.online,
 							ERTS_SCHED_NORMAL);
 	    ASSERT(!msbp->ongoing);
@@ -8735,6 +8774,9 @@ sched_thread_func(void *vesdp)
 
     erts_sched_init_time_sup(esdp);
 
+    if (no == 1)
+        erts_aux_work_timeout_late_init(esdp);
+
     (void) ERTS_RUNQ_FLGS_SET_NOB(esdp->run_queue,
 				  ERTS_RUNQ_FLG_EXEC);
 
@@ -8804,8 +8846,7 @@ sched_dirty_cpu_thread_func(void *vesdp)
 {
     ErtsThrPrgrCallbacks callbacks;
     ErtsSchedulerData *esdp = vesdp;
-    Uint no = ERTS_DIRTY_SCHEDULER_NO(esdp);
-    ERTS_DIRTY_SCHEDULER_TYPE(esdp) = ERTS_DIRTY_CPU_SCHEDULER;
+    Uint no = esdp->dirty_no;
     ASSERT(no != 0);
     ERTS_DIRTY_CPU_SCHED_SLEEP_INFO_IX(no-1)->event = erts_tse_fetch();
     callbacks.arg = (void *) esdp->ssi;
@@ -8853,8 +8894,7 @@ sched_dirty_io_thread_func(void *vesdp)
 {
     ErtsThrPrgrCallbacks callbacks;
     ErtsSchedulerData *esdp = vesdp;
-    Uint no = ERTS_DIRTY_SCHEDULER_NO(esdp);
-    ERTS_DIRTY_SCHEDULER_TYPE(esdp) = ERTS_DIRTY_IO_SCHEDULER;
+    Uint no = esdp->dirty_no;
     ASSERT(no != 0);
     ERTS_DIRTY_IO_SCHED_SLEEP_INFO_IX(no-1)->event = erts_tse_fetch();
     callbacks.arg = (void *) esdp->ssi;
@@ -8962,6 +9002,7 @@ erts_start_schedulers(void)
 	for (ix = 0; ix < erts_no_dirty_cpu_schedulers; ix++) {
 	    ErtsSchedulerData *esdp = ERTS_DIRTY_CPU_SCHEDULER_IX(ix);
 	    erts_snprintf(opts.name, 16, "%d_dirty_cpu_scheduler", ix + 1);
+            opts.suggested_stack_size = erts_dcpu_sched_thread_suggested_stack_size;
 	    res = ethr_thr_create(&esdp->tid,sched_dirty_cpu_thread_func,(void*)esdp,&opts);
 	    if (res != 0)
 		erts_exit(ERTS_ERROR_EXIT, "Failed to create dirty cpu scheduler thread %d\n", ix);
@@ -8969,6 +9010,7 @@ erts_start_schedulers(void)
 	for (ix = 0; ix < erts_no_dirty_io_schedulers; ix++) {
 	    ErtsSchedulerData *esdp = ERTS_DIRTY_IO_SCHEDULER_IX(ix);
 	    erts_snprintf(opts.name, 16, "%d_dirty_io_scheduler", ix + 1);
+            opts.suggested_stack_size = erts_dio_sched_thread_suggested_stack_size;
 	    res = ethr_thr_create(&esdp->tid,sched_dirty_io_thread_func,(void*)esdp,&opts);
 	    if (res != 0)
 		erts_exit(ERTS_ERROR_EXIT, "Failed to create dirty io scheduler thread %d\n", ix);
@@ -11359,7 +11401,7 @@ erts_execute_dirty_system_task(Process *c_p)
 
 	switch (st->type) {
 	case ERTS_PSTT_CLA:
-	    ASSERT(is_value(st_res));
+	    ASSERT(is_value(cla_res));
 	    st_res = cla_res;
 	    break;
 	case ERTS_PSTT_GC_MAJOR:
@@ -12412,9 +12454,6 @@ erl_create_process(Process* parent, /* Parent of process (default group leader).
     p->msg_inq.len = 0;
 #endif
     p->bif_timers = NULL;
-#ifdef ERTS_BTM_ACCESSOR_SUPPORT
-    p->accessor_bif_timers = NULL;
-#endif
     p->mbuf = NULL;
     p->msg_frag = NULL;
     p->mbuf_sz = 0;
@@ -12613,9 +12652,6 @@ void erts_init_empty_process(Process *p)
     p->msg.save = &p->msg.first;
     p->msg.len = 0;
     p->bif_timers = NULL;
-#ifdef ERTS_BTM_ACCESSOR_SUPPORT
-    p->accessor_bif_timers = NULL;
-#endif
     p->dictionary = NULL;
     p->seq_trace_clock = 0;
     p->seq_trace_lastcnt = 0;
@@ -12716,9 +12752,6 @@ erts_debug_verify_clean_empty_process(Process* p)
     ASSERT(p->msg.first == NULL);
     ASSERT(p->msg.len == 0);
     ASSERT(p->bif_timers == NULL);
-#ifdef ERTS_BTM_ACCESSOR_SUPPORT
-    ASSERT(p->accessor_bif_timers == NULL);
-#endif
     ASSERT(p->dictionary == NULL);
     ASSERT(p->catches == 0);
     ASSERT(p->cp == NULL);
@@ -13784,26 +13817,13 @@ erts_continue_exit_process(Process *p)
 
     ASSERT(erts_proc_read_refc(p) > 0);
     if (p->bif_timers) {
-	if (erts_cancel_bif_timers(p, p->bif_timers, &p->u.terminate)) {
+	if (erts_cancel_bif_timers(p, &p->bif_timers, &p->u.terminate)) {
 	    ASSERT(erts_proc_read_refc(p) > 0);
 	    goto yield;
 	}
 	ASSERT(erts_proc_read_refc(p) > 0);
 	p->bif_timers = NULL;
     }
-
-#ifdef ERTS_BTM_ACCESSOR_SUPPORT
-    if (p->accessor_bif_timers) {
-	if (erts_detach_accessor_bif_timers(p,
-					    p->accessor_bif_timers,
-					    &p->u.terminate)) {
-	    ASSERT(erts_proc_read_refc(p) > 0);
-	    goto yield;
-	}
-	ASSERT(erts_proc_read_refc(p) > 0);
-	p->accessor_bif_timers = NULL;
-    }
-#endif
 
 #ifdef ERTS_SMP
     if (p->flags & F_SCHDLR_ONLN_WAITQ)

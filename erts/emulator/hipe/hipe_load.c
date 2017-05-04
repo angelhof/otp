@@ -45,7 +45,7 @@ void hipe_free_loader_state(HipeLoaderState *stp)
     stp->text_segment_size = 0;
 
     if (stp->data_segment)
-	erts_free(ERTS_ALC_T_HIPE, stp->data_segment);
+	erts_free(ERTS_ALC_T_HIPE_LL, stp->data_segment);
     stp->data_segment = NULL;
     stp->data_segment_size = 0;
 
@@ -81,7 +81,7 @@ Binary *hipe_alloc_loader_state(Eterm module)
 
     magic = erts_create_magic_binary(sizeof(HipeLoaderState),
 				     hipe_loader_state_dtor);
-    erts_refc_inc(&magic->refc, 1);
+    erts_refc_inc(&magic->intern.refc, 1);
     stp = ERTS_MAGIC_BIN_DATA(magic);
 
     stp->module = module;

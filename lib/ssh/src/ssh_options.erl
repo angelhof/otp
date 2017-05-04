@@ -28,6 +28,7 @@
 -export([default/1,
          get_value/5,  get_value/6,
          put_value/5,
+         delete_key/5,
          handle_options/2
         ]).
 
@@ -36,16 +37,6 @@
 
 %%%================================================================
 %%% Types
-
--type options() :: #{socket_options   := socket_options(),
-                     internal_options := internal_options(),
-                     option_key()     => any()
-                    }.
-
--type socket_options()   :: proplists:proplist().
--type internal_options() :: #{option_key() => any()}.
-
--type option_key() :: atom().
 
 -type option_in() :: proplists:property() | proplists:proplist() .
 
@@ -75,22 +66,23 @@ get_value(Class, Key, Opts, _CallerMod, _CallerLine) when is_map(Opts) ->
         user_options     -> maps:get(Key, Opts)
     end;
 get_value(Class, Key, Opts, _CallerMod, _CallerLine) ->
-    io:format("*** Bad Opts GET OPT ~p ~p:~p Key=~p,~n    Opts=~p~n",[Class,_CallerMod,_CallerLine,Key,Opts]),
     error({bad_options,Class, Key, Opts, _CallerMod, _CallerLine}).
 
 
--spec get_value(option_class(), option_key(), options(), any(),
+-spec get_value(option_class(), option_key(), options(), fun(() -> any()),
                 atom(), non_neg_integer()) -> any() | no_return().
 
-get_value(socket_options, Key, Opts, Def, _CallerMod, _CallerLine) when is_map(Opts) ->
-    proplists:get_value(Key, maps:get(socket_options,Opts), Def);
-get_value(Class, Key, Opts, Def, CallerMod, CallerLine) when is_map(Opts) ->
+get_value(socket_options, Key, Opts, DefFun, _CallerMod, _CallerLine) when is_map(Opts) ->
+    proplists:get_value(Key, maps:get(socket_options,Opts), DefFun);
+get_value(Class, Key, Opts, DefFun, CallerMod, CallerLine) when is_map(Opts) ->
     try get_value(Class, Key, Opts, CallerMod, CallerLine)
+    of
+        undefined -> DefFun();
+        Value -> Value
     catch
-        error:{badkey,Key} -> Def
+        error:{badkey,Key} -> DefFun()
     end;
-get_value(Class, Key, Opts, _Def, _CallerMod, _CallerLine) ->
-    io:format("*** Bad Opts GET OPT ~p ~p:~p Key=~p,~n    Opts=~p~n",[Class,_CallerMod,_CallerLine,Key,Opts]),
+get_value(Class, Key, Opts, _DefFun, _CallerMod, _CallerLine) ->
     error({bad_options,Class, Key, Opts, _CallerMod, _CallerLine}).
 
 
@@ -133,6 +125,19 @@ put_socket_value({Key,Value}, SockOpts) ->
     [{Key,Value} | SockOpts];
 put_socket_value(A, SockOpts) when is_atom(A) ->
     [A | SockOpts].
+
+%%%================================================================
+%%%
+%%% Delete an option
+%%%
+
+-spec delete_key(option_class(), option_key(), options(),
+                 atom(), non_neg_integer()) -> options().
+
+delete_key(internal_options, Key, Opts, _CallerMod, _CallerLine) when is_map(Opts) ->
+    InternalOpts = maps:get(internal_options,Opts),
+    Opts#{internal_options := maps:remove(Key, InternalOpts)}.
+        
 
 %%%================================================================
 %%%
@@ -432,9 +437,7 @@ default(client) ->
 
       {pref_public_key_algs, def} =>
           #{default => 
-                %% Get dynamically supported keys in the order of the ?SUPPORTED_USER_KEYS
-                [A || A <- ?SUPPORTED_USER_KEYS,
-                      lists:member(A, ssh_transport:supported_algorithms(public_key))],
+                ssh_transport:supported_algorithms(public_key),
             chk => 
                 fun check_pref_public_key_algs/1,
             class =>
@@ -490,12 +493,6 @@ default(client) ->
             class => user_options
            },
 
-      {idle_time, def} =>
-          #{default => infinity,
-            chk => fun check_timeout/1,
-            class => user_options
-           },
-
 %%%%% Undocumented
       {keyboard_interact_fun, def} =>
           #{default => undefined,
@@ -547,6 +544,12 @@ default(common) ->
              chk => fun erlang:is_atom/1,
              class => user_options
             },
+
+      {idle_time, def} =>
+          #{default => infinity,
+            chk => fun check_timeout/1,
+            class => user_options
+           },
 
        %% This is a "SocketOption"...
        %% {fd, def} =>
@@ -609,11 +612,23 @@ default(common) ->
             },
 
        {max_random_length_padding, def} =>
-          #{default => ?MAX_RND_PADDING_LEN,
-            chk => fun check_non_neg_integer/1,
-            class => user_options
-           }
-    }.
+           #{default => ?MAX_RND_PADDING_LEN,
+             chk => fun check_non_neg_integer/1,
+             class => user_options
+            },
+
+       {send_ext_info, def} =>
+           #{default => true,
+             chk => fun erlang:is_boolean/1,
+             class => user_options
+            },
+
+       {recv_ext_info, def} =>
+           #{default => true,
+             chk => fun erlang:is_boolean/1,
+             class => user_options
+            }
+     }.
 
 
 %%%================================================================
@@ -653,20 +668,8 @@ check_pref_public_key_algs(V) ->
     PKs = ssh_transport:supported_algorithms(public_key),
     CHK = fun(A, Ack) ->
                   case lists:member(A, PKs) of
-                      true ->
-                          [A|Ack];
-                      false -> 
-                          %% Check with the documented options, that is,
-                          %% the one we can handle
-                          case lists:member(A,?SUPPORTED_USER_KEYS) of
-                              false ->
-                                  %% An algorithm ssh never can handle
-                                  error_in_check(A, "Not supported public key");
-                              true ->
-                                  %% An algorithm ssh can handle, but not in
-                                  %% this very call
-                                  Ack
-                          end
+                      true ->  [A|Ack];
+                      false -> error_in_check(A, "Not supported public key")
                   end
           end,
     case lists:foldr(
@@ -792,17 +795,16 @@ read_moduli_file(D, I, Acc) ->
 
 check_silently_accept_hosts(B) when is_boolean(B) -> true;
 check_silently_accept_hosts(F) when is_function(F,2) -> true;
-check_silently_accept_hosts({S,F}) when is_atom(S),
-                                        is_function(F,2) -> 
-    lists:member(S, ?SHAs) andalso
-        lists:member(S, proplists:get_value(hashs,crypto:supports()));
-check_silently_accept_hosts({L,F}) when is_list(L),
-                                        is_function(F,2) -> 
-    lists:all(fun(S) ->
-                      lists:member(S, ?SHAs) andalso
-                          lists:member(S, proplists:get_value(hashs,crypto:supports()))
-              end, L);
+check_silently_accept_hosts({false,S}) when is_atom(S) -> valid_hash(S);
+check_silently_accept_hosts({S,F}) when is_function(F,2) -> valid_hash(S);
 check_silently_accept_hosts(_) -> false.
+
+
+valid_hash(S) -> valid_hash(S, proplists:get_value(hashs,crypto:supports())).
+
+valid_hash(S, Ss) when is_atom(S) -> lists:member(S, ?SHAs) andalso lists:member(S, Ss);
+valid_hash(L, Ss) when is_list(L) -> lists:all(fun(S) -> valid_hash(S,Ss) end, L);
+valid_hash(X,  _) -> error_in_check(X, "Expect atom or list in fingerprint spec").
 
 %%%----------------------------------------------------------------
 check_preferred_algorithms(Algs) ->
@@ -871,6 +873,7 @@ handle_pref_alg(Key, Vs, _) ->
 chk_alg_vs(OptKey, Values, SupportedValues) ->
     case (Values -- SupportedValues) of
 	[] -> Values;
+        [none] -> [none];                       % for testing only
 	Bad -> error_in_check({OptKey,Bad}, "Unsupported value(s) found")
     end.
 

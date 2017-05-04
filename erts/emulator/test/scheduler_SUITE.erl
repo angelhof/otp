@@ -807,21 +807,31 @@ update_cpu_info(Config) when is_list(Config) ->
 			      %% Nothing much to test; just a smoke test
 			      ok;
 			  Onln0 ->
-			      %% unset least significant bit
-			      Aff = (OldAff band (OldAff - 1)),
-			      set_affinity_mask(Aff),
-			      Onln1 = Avail - 1,
-			      case adjust_schedulers_online() of
-					{Onln0, Onln1} ->
-					    Onln1 = erlang:system_info(schedulers_online),
-					    receive after 500 -> ok end,
-					    io:format("TEST - Affinity mask: ~p - Schedulers online: ~p - Scheduler bindings: ~p~n",
-							    [Aff, Onln1, erlang:system_info(scheduler_bindings)]),
-					    unchanged = adjust_schedulers_online(),
-					    ok;
-					Fail ->
-					    ct:fail(Fail)
-				    end
+			      Cpus = bits_in_mask(OldAff),
+			      RmCpus = case Cpus > Onln0 of
+					   true -> Cpus - Onln0 + 1;
+					   false -> Onln0 - Cpus + 1
+				       end,
+			      Onln1 = Cpus - RmCpus,
+			      case Onln1 > 0 of
+				  false ->
+				      %% Nothing much to test; just a smoke test
+				      ok;
+				  true ->
+				      Aff = restrict_affinity_mask(OldAff, RmCpus),
+				      set_affinity_mask(Aff),
+				      case adjust_schedulers_online() of
+					  {Onln0, Onln1} ->
+					      Onln1 = erlang:system_info(schedulers_online),
+					      receive after 500 -> ok end,
+					      io:format("TEST - Affinity mask: ~p - Schedulers online: ~p - Scheduler bindings: ~p~n",
+							[Aff, Onln1, erlang:system_info(scheduler_bindings)]),
+					      unchanged = adjust_schedulers_online(),
+					      ok;
+					  Fail ->
+					      ct:fail(Fail)
+				      end
+			      end
 		      end
 		  after
 		      set_affinity_mask(OldAff),
@@ -835,13 +845,49 @@ update_cpu_info(Config) when is_list(Config) ->
 		  end
 	  end.
 
+bits_in_mask(Mask) ->
+    bits_in_mask(Mask, 0, 0).
+
+bits_in_mask(0, Shift, N) ->
+    N;
+bits_in_mask(Mask, Shift, N) ->
+    case Mask band (1 bsl Shift) of
+	0 -> bits_in_mask(Mask, Shift+1, N);
+	_ -> bits_in_mask(Mask band (bnot (1 bsl Shift)),
+			  Shift+1, N+1)
+    end.
+
+restrict_affinity_mask(Mask, N) ->
+    try
+	restrict_affinity_mask(Mask, 0, N)
+    catch
+	throw : Reason ->
+	    exit({Reason, Mask, N})
+    end.
+
+restrict_affinity_mask(Mask, _Shift, 0) ->
+    Mask;
+restrict_affinity_mask(0, _Shift, _N) ->
+    throw(overresticted_affinity_mask);
+restrict_affinity_mask(Mask, Shift, N) ->
+    case Mask band (1 bsl Shift) of
+	0 -> restrict_affinity_mask(Mask, Shift+1, N);
+	_ -> restrict_affinity_mask(Mask band (bnot (1 bsl Shift)),
+				    Shift+1, N-1)
+    end.
+
 adjust_schedulers_online() ->
     case erlang:system_info(update_cpu_info) of
 	unchanged ->
 	    unchanged;
 	changed ->
 	    Avail = erlang:system_info(logical_processors_available),
-	    {erlang:system_flag(schedulers_online, Avail), Avail}
+	    Scheds = erlang:system_info(schedulers),
+	    SOnln = case Avail > Scheds of
+	    	    	 true -> Scheds;
+			 false -> Avail
+		    end,
+	    {erlang:system_flag(schedulers_online, SOnln), SOnln}
     end.
 
 read_affinity(Data) ->
@@ -1041,12 +1087,8 @@ scheduler_threads(Config) when is_list(Config) ->
     {Sched, SchedOnln, _} = get_sstate(Config, ""),
     %% Configure half the number of both the scheduler threads and
     %% the scheduler threads online.
-    {HalfSched, HalfSchedOnln} = case SmpSupport of
-                                     false -> {1,1};
-                                     true ->
-                                         {Sched div 2,
-                                          SchedOnln div 2}
-                                 end,
+    {HalfSched, HalfSchedOnln} = {lists:max([1,Sched div 2]),
+                                  lists:max([1,SchedOnln div 2])},
     {HalfSched, HalfSchedOnln, _} = get_sstate(Config, "+SP 50:50"),
     %% Use +S to configure 4x the number of scheduler threads and
     %% 4x the number of scheduler threads online, but alter that
@@ -1103,12 +1145,8 @@ dirty_scheduler_threads(Config) when is_list(Config) ->
 dirty_scheduler_threads_test(Config) ->
     SmpSupport = erlang:system_info(smp_support),
     {Sched, SchedOnln, _} = get_dsstate(Config, ""),
-    {HalfSched, HalfSchedOnln} = case SmpSupport of
-                                     false -> {1,1};
-                                     true ->
-                                         {Sched div 2,
-                                          SchedOnln div 2}
-                                 end,
+    {HalfSched, HalfSchedOnln} = {lists:max([1,Sched div 2]),
+                                  lists:max([1,SchedOnln div 2])},
     Cmd1 = "+SDcpu "++integer_to_list(HalfSched)++":"++
 	integer_to_list(HalfSchedOnln),
     {HalfSched, HalfSchedOnln, _} = get_dsstate(Config, Cmd1),

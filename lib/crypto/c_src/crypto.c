@@ -425,10 +425,12 @@ static ERL_NIF_TERM hmac_final_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM 
 static ERL_NIF_TERM cmac_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM block_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM aes_cfb_8_crypt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+static ERL_NIF_TERM aes_cfb_128_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM aes_ige_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM aes_ctr_stream_init(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM aes_ctr_stream_encrypt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM strong_rand_bytes_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+static ERL_NIF_TERM strong_rand_range_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM rand_uniform_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM mod_exp_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 static ERL_NIF_TERM dss_verify_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
@@ -501,6 +503,7 @@ static ErlNifFunc nif_funcs[] = {
     {"aes_ctr_stream_encrypt", 2, aes_ctr_stream_encrypt},
     {"aes_ctr_stream_decrypt", 2, aes_ctr_stream_encrypt},
     {"strong_rand_bytes_nif", 1, strong_rand_bytes_nif},
+    {"strong_rand_range_nif", 1, strong_rand_range_nif},
     {"rand_uniform_nif", 2, rand_uniform_nif},
     {"mod_exp_nif", 4, mod_exp_nif},
     {"dss_verify_nif", 4, dss_verify_nif},
@@ -1736,17 +1739,20 @@ static ERL_NIF_TERM block_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM
         return enif_raise_exception(env, atom_notsup);
     }
 
-    if ((argv[0] == atom_aes_cfb8 || argv[0] == atom_aes_cfb128)
-        && (key.size == 24 || key.size == 32)
-#ifdef FIPS_SUPPORT
-	&& !FIPS_mode()
-#endif
-	) {
+    if (argv[0] == atom_aes_cfb8
+        && (key.size == 24 || key.size == 32)) {
         /* Why do EVP_CIPHER_CTX_set_key_length() fail on these key sizes?
          * Fall back on low level API
          */
         return aes_cfb_8_crypt(env, argc-1, argv+1);
     }
+    else if (argv[0] == atom_aes_cfb128
+        && (key.size == 24 || key.size == 32)) {
+        /* Why do EVP_CIPHER_CTX_set_key_length() fail on these key sizes?
+         * Fall back on low level API
+         */
+        return aes_cfb_128_crypt_nif(env, argc-1, argv+1);
+   }
 
     ivec_size  = EVP_CIPHER_iv_length(cipher);
 
@@ -1820,6 +1826,31 @@ static ERL_NIF_TERM aes_cfb_8_crypt(ErlNifEnv* env, int argc, const ERL_NIF_TERM
                       (argv[3] == atom_true));
      CONSUME_REDS(env,text);
      return ret;
+}
+
+static ERL_NIF_TERM aes_cfb_128_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{/* (Key, IVec, Data, IsEncrypt) */
+    ErlNifBinary key, ivec, text;
+    AES_KEY aes_key;
+    unsigned char ivec_clone[16]; /* writable copy */
+    int new_ivlen = 0;
+    ERL_NIF_TERM ret;
+
+    if (!enif_inspect_iolist_as_binary(env, argv[0], &key)
+        || !(key.size == 16 || key.size == 24 || key.size == 32)
+        || !enif_inspect_binary(env, argv[1], &ivec) || ivec.size != 16
+        || !enif_inspect_iolist_as_binary(env, argv[2], &text)) {
+        return enif_make_badarg(env);
+    }
+
+    memcpy(ivec_clone, ivec.data, 16);
+    AES_set_encrypt_key(key.data, key.size * 8, &aes_key);
+    AES_cfb128_encrypt((unsigned char *) text.data,
+                       enif_make_new_binary(env, text.size, &ret),
+                       text.size, &aes_key, ivec_clone, &new_ivlen,
+                       (argv[3] != atom_true));
+    CONSUME_REDS(env,text);
+    return ret;
 }
 
 static ERL_NIF_TERM aes_ige_crypt_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -2329,6 +2360,27 @@ static ERL_NIF_TERM bin_from_bn(ErlNifEnv* env, const BIGNUM *bn)
     BN_bn2bin(bn, bin_ptr);
 
     return term;
+}
+
+static ERL_NIF_TERM strong_rand_range_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{/* (Range) */
+    BIGNUM *bn_range, *bn_rand;
+    ERL_NIF_TERM ret;
+
+    if(!get_bn_from_bin(env, argv[0], &bn_range)) {
+        return enif_make_badarg(env);
+    }
+
+    bn_rand = BN_new();
+    if (BN_rand_range(bn_rand, bn_range) != 1) {
+        ret = atom_false;
+    }
+    else {
+        ret = bin_from_bn(env, bn_rand);
+    }
+    BN_free(bn_rand);
+    BN_free(bn_range);
+    return ret;
 }
 
 static ERL_NIF_TERM rand_uniform_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])

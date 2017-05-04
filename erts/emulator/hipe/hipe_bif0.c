@@ -447,6 +447,7 @@ BIF_RETTYPE hipe_bifs_alloc_data_3(BIF_ALIST_3)
 {
     Uint align;
     HipeLoaderState *stp;
+    void *aligned_block;
 
     if (is_not_small(BIF_ARG_1) || is_not_small(BIF_ARG_2) ||
 	(!(stp = get_loader_state(BIF_ARG_3))) ||
@@ -459,18 +460,14 @@ BIF_RETTYPE hipe_bifs_alloc_data_3(BIF_ALIST_3)
     stp->data_segment_size = unsigned_val(BIF_ARG_2);
     if (stp->data_segment_size == 0)
 	BIF_RET(make_small(0));
-    stp->data_segment = erts_alloc(ERTS_ALC_T_HIPE, stp->data_segment_size);
-    if ((unsigned long)stp->data_segment & (align-1)) {
-	fprintf(stderr, "%s: erts_alloc(%lu) returned %p which is not %lu-byte "
-		"aligned\r\n",
-		__FUNCTION__, (unsigned long)stp->data_segment_size,
-		stp->data_segment, (unsigned long)align);
-	erts_free(ERTS_ALC_T_HIPE, stp->data_segment);
-	stp->data_segment = NULL;
-	stp->data_segment_size = 0;
-	BIF_ERROR(BIF_P, EXC_NOTSUP);
-    }
-    BIF_RET(address_to_term(stp->data_segment, BIF_P));
+
+    stp->data_segment_size += align-1; /* Make room to align the pointer */
+    stp->data_segment = erts_alloc(ERTS_ALC_T_HIPE_LL, stp->data_segment_size);
+
+    /* Align the pointer */
+    aligned_block = (void*)((UWord)(stp->data_segment + align - 1)
+			    & ~(UWord)(align-1));
+    BIF_RET(address_to_term(aligned_block, BIF_P));
 }
 
 /*
@@ -545,7 +542,7 @@ static void init_const_term_table(void)
     f.meta_alloc = (HMALLOC_FUN) erts_alloc;
     f.meta_free = (HMFREE_FUN) erts_free;
     f.meta_print = (HMPRINT_FUN) erts_print;
-    hash_init(ERTS_ALC_T_HIPE, &const_term_table, "const_term_table", 97, f);
+    hash_init(ERTS_ALC_T_HIPE_LL, &const_term_table, "const_term_table", 97, f);
 }
 
 BIF_RETTYPE hipe_bifs_merge_term_1(BIF_ALIST_1)
@@ -606,10 +603,7 @@ static void print_mfa(Eterm mod, Eterm fun, unsigned int ari)
 }
 #endif
 
-/*
- * Convert {M,F,A} to pointer to first insn after initial func_info.
- */
-static Uint *hipe_find_emu_address(Eterm mod, Eterm name, unsigned int arity)
+static ErtsCodeInfo* hipe_find_emu_address(Eterm mod, Eterm name, unsigned int arity)
 {
     Module *modp;
     BeamCodeHeader* code_hdr;
@@ -620,15 +614,15 @@ static Uint *hipe_find_emu_address(Eterm mod, Eterm name, unsigned int arity)
 	return NULL;
     n = code_hdr->num_functions;
     for (i = 0; i < n; ++i) {
-	Uint *code_ptr = (Uint*)code_hdr->functions[i];
-	ASSERT(code_ptr[0] == BeamOpCode(op_i_func_info_IaaI));
-	if (code_ptr[3] == name && code_ptr[4] == arity)
-	    return code_ptr+5;
+	ErtsCodeInfo *ci = code_hdr->functions[i];
+	ASSERT(ci->op == BeamOpCode(op_i_func_info_IaaI));
+	if (ci->mfa.function == name && ci->mfa.arity == arity)
+	    return ci;
     }
     return NULL;
 }
 
-Uint *hipe_bifs_find_pc_from_mfa(Eterm term)
+ErtsCodeInfo* hipe_bifs_find_pc_from_mfa(Eterm term)
 {
     struct hipe_mfa mfa;
 
@@ -639,10 +633,10 @@ Uint *hipe_bifs_find_pc_from_mfa(Eterm term)
 
 BIF_RETTYPE hipe_bifs_fun_to_address_1(BIF_ALIST_1)
 {
-    Eterm *pc = hipe_bifs_find_pc_from_mfa(BIF_ARG_1);
-    if (!pc)
+    ErtsCodeInfo* ci = hipe_bifs_find_pc_from_mfa(BIF_ARG_1);
+    if (!ci)
 	BIF_ERROR(BIF_P, BADARG);
-    BIF_RET(address_to_term(pc, BIF_P));
+    BIF_RET(address_to_term(erts_codeinfo_to_code(ci), BIF_P));
 }
 
 BIF_RETTYPE hipe_bifs_commit_patch_load_1(BIF_ALIST_1)
@@ -655,7 +649,7 @@ BIF_RETTYPE hipe_bifs_commit_patch_load_1(BIF_ALIST_1)
 
 BIF_RETTYPE hipe_bifs_set_native_address_3(BIF_ALIST_3)
 {
-    Eterm *pc;
+    ErtsCodeInfo *ci;
     void *address;
     int is_closure;
     struct hipe_mfa mfa;
@@ -678,11 +672,12 @@ BIF_RETTYPE hipe_bifs_set_native_address_3(BIF_ALIST_3)
        simply have called hipe_bifs_find_pc_from_mfa(). */
     if (!term_to_mfa(BIF_ARG_1, &mfa))
 	BIF_ERROR(BIF_P, BADARG);
-    pc = hipe_find_emu_address(mfa.mod, mfa.fun, mfa.ari);
+    ci = hipe_find_emu_address(mfa.mod, mfa.fun, mfa.ari);
 
-    if (pc) {
-	DBG_TRACE_MFA(mfa.mod,mfa.fun,mfa.ari, "set beam call trap at %p -> %p", pc, address);
-	hipe_set_call_trap(pc, address, is_closure);
+    if (ci) {
+	DBG_TRACE_MFA(mfa.mod,mfa.fun,mfa.ari, "set beam call trap at %p -> %p",
+                      erts_codeinfo_to_code(ci), address);
+	hipe_set_call_trap(ci, address, is_closure);
 	BIF_RET(am_true);
     }
     DBG_TRACE_MFA(mfa.mod,mfa.fun,mfa.ari, "failed set call trap to %p, no beam code found", address);
@@ -859,7 +854,7 @@ static void init_primop_table(void)
     f.meta_free = (HMFREE_FUN) erts_free;
     f.meta_print = (HMPRINT_FUN) erts_print;
 
-    hash_init(ERTS_ALC_T_HIPE, &primop_table, "primop_table", 50, f);
+    hash_init(ERTS_ALC_T_HIPE_LL, &primop_table, "primop_table", 50, f);
 
     for (i = 0; i < sizeof(primops)/sizeof(primops[0]); ++i)
 	hash_put(&primop_table, &primops[i]);
@@ -1094,7 +1089,7 @@ static void mod2mfa_tab_init(void)
     f.meta_free = (HMFREE_FUN) erts_free;
     f.meta_print = (HMPRINT_FUN) erts_print;
 
-    hash_init(ERTS_ALC_T_HIPE, &mod2mfa_tab, "mod2mfa_tab", 50, f);
+    hash_init(ERTS_ALC_T_HIPE_LL, &mod2mfa_tab, "mod2mfa_tab", 50, f);
 }
 
 static struct hipe_mfa_info* mod2mfa_get(Module* modp)
@@ -1172,7 +1167,7 @@ struct hipe_mfa_info* mod2mfa_get_safe(Module* modp)
 static struct hipe_mfa_info **hipe_mfa_info_table_alloc_bucket(unsigned int size)
 {
     unsigned long nbytes = size * sizeof(struct hipe_mfa_info*);
-    struct hipe_mfa_info **bucket = erts_alloc(ERTS_ALC_T_HIPE, nbytes);
+    struct hipe_mfa_info **bucket = erts_alloc(ERTS_ALC_T_HIPE_LL, nbytes);
     sys_memzero(bucket, nbytes);
     return bucket;
 }
@@ -1201,14 +1196,14 @@ static void hipe_mfa_info_table_grow(void)
 	    b = next;
 	}
     }
-    erts_free(ERTS_ALC_T_HIPE, old_bucket);
+    erts_free(ERTS_ALC_T_HIPE_LL, old_bucket);
 }
 
 static struct hipe_mfa_info *hipe_mfa_info_table_alloc(Eterm m, Eterm f, unsigned int arity)
 {
     struct hipe_mfa_info *res;
 
-    res = (struct hipe_mfa_info*)erts_alloc(ERTS_ALC_T_HIPE, sizeof(*res));
+    res = (struct hipe_mfa_info*)erts_alloc(ERTS_ALC_T_HIPE_LL, sizeof(*res));
     res->m = m;
     res->f = f;
     res->a = arity;
@@ -1547,7 +1542,7 @@ BIF_RETTYPE hipe_bifs_add_ref_2(BIF_ALIST_2)
     hipe_mfa_info_table_rwlock();
     callee_mfa = hipe_mfa_info_table_put_rwlocked(callee.mod, callee.fun, callee.ari);
 
-    ref = erts_alloc(ERTS_ALC_T_HIPE, sizeof(struct hipe_ref));
+    ref = erts_alloc(ERTS_ALC_T_HIPE_LL, sizeof(struct hipe_ref));
     ref->address = address;
 #if defined(__arm__) || defined(__powerpc__) || defined(__ppc__) || defined(__powerpc64__)
     ref->trampoline = trampoline;
@@ -1618,47 +1613,7 @@ static void purge_mfa(struct hipe_mfa_info* p)
     ASSERT(p->is_stub);
     remove_mfa_info(p);
     hipe_free_native_stub(p->remote_address);
-    erts_free(ERTS_ALC_T_HIPE, p);
-}
-
-/* Called by init:restart after unloading all hipe compiled modules
- * to work around old bug that caused execution of deallocated beam code.
- * Can be removed now when delete/purge of native modules works better.
- * Test: Do init:restart in debug compiled vm with hipe compiled kernel. 
- */
-static void hipe_purge_all_refs(void)
-{
-    struct hipe_mfa_info **bucket;
-    unsigned int i, nrbuckets;
-
-    hipe_mfa_info_table_rwlock();
-
-    ASSERT(hipe_mfa_info_table.used == 0);
-    bucket = hipe_mfa_info_table.bucket;
-    nrbuckets = 1 << hipe_mfa_info_table.log2size;
-    for (i = 0; i < nrbuckets; ++i) {	
-        ASSERT(bucket[i] == NULL);
-	while (bucket[i] != NULL) {
-	    struct hipe_mfa_info* mfa = bucket[i];
-	    bucket[i] = mfa->bucket.next;
-
-            hash_erase(&mod2mfa_tab, mfa);
-            erts_free(ERTS_ALC_T_HIPE, mfa);
-	}
-    }
-    hipe_mfa_info_table.used = 0;
-    hipe_mfa_info_table_rwunlock();
-}
-
-BIF_RETTYPE hipe_bifs_remove_refs_from_1(BIF_ALIST_1)
-{
-    if (BIF_ARG_1 == am_all) {
-	hipe_purge_all_refs();
-	BIF_RET(am_ok);
-    }
-
-    ASSERT(!"hipe_bifs_remove_refs_from_1() called");
-    BIF_ERROR(BIF_P, BADARG);
+    erts_free(ERTS_ALC_T_HIPE_LL, p);
 }
 
 int hipe_purge_need_blocking(Module* modp)
@@ -1717,7 +1672,7 @@ void hipe_purge_refs(struct hipe_ref* first_ref, Eterm caller_module,
         }
 
         ref = ref->next_from_modi;
-        erts_free(ERTS_ALC_T_HIPE, free_ref);
+        erts_free(ERTS_ALC_T_HIPE_LL, free_ref);
     }
 }
 
@@ -1981,6 +1936,6 @@ BIF_RETTYPE hipe_bifs_alloc_loader_state_1(BIF_ALIST_1)
 
     hp = HAlloc(BIF_P, ERTS_MAGIC_REF_THING_SIZE);
     res = erts_mk_magic_ref(&hp, &MSO(BIF_P), magic);
-    erts_refc_dec(&magic->refc, 1);
+    erts_refc_dec(&magic->intern.refc, 1);
     BIF_RET(res);
 }

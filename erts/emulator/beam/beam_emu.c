@@ -3044,10 +3044,12 @@ do {						\
      GetArg2(2, Op1, Op2);
      if (is_both_small(Op1, Op2)) {
 	 /*
-	  * We could extract the tag from one argument, but a tag extraction
-	  * could mean a shift.  Therefore, play it safe here.
+          * TAG ^ TAG == 0.
+          *
+          * Therefore, we perform the XOR operation on the tagged values,
+          * and OR in the tag bits.
 	  */
-	 Eterm result = make_small(signed_val(Op1) ^ signed_val(Op2));
+	 Eterm result = (Op1 ^ Op2) | make_small(0);
 	 StoreBifResult(4, result);
      }
      DO_OUTLINED_ARITH_2(bxor, Op1, Op2);
@@ -3885,7 +3887,6 @@ do {						\
 	  * Allocate the binary struct itself.
 	  */
 	 bptr = erts_bin_nrml_alloc(num_bytes);
-	 erts_refc_init(&bptr->refc, 1);
 	 erts_current_bin = (byte *) bptr->orig_bytes;
 
 	 /*
@@ -3980,7 +3981,6 @@ do {						\
 	  * Allocate the binary struct itself.
 	  */
 	 bptr = erts_bin_nrml_alloc(BsOp1);
-	 erts_refc_init(&bptr->refc, 1);
 	 erts_current_bin = (byte *) bptr->orig_bytes;
 
 	 /*
@@ -4948,14 +4948,14 @@ do {						\
 	  */
          ErtsCodeInfo *ci = erts_code_to_codeinfo(I);
 	 ASSERT(ci->op == (Uint) OpCode(i_func_info_IaaI));
-	 c_p->hipe.u.ncallee = (void(*)(void)) ci->native;
+	 c_p->hipe.u.ncallee = ci->u.ncallee;
 	 ++hipe_trap_count;
 	 HIPE_MODE_SWITCH(HIPE_MODE_SWITCH_CMD_CALL | (ci->mfa.arity << 8));
      }
      OpCase(hipe_trap_call_closure): {
        ErtsCodeInfo *ci = erts_code_to_codeinfo(I);
        ASSERT(ci->op == (Uint) OpCode(i_func_info_IaaI));
-       c_p->hipe.u.ncallee = (void(*)(void)) ci->native;
+       c_p->hipe.u.ncallee = ci->u.ncallee;
        ++hipe_trap_count;
        HIPE_MODE_SWITCH(HIPE_MODE_SWITCH_CMD_CALL_CLOSURE | (ci->mfa.arity << 8));
      }
@@ -5027,7 +5027,7 @@ do {						\
       * ... remainder of original BEAM code
       */
      ErtsCodeInfo *ci = erts_code_to_codeinfo(I);
-     struct hipe_call_count *hcc = (struct hipe_call_count*)ci->native;
+     struct hipe_call_count *hcc = ci->u.hcc;
      ASSERT(ci->op == (Uint) OpCode(i_func_info_IaaI));
      ASSERT(hcc != NULL);
      ASSERT(VALID_INSTR(hcc->opcode));

@@ -1821,7 +1821,7 @@ static int ttb_context_destructor(Binary *context_bin)
 	case TTBEncode:
 	    DESTROY_SAVED_WSTACK(&context->s.ec.wstack);
 	    if (context->s.ec.result_bin != NULL) { /* Set to NULL if ever made alive! */
-		ASSERT(erts_refc_read(&(context->s.ec.result_bin->refc),0) == 0);
+		ASSERT(erts_refc_read(&(context->s.ec.result_bin->intern.refc),1));
 		erts_bin_free(context->s.ec.result_bin);
 		context->s.ec.result_bin = NULL;
 	    }
@@ -1830,13 +1830,13 @@ static int ttb_context_destructor(Binary *context_bin)
 	    erl_zlib_deflate_finish(&(context->s.cc.stream));
 
 	    if (context->s.cc.destination_bin != NULL) { /* Set to NULL if ever made alive! */
-		ASSERT(erts_refc_read(&(context->s.cc.destination_bin->refc),0) == 0);
+		ASSERT(erts_refc_read(&(context->s.cc.destination_bin->intern.refc),1));
 		erts_bin_free(context->s.cc.destination_bin);
 		context->s.cc.destination_bin = NULL;
 	    }
 	    
 	    if (context->s.cc.result_bin != NULL) { /* Set to NULL if ever made alive! */
-		ASSERT(erts_refc_read(&(context->s.cc.result_bin->refc),0) == 0);
+		ASSERT(erts_refc_read(&(context->s.cc.result_bin->intern.refc),1));
 		erts_bin_free(context->s.cc.result_bin);
 		context->s.cc.result_bin = NULL;
 	    }
@@ -1920,7 +1920,6 @@ static Eterm erts_term_to_binary_int(Process* p, Eterm Term, int level, Uint fla
 		}
 
 		result_bin = erts_bin_nrml_alloc(size);
-		erts_refc_init(&result_bin->refc, 0);
 		result_bin->orig_bytes[0] = VERSION_MAGIC;
 		/* Next state immediately, no need to export context */
 		context->state = TTBEncode;
@@ -1960,8 +1959,7 @@ static Eterm erts_term_to_binary_int(Process* p, Eterm Term, int level, Uint fla
 		    pb->bytes = (byte*) result_bin->orig_bytes;
 		    pb->flags = 0;
 		    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-		    erts_refc_inc(&result_bin->refc, 1);
-		    if (context_b && erts_refc_read(&context_b->refc,0) == 0) {
+		    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
 			erts_bin_free(context_b);
 		    }
 		    return make_binary(pb);
@@ -1980,7 +1978,6 @@ static Eterm erts_term_to_binary_int(Process* p, Eterm Term, int level, Uint fla
 		context->s.cc.result_bin = result_bin;
 
 		result_bin = erts_bin_nrml_alloc(real_size);
-		erts_refc_init(&result_bin->refc, 0);
 		result_bin->orig_bytes[0] = VERSION_MAGIC;
 
 		context->s.cc.destination_bin = result_bin;
@@ -2028,15 +2025,15 @@ static Eterm erts_term_to_binary_int(Process* p, Eterm Term, int level, Uint fla
 			pb->next = MSO(p).first;
 			MSO(p).first = (struct erl_off_heap_header*)pb;
 			pb->val = result_bin;
+			ASSERT(erts_refc_read(&result_bin->intern.refc, 1));
 			pb->bytes = (byte*) result_bin->orig_bytes;
 			pb->flags = 0;
 			OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-			erts_refc_inc(&result_bin->refc, 1);
 			erts_bin_free(context->s.cc.result_bin);
 			context->s.cc.result_bin = NULL;
 			context->alive = 0;
 			BUMP_REDS(p, (this_time * CONTEXT_REDS) / TERM_TO_BINARY_COMPRESS_CHUNK);
-			if (context_b && erts_refc_read(&context_b->refc,0) == 0) {
+			if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
 			    erts_bin_free(context_b);
 			}
 			return make_binary(pb);
@@ -2055,13 +2052,13 @@ static Eterm erts_term_to_binary_int(Process* p, Eterm Term, int level, Uint fla
 		    pb->bytes = (byte*) result_bin->orig_bytes;
 		    pb->flags = 0;
 		    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-		    erts_refc_inc(&result_bin->refc, 1);
+		    ASSERT(erts_refc_read(&result_bin->intern.refc, 1));
 		    erl_zlib_deflate_finish(&(context->s.cc.stream));
 		    erts_bin_free(context->s.cc.destination_bin);
 		    context->s.cc.destination_bin = NULL;
 		    context->alive = 0;
 		    BUMP_REDS(p, (this_time * CONTEXT_REDS) / TERM_TO_BINARY_COMPRESS_CHUNK);
-		    if (context_b && erts_refc_read(&context_b->refc,0) == 0) {
+		    if (context_b && erts_refc_read(&context_b->intern.refc,0) == 0) {
 			erts_bin_free(context_b);
 		    }
 		    return make_binary(pb);
@@ -2093,7 +2090,6 @@ enc_atom(ErtsAtomCacheMap *acmp, Eterm atom, byte *ep, Uint32 dflags)
 {
     int iix;
     int len;
-    int utf8_atoms = (int) (dflags & DFLAG_UTF8_ATOMS);
 
     ASSERT(is_atom(atom));
 
@@ -2122,8 +2118,8 @@ enc_atom(ErtsAtomCacheMap *acmp, Eterm atom, byte *ep, Uint32 dflags)
     if (iix < 0) {
 	Atom *a = atom_tab(atom_val(atom));
 	len = a->len;
-	if (utf8_atoms || a->latin1_chars < 0) {
-	    if (len > 255) {
+        {
+            if (len > 255) {
 		*ep++ = ATOM_UTF8_EXT;
 		put_int16(len, ep);
 		ep += 2;
@@ -2134,32 +2130,6 @@ enc_atom(ErtsAtomCacheMap *acmp, Eterm atom, byte *ep, Uint32 dflags)
 		ep += 1;
 	    }
 	    sys_memcpy((char *) ep, (char *) a->name, len);
-	}
-	else {
-	    if (a->latin1_chars <= 255 && (dflags & DFLAG_SMALL_ATOM_TAGS)) {
-		*ep++ = SMALL_ATOM_EXT;
-		if (len == a->latin1_chars) {
-		    sys_memcpy(ep+1, a->name, len);
-		}
-		else {
-		    len = erts_utf8_to_latin1(ep+1, a->name, len);
-		    ASSERT(len == a->latin1_chars);
-		}
-		put_int8(len, ep);
-		ep++;
-	    }
-	    else {
-		*ep++ = ATOM_EXT;
-		if (len == a->latin1_chars) {
-		    sys_memcpy(ep+2, a->name, len);
-		}
-		else {
-		    len = erts_utf8_to_latin1(ep+2, a->name, len);
-		    ASSERT(len == a->latin1_chars);
-		}
-		put_int16(len, ep);
-		ep += 2;
-	    }	    
 	}
 	ep += len;
 	return ep;
@@ -2776,7 +2746,7 @@ enc_term_int(TTBEncodeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj, byte* ep,
 			    erts_emasculate_writable_binary(pb);
 			    bytes += (pb->val->orig_bytes - before_realloc);
 			}
-			erts_refc_inc(&pb->val->refc, 2);
+			erts_refc_inc(&pb->val->intern.refc, 2);
 
 			sys_memcpy(&tmp, pb, sizeof(ProcBin));
 			tmp.next = *off_heap;
@@ -3536,7 +3506,6 @@ dec_term_atom_common:
 		} else {
 		    Binary* dbin = erts_bin_nrml_alloc(n);
 		    ProcBin* pb;
-		    erts_refc_init(&dbin->refc, 1);
 		    pb = (ProcBin *) hp;
 		    hp += PROC_BIN_SIZE;
 		    pb->thing_word = HEADER_PROC_BIN;
@@ -3589,7 +3558,6 @@ dec_term_atom_common:
 		    Binary* dbin = erts_bin_nrml_alloc(n);
 		    ProcBin* pb;
 
-		    erts_refc_init(&dbin->refc, 1);
 		    pb = (ProcBin *) hp;
 		    pb->thing_word = HEADER_PROC_BIN;
 		    pb->size = n;
@@ -3892,7 +3860,7 @@ dec_term_atom_common:
 		sys_memcpy(pb, ep, sizeof(ProcBin));
 		ep += sizeof(ProcBin);
 
-		erts_refc_inc(&pb->val->refc, 1);
+		erts_refc_inc(&pb->val->intern.refc, 1);
 		hp += PROC_BIN_SIZE;
 		pb->next = factory->off_heap->first;
 		factory->off_heap->first = (struct erl_off_heap_header*)pb;
@@ -3910,7 +3878,7 @@ dec_term_atom_common:
 		sys_memcpy(pb, ep, sizeof(ProcBin));
 		ep += sizeof(ProcBin);
 
-		erts_refc_inc(&pb->val->refc, 1);
+		erts_refc_inc(&pb->val->intern.refc, 1);
 		hp += PROC_BIN_SIZE;
 		pb->next = factory->off_heap->first;
 		factory->off_heap->first = (struct erl_off_heap_header*)pb;
@@ -4010,7 +3978,7 @@ error:
 	    factory->hp = hp;   /* the largest must be the freshest */
 	}
     }
-    else ASSERT(factory->hp == hp);
+    else ASSERT(!factory->hp || factory->hp == hp);
 
 error_hamt:
     erts_factory_undo(factory);
@@ -4085,18 +4053,12 @@ encode_size_struct_int(TTBSizeContext* ctx, ErtsAtomCacheMap *acmp, Eterm obj,
 	    else {
 		Atom *a = atom_tab(atom_val(obj));
 		int alen;
-		if ((dflags & DFLAG_UTF8_ATOMS) || a->latin1_chars < 0) {
+                {
 		    alen = a->len;
 		    result += 1 + 1 + alen;
 		    if (alen > 255) {
 			result++; /* ATOM_UTF8_EXT (not small) */
 		    }
-		}
-		else {
-		    alen = a->latin1_chars;
-		    result += 1 + 1 + alen;
-		    if (alen > 255 || !(dflags & DFLAG_SMALL_ATOM_TAGS))
-			result++; /* ATOM_EXT (not small) */
 		}
 		insert_acache_map(acmp, obj, dflags);
 	    }

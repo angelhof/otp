@@ -169,6 +169,15 @@ typedef struct db_table_method
 				    DbTable* tb, /* [in out] */ 
 				    Eterm continuation, 
 				    Eterm* ret);
+    int (*db_select_replace)(Process* p,
+            DbTable* tb, /* [in out] */
+            Eterm tid,
+            Eterm pattern,
+            Eterm* ret);
+    int (*db_select_replace_continue)(Process* p,
+            DbTable* tb, /* [in out] */
+            Eterm continuation,
+            Eterm* ret);
     int (*db_take)(Process *, DbTable *, Eterm, Eterm *);
 
     int (*db_delete_all_objects)(Process* p,
@@ -374,6 +383,7 @@ Eterm db_add_counter(Eterm** hpp, Wterm counter, Eterm incr);
 Eterm db_match_set_lint(Process *p, Eterm matchexpr, Uint flags);
 Binary *db_match_set_compile(Process *p, Eterm matchexpr, 
 			     Uint flags);
+int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body);
 int erts_db_match_prog_destructor(Binary *);
 
 typedef struct match_prog {
@@ -494,7 +504,7 @@ ERTS_GLB_INLINE Binary *
 erts_db_get_match_prog_binary_unchecked(Eterm term)
 {
     Binary *bp = erts_magic_ref2bin(term);
-    ASSERT(bp->flags & BIN_FLAG_MAGIC);
+    ASSERT(bp->intern.flags & BIN_FLAG_MAGIC);
     ASSERT((ERTS_MAGIC_BIN_DESTRUCTOR(bp) == erts_db_match_prog_destructor));
     return bp;
 }
@@ -506,7 +516,7 @@ erts_db_get_match_prog_binary(Eterm term)
     if (!is_internal_magic_ref(term))
 	return NULL;
     bp = erts_magic_ref2bin(term);
-    ASSERT(bp->flags & BIN_FLAG_MAGIC);
+    ASSERT(bp->intern.flags & BIN_FLAG_MAGIC);
     if (ERTS_MAGIC_BIN_DESTRUCTOR(bp) != erts_db_match_prog_destructor)
 	return NULL;
     return bp;
@@ -518,7 +528,7 @@ erts_db_get_match_prog_binary(Eterm term)
 ** Convenience when compiling into Binary structures
 */
 #define IsMatchProgBinary(BP) \
-  (((BP)->flags & BIN_FLAG_MAGIC) \
+  (((BP)->intern.flags & BIN_FLAG_MAGIC) \
    && ERTS_MAGIC_BIN_DESTRUCTOR((BP)) == erts_db_match_prog_destructor)
 
 #define Binary2MatchProg(BP) \

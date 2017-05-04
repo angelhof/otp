@@ -55,6 +55,7 @@
 #include "dtrace-wrapper.h"
 #include "erl_process.h"
 #include "erl_bif_unique.h"
+#include "erl_utils.h"
 #undef ERTS_WANT_NFUNC_SCHED_INTERNALS__
 #define ERTS_WANT_NFUNC_SCHED_INTERNALS__
 #include "erl_nfunc_sched.h"
@@ -998,16 +999,14 @@ int enif_inspect_binary(ErlNifEnv* env, Eterm bin_term, ErlNifBinary* bin)
 	byte* raw_ptr;
     }u;
 
-    if (is_boxed(bin_term) && *binary_val(bin_term) == HEADER_SUB_BIN) {
-	ErlSubBin* sb = (ErlSubBin*) binary_val(bin_term);
-	if (sb->is_writable) {
-	    ProcBin* pb = (ProcBin*) binary_val(sb->orig);
-	    ASSERT(pb->thing_word == HEADER_PROC_BIN);
-	    if (pb->flags) {
-		erts_emasculate_writable_binary(pb);
-		sb->is_writable = 0;
-	    }
-	}
+    if (is_binary(bin_term)) {
+        ProcBin *pb = (ProcBin*) binary_val(bin_term);
+        if (pb->thing_word == HEADER_SUB_BIN) {
+            ErlSubBin* sb = (ErlSubBin*) pb;
+            pb = (ProcBin*) binary_val(sb->orig);
+        }
+        if (pb->thing_word == HEADER_PROC_BIN && pb->flags)
+            erts_emasculate_writable_binary(pb);
     }
     u.tmp = NULL;
     bin->data = erts_get_aligned_binary_bytes_extra(bin_term, &u.raw_ptr, allocator,
@@ -1024,7 +1023,7 @@ int enif_inspect_binary(ErlNifEnv* env, Eterm bin_term, ErlNifBinary* bin)
     bin->bin_term = bin_term;
     bin->size = binary_size(bin_term);
     bin->ref_bin = NULL;
-    ADD_READONLY_CHECK(env, bin->data, bin->size); 
+    ADD_READONLY_CHECK(env, bin->data, bin->size);
     return 1;
 }
 
@@ -1076,7 +1075,6 @@ int enif_alloc_binary(size_t size, ErlNifBinary* bin)
     if (refbin == NULL) {
 	return 0; /* The NIF must take action */
     }
-    erts_refc_init(&refbin->refc, 1);
 
     bin->size = size;
     bin->data = (unsigned char*) refbin->orig_bytes;
@@ -1115,9 +1113,7 @@ void enif_release_binary(ErlNifBinary* bin)
     if (bin->ref_bin != NULL) {
 	Binary* refbin = bin->ref_bin;
 	ASSERT(bin->bin_term == THE_NON_VALUE);
-	if (erts_refc_dectest(&refbin->refc, 0) == 0) {
-	    erts_bin_free(refbin);
-	}
+        erts_bin_release(refbin);
     }
 #ifdef DEBUG
     bin->data = NULL;
@@ -1215,6 +1211,22 @@ int enif_compare(Eterm lhs, Eterm rhs)
     return result;
 }
 
+ErlNifUInt64 enif_hash(ErlNifHash type, Eterm term, ErlNifUInt64 salt)
+{
+    switch (type) {
+        case ERL_NIF_INTERNAL_HASH:
+            return make_internal_hash(term, (Uint32) salt);
+        case ERL_NIF_PHASH2:
+            /* It appears that make_hash2 doesn't always react to seasoning
+             * as well as it should. Therefore, let's make it ignore the salt
+             * value and declare salted uses of phash2 as unsupported.
+             */
+            return make_hash2(term) & ((1 << 27) - 1);
+        default:
+            return 0;
+    }
+}
+
 int enif_get_tuple(ErlNifEnv* env, Eterm tpl, int* arity, const Eterm** array)
 {
     Eterm* ptr;
@@ -1281,7 +1293,7 @@ Eterm enif_make_binary(ErlNifEnv* env, ErlNifBinary* bin)
 	
 	OH_OVERHEAD(&(MSO(env->proc)), pb->size / sizeof(Eterm));
 	bin_term = make_binary(pb);	
-	if (erts_refc_read(&bptr->refc, 1) == 1) {
+	if (erts_refc_read(&bptr->intern.refc, 1) == 1) {
 	    /* Total ownership transfer */
 	    bin->ref_bin = NULL;
 	    bin->bin_term = bin_term;
@@ -2251,7 +2263,7 @@ static int nif_resource_dtor(Binary* bin)
 
         ASSERT(type->down);
         erts_smp_mtx_lock(&rm->lock);
-        ASSERT(erts_refc_read(&bin->refc, 0) == 0);
+        ASSERT(erts_refc_read(&bin->intern.refc, 0) == 0);
         if (rm->root) {
             ASSERT(!rm->is_dying);
             destroy_all_monitors(rm->root, resource);
@@ -2325,13 +2337,13 @@ void erts_fire_nif_monitor(ErtsResource* resource, Eterm pid, Eterm ref)
         erts_smp_mtx_unlock(&rmp->lock);
 
         if (free_me) {
-            ASSERT(erts_refc_read(&bin->binary.refc, 0) == 0);
+            ASSERT(erts_refc_read(&bin->binary.intern.refc, 0) == 0);
             erts_bin_free(&bin->binary);
         }
         return;
     }
     ASSERT(!rmp->is_dying);
-    if (erts_refc_inc_unless(&bin->binary.refc, 0, 0) == 0) {
+    if (erts_refc_inc_unless(&bin->binary.intern.refc, 0, 0) == 0) {
         /*
          * Racing resource destruction. 
          * To avoid a more complex refc-dance with destructing thread
@@ -2350,9 +2362,7 @@ void erts_fire_nif_monitor(ErtsResource* resource, Eterm pid, Eterm ref)
         resource->type->down(&msg_env.env, resource->data, &nif_pid, &nif_monitor);
         post_nif_noproc(&msg_env);
 
-        if (erts_refc_dectest(&bin->binary.refc, 0) == 0) {
-            erts_bin_free(&bin->binary);
-        }
+        erts_bin_release(&bin->binary);
     }
     erts_destroy_monitor(rmon);
 }
@@ -2381,7 +2391,7 @@ void* enif_alloc_resource(ErlNifResourceType* type, size_t data_sz)
 
     ASSERT(type->owner && type->next && type->prev); /* not allowed in load/upgrade */
     resource->type = type;
-    erts_refc_inc(&bin->refc, 1);
+    erts_refc_inc(&bin->intern.refc, 1);
 #ifdef DEBUG
     erts_refc_init(&resource->nif_refc, 1);
 #endif
@@ -2410,9 +2420,7 @@ void enif_release_resource(void* obj)
 #ifdef DEBUG
     erts_refc_dec(&resource->nif_refc, 0);
 #endif
-    if (erts_refc_dectest(&bin->binary.refc, 0) == 0) {
-	erts_bin_free(&bin->binary);
-    }
+    erts_bin_release(&bin->binary);
 }
 
 void enif_keep_resource(void* obj)
@@ -2425,7 +2433,7 @@ void enif_keep_resource(void* obj)
 #ifdef DEBUG
     erts_refc_inc(&resource->nif_refc, 1);
 #endif
-    erts_refc_inc(&bin->binary.refc, 2);
+    erts_refc_inc(&bin->binary.intern.refc, 2);
 }
 
 Eterm erts_bld_resource_ref(Eterm** hpp, ErlOffHeap* oh, ErtsResource* resource)
@@ -2462,7 +2470,7 @@ ERL_NIF_TERM enif_make_resource_binary(ErlNifEnv* env, void* obj,
     pb->flags = 0;
 
     OH_OVERHEAD(ohp, size / sizeof(Eterm));
-    erts_refc_inc(&bin->binary.refc, 1);
+    erts_refc_inc(&bin->binary.intern.refc, 1);
 
     return make_binary(hp);
 }
@@ -2487,7 +2495,7 @@ int enif_get_resource(ErlNifEnv* env, ERL_NIF_TERM term, ErlNifResourceType* typ
         }
         */
         mbin = ((ProcBin *) hp)->val;
-        if (!(mbin->flags & BIN_FLAG_MAGIC))
+        if (!(mbin->intern.flags & BIN_FLAG_MAGIC))
             return 0;
     }
     resource = (ErtsResource*) ERTS_MAGIC_BIN_UNALIGNED_DATA(mbin);
@@ -2820,14 +2828,19 @@ enif_thread_type(void)
     if (!esdp)
 	return ERL_NIF_THR_UNDEFINED;
 
-    if (!ERTS_SCHEDULER_IS_DIRTY(esdp))
+    switch (esdp->type) {
+    case ERTS_SCHED_NORMAL:
 	return ERL_NIF_THR_NORMAL_SCHEDULER;
-
-    if (ERTS_SCHEDULER_IS_DIRTY_CPU(esdp))
+#ifdef ERTS_DIRTY_SCHEDULERS
+    case ERTS_SCHED_DIRTY_CPU:
 	return ERL_NIF_THR_DIRTY_CPU_SCHEDULER;
-
-    ASSERT(ERTS_SCHEDULER_IS_DIRTY_IO(esdp));
-    return ERL_NIF_THR_DIRTY_IO_SCHEDULER;
+    case ERTS_SCHED_DIRTY_IO:
+        return ERL_NIF_THR_DIRTY_IO_SCHEDULER;
+#endif
+    default:
+        ERTS_INTERNAL_ERROR("Invalid scheduler type");
+	return -1;
+    }
 }
 
 /* Maps */
@@ -3655,11 +3668,11 @@ BIF_RETTYPE load_nif_2(BIF_ALIST_2)
 	    ci = *get_func_pp(this_mi->code_hdr, f_atom, f->arity);
             code_ptr = erts_codeinfo_to_code(ci);
 
-	    if (ci->native == 0) {
+	    if (ci->u.gen_bp == NULL) {
 		code_ptr[0] = (BeamInstr) BeamOp(op_call_nif);
 	    }
 	    else { /* Function traced, patch the original instruction word */
-		GenericBp* g = (GenericBp *) ci->native;
+		GenericBp* g = ci->u.gen_bp;
 		ASSERT(code_ptr[0] ==
 		       (BeamInstr) BeamOp(op_i_generic_breakpoint));
 		g->orig_instr = (BeamInstr) BeamOp(op_call_nif);

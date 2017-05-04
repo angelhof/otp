@@ -66,7 +66,7 @@ client_hello(Host, Port, Cookie, ConnectionStates,
     CipherSuites = ssl_handshake:available_suites(UserSuites, TLSVersion),
 
     Extensions = ssl_handshake:client_hello_extensions(Host, TLSVersion, CipherSuites,
-						SslOpts, ConnectionStates, Renegotiation),
+                                                       SslOpts, ConnectionStates, Renegotiation),
 
     Id = ssl_session:client_id({Host, Port, SslOpts}, Cache, CacheCb, OwnCert),
 
@@ -252,7 +252,7 @@ enc_handshake(#server_hello{} = HandshakeMsg, Version) ->
     {Type,  <<?BYTE(DTLSMajor), ?BYTE(DTLSMinor), Rest/binary>>};
 
 enc_handshake(HandshakeMsg, Version) ->
-    ssl_handshake:encode_handshake(HandshakeMsg, Version).
+    ssl_handshake:encode_handshake(HandshakeMsg, dtls_v1:corresponding_tls_version(Version)).
 
 bin_fragments(Bin, Size) ->
      bin_fragments(Bin, size(Bin), Size, 0, []).
@@ -474,14 +474,12 @@ merge_fragments(#handshake_fragment{
       fragment = <<PreviousData/binary, Data/binary>>};
 %% already fully contained fragment
 merge_fragments(#handshake_fragment{
-                  fragment_offset = PreviousOffSet, 
-                  fragment_length = PreviousLen,
-                  fragment = PreviousData
-                 } = Previous, 
-               #handshake_fragment{
-                  fragment_offset = CurrentOffSet,
-                  fragment_length = CurrentLen,
-                  fragment = CurrentData})
+                   fragment_offset = PreviousOffSet, 
+                   fragment_length = PreviousLen
+                  } = Previous, 
+                #handshake_fragment{
+                   fragment_offset = CurrentOffSet,
+                   fragment_length = CurrentLen})
   when PreviousOffSet + PreviousLen >= CurrentOffSet andalso
        PreviousOffSet + PreviousLen >= CurrentOffSet + CurrentLen ->
     Previous;

@@ -61,6 +61,10 @@
 
 #define ERTS_DEFAULT_NO_ASYNC_THREADS	10
 
+#define ERTS_DEFAULT_SCHED_STACK_SIZE   128
+#define ERTS_DEFAULT_DCPU_SCHED_STACK_SIZE 40
+#define ERTS_DEFAULT_DIO_SCHED_STACK_SIZE 40
+
 /*
  * The variables below (prefixed with etp_) are for erts/etc/unix/etp-commands
  * only. Do not remove even though they aren't used elsewhere in the emulator!
@@ -124,6 +128,8 @@ const Eterm etp_hole_marker = ERTS_HOLE_MARKER;
 #else
 const Eterm etp_hole_marker = 0;
 #endif
+
+static int modified_sched_thread_suggested_stack_size = 0;
 
 /*
  * Note about VxWorks: All variables must be initialized by executable code,
@@ -636,9 +642,22 @@ void erts_usage(void)
     erts_fprintf(stderr, "-swt val       set scheduler wakeup threshold, valid values are:\n");
     erts_fprintf(stderr, "               very_low|low|medium|high|very_high.\n");
     erts_fprintf(stderr, "-sss size      suggested stack size in kilo words for scheduler threads,\n");
-    erts_fprintf(stderr, "               valid range is [%d-%d]\n",
+    erts_fprintf(stderr, "               valid range is [%d-%d] (default %d)\n",
 		 ERTS_SCHED_THREAD_MIN_STACK_SIZE,
-		 ERTS_SCHED_THREAD_MAX_STACK_SIZE);
+		 ERTS_SCHED_THREAD_MAX_STACK_SIZE,
+                 ERTS_DEFAULT_SCHED_STACK_SIZE);
+#ifdef ERTS_DIRTY_SCHEDULERS
+    erts_fprintf(stderr, "-sssdcpu size  suggested stack size in kilo words for dirty CPU scheduler\n");
+    erts_fprintf(stderr, "               threads, valid range is [%d-%d] (default %d)\n",
+		 ERTS_SCHED_THREAD_MIN_STACK_SIZE,
+		 ERTS_SCHED_THREAD_MAX_STACK_SIZE,
+                 ERTS_DEFAULT_DCPU_SCHED_STACK_SIZE);
+    erts_fprintf(stderr, "-sssdio size   suggested stack size in kilo words for dirty IO scheduler\n");
+    erts_fprintf(stderr, "               threads, valid range is [%d-%d] (default %d)\n",
+		 ERTS_SCHED_THREAD_MIN_STACK_SIZE,
+		 ERTS_SCHED_THREAD_MAX_STACK_SIZE,
+                 ERTS_DEFAULT_DIO_SCHED_STACK_SIZE);
+#endif
     erts_fprintf(stderr, "-spp Bool      set port parallelism scheduling hint\n");
     erts_fprintf(stderr, "-S n1:n2       set number of schedulers (n1), and number of\n");
     erts_fprintf(stderr, "               schedulers online (n2), maximum for both\n");
@@ -1133,8 +1152,12 @@ early_init(int *argc, char **argv) /*
 	}
 	if (dirty_cpu_scheds > schdlrs)
 	    dirty_cpu_scheds = schdlrs;
+        if (dirty_cpu_scheds < 1)
+            dirty_cpu_scheds = 1;
 	if (dirty_cpu_scheds_online > schdlrs_onln)
 	    dirty_cpu_scheds_online = schdlrs_onln;
+	if (dirty_cpu_scheds_online < 1)
+	    dirty_cpu_scheds_online = 1;
 #endif
     }
 
@@ -1237,24 +1260,38 @@ early_init(int *argc, char **argv) /*
 }
 
 #ifndef ERTS_SMP
+
+void *erts_scheduler_stack_limit;
+
+
 static void set_main_stack_size(void)
 {
-    if (erts_sched_thread_suggested_stack_size > 0) {
+    char c;
+    UWord stacksize;
 # if HAVE_DECL_GETRLIMIT && HAVE_DECL_SETRLIMIT && HAVE_DECL_RLIMIT_STACK
-	struct rlimit rl;
-	int bytes = erts_sched_thread_suggested_stack_size * sizeof(Uint) * 1024;
-	if (getrlimit(RLIMIT_STACK, &rl) != 0 ||
-	    (rl.rlim_cur = bytes, setrlimit(RLIMIT_STACK, &rl) != 0)) {
-	    erts_fprintf(stderr, "failed to set stack size for scheduler "
-				 "thread to %d bytes\n", bytes);
-	    erts_usage();
-	}	    
-# else
-	erts_fprintf(stderr, "no OS support for dynamic stack size limit\n");
-	erts_usage();    
-# endif
+    struct rlimit rl;
+    int bytes;
+    stacksize = erts_sched_thread_suggested_stack_size * sizeof(Uint) * 1024;
+    /* Add some extra pages... neede by some systems... */
+    bytes = (int) stacksize + 3*erts_sys_get_page_size();
+    if (getrlimit(RLIMIT_STACK, &rl) != 0 ||
+        (rl.rlim_cur = bytes, setrlimit(RLIMIT_STACK, &rl) != 0)) {
+        erts_fprintf(stderr, "failed to set stack size for scheduler "
+                     "thread to %d bytes\n", bytes);
+        erts_usage();
     }
+# else
+    if (modified_sched_thread_suggested_stack_size) {
+	erts_fprintf(stderr, "no OS support for dynamic stack size limit\n");
+	erts_usage();
+    }
+    /* Be conservative and hope it is not more than 64 kWords... */
+    stacksize = 64*1024*sizeof(void *);
+# endif
+
+    erts_scheduler_stack_limit = erts_calc_stacklimit(&c, stacksize);
 }
+
 #endif
 
 void
@@ -1299,11 +1336,14 @@ erl_start(int argc, char **argv)
 	port_tab_sz_ignore_files = 1;
     }
 
-#if (defined(__APPLE__) && defined(__MACH__)) || defined(__DARWIN__)
     /*
-     * The default stack size on MacOS X is too small for pcre.
+     * A default stack size suitable for pcre which might use quite
+     * a lot of stack.
      */
-    erts_sched_thread_suggested_stack_size = 256;
+    erts_sched_thread_suggested_stack_size = ERTS_DEFAULT_SCHED_STACK_SIZE;
+#ifdef ERTS_DIRTY_SCHEDULERS
+    erts_dcpu_sched_thread_suggested_stack_size = ERTS_DEFAULT_DCPU_SCHED_STACK_SIZE;
+    erts_dio_sched_thread_suggested_stack_size = ERTS_DEFAULT_DIO_SCHED_STACK_SIZE;
 #endif
 
 #ifdef DEBUG
@@ -1923,10 +1963,47 @@ erl_start(int argc, char **argv)
 		VERBOSE(DEBUG_SYSTEM,
 			("scheduler wakeup threshold: %s\n", arg));
 	    }
+#ifdef ERTS_DIRTY_SCHEDULERS
+	    else if (has_prefix("ssdcpu", sub_param)) {
+		/* suggested stack size (Kilo Words) for dirty CPU scheduler threads */
+		arg = get_arg(sub_param+6, argv[i+1], &i);
+		erts_dcpu_sched_thread_suggested_stack_size = atoi(arg);
+
+		if ((erts_dcpu_sched_thread_suggested_stack_size
+		     < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
+		    || (erts_dcpu_sched_thread_suggested_stack_size >
+			ERTS_SCHED_THREAD_MAX_STACK_SIZE)) {
+		    erts_fprintf(stderr, "bad stack size for dirty CPU scheduler threads %s\n",
+				 arg);
+		    erts_usage();
+		}
+		VERBOSE(DEBUG_SYSTEM,
+			("suggested dirty CPU scheduler thread stack size %d kilo words\n",
+			 erts_dcpu_sched_thread_suggested_stack_size));
+	    }
+	    else if (has_prefix("ssdio", sub_param)) {
+		/* suggested stack size (Kilo Words) for dirty IO scheduler threads */
+		arg = get_arg(sub_param+5, argv[i+1], &i);
+		erts_dio_sched_thread_suggested_stack_size = atoi(arg);
+
+		if ((erts_dio_sched_thread_suggested_stack_size
+		     < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
+		    || (erts_dio_sched_thread_suggested_stack_size >
+			ERTS_SCHED_THREAD_MAX_STACK_SIZE)) {
+		    erts_fprintf(stderr, "bad stack size for dirty IO scheduler threads %s\n",
+				 arg);
+		    erts_usage();
+		}
+		VERBOSE(DEBUG_SYSTEM,
+			("suggested dirty IO scheduler thread stack size %d kilo words\n",
+			 erts_dio_sched_thread_suggested_stack_size));
+	    }
+#endif
 	    else if (has_prefix("ss", sub_param)) {
 		/* suggested stack size (Kilo Words) for scheduler threads */
 		arg = get_arg(sub_param+2, argv[i+1], &i);
 		erts_sched_thread_suggested_stack_size = atoi(arg);
+                modified_sched_thread_suggested_stack_size = 1;
 
 		if ((erts_sched_thread_suggested_stack_size
 		     < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
@@ -2236,6 +2313,15 @@ erl_start(int argc, char **argv)
     boot_argc = argc - i;  /* Number of arguments to init */
     boot_argv = &argv[i];
 
+    if (erts_sched_thread_suggested_stack_size < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
+        erts_sched_thread_suggested_stack_size = ERTS_SCHED_THREAD_MIN_STACK_SIZE;
+#ifdef ERTS_DIRTY_SCHEDULERS
+    if (erts_dcpu_sched_thread_suggested_stack_size < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
+        erts_dcpu_sched_thread_suggested_stack_size = ERTS_SCHED_THREAD_MIN_STACK_SIZE;
+    if (erts_dio_sched_thread_suggested_stack_size < ERTS_SCHED_THREAD_MIN_STACK_SIZE)
+        erts_dio_sched_thread_suggested_stack_size = ERTS_SCHED_THREAD_MIN_STACK_SIZE;
+#endif
+
     erl_init(ncpu,
 	     proc_tab_sz,
 	     legacy_proc_tab,
@@ -2308,6 +2394,7 @@ erl_start(int argc, char **argv)
 	set_main_stack_size();
 	erts_sched_init_time_sup(esdp);
         erts_ets_sched_spec_data_init(esdp);
+        erts_aux_work_timeout_late_init(esdp);
 	process_main(esdp->x_reg_array, esdp->f_reg_array);
     }
 #endif

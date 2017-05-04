@@ -27,6 +27,7 @@
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
 	 init_per_group/2,end_per_group/2,
 	 app_test/1,appup_test/1,
+	 debug_info/4, custom_debug_info/1,
 	 file_1/1, forms_2/1, module_mismatch/1, big_file/1, outdir/1,
 	 binary/1, makedep/1, cond_and_ifdef/1, listings/1, listings_big/1,
 	 other_output/1, kernel_listing/1, encrypted_abstr/1,
@@ -51,7 +52,7 @@ all() ->
      strict_record, utf8_atoms, extra_chunks,
      cover, env, core, core_roundtrip, asm, optimized_guards,
      sys_pre_attributes, dialyzer, warnings, pre_load_check,
-     env_compiler_options].
+     env_compiler_options, custom_debug_info].
 
 groups() -> 
     [].
@@ -504,17 +505,23 @@ encrypted_abstr_1(Simple, Target) ->
     {ok,simple} = compile:file(Simple,
 				     [debug_info,{debug_info_key,Key},
 				      {outdir,TargetDir}]),
-    verify_abstract(Target),
+    verify_abstract(Target, erl_abstract_code),
 
     {ok,simple} = compile:file(Simple,
 				     [{debug_info_key,Key},
 				      {outdir,TargetDir}]),
-    verify_abstract(Target),
+    verify_abstract(Target, erl_abstract_code),
 
     {ok,simple} = compile:file(Simple,
 				     [debug_info,{debug_info_key,{des3_cbc,Key}},
 				      {outdir,TargetDir}]),
-    verify_abstract(Target),
+    verify_abstract(Target, erl_abstract_code),
+
+    {ok,simple} = compile:file(Simple,
+				     [{debug_info,{?MODULE,ok}},
+				      {debug_info_key,Key},
+				      {outdir,TargetDir}]),
+    verify_abstract(Target, ?MODULE),
 
     {ok,{simple,[{compile_info,CInfo}]}} =
 	beam_lib:chunks(Target, [compile_info]),
@@ -539,7 +546,7 @@ encrypted_abstr_1(Simple, Target) ->
     NewKey = "better use another key here",
     write_crypt_file(["[{debug_info,des3_cbc,simple,\"",NewKey,"\"}].\n"]),
     {ok,simple} = compile:file(Simple, [encrypt_debug_info,report]),
-    verify_abstract("simple.beam"),
+    verify_abstract("simple.beam", erl_abstract_code),
     ok = file:delete(".erlang.crypt"),
     beam_lib:clear_crypto_key_fun(),
     {error,beam_lib,{key_missing_or_invalid,"simple.beam",abstract_code}} =
@@ -572,9 +579,10 @@ encrypted_abstr_no_crypto(Simple, Target) ->
 				{outdir,TargetDir},report]),
     ok.
     
-verify_abstract(Target) ->
-    {ok,{simple,[Chunk]}} = beam_lib:chunks(Target, [abstract_code]),
-    {abstract_code,{raw_abstract_v1,_}} = Chunk.
+verify_abstract(Beam, Backend) ->
+    {ok,{simple,[Abst, Dbgi]}} = beam_lib:chunks(Beam, [abstract_code, debug_info]),
+    {abstract_code,{raw_abstract_v1,_}} = Abst,
+    {debug_info,{debug_info_v1,Backend,_}} = Dbgi.
 
 has_crypto() ->
     try
@@ -593,6 +601,26 @@ install_crypto_key(Key) ->
     ok = beam_lib:crypto_key_fun(F).
 
 %% Miscellanous tests, mainly to get better coverage.
+debug_info(erlang_v1, Module, ok, _Opts) ->
+    {ok, [Module]};
+debug_info(erlang_v1, Module, error, _Opts) ->
+    {error, unknown_format}.
+
+custom_debug_info(Config) when is_list(Config) ->
+    {Simple,_} = get_files(Config, simple, "file_1"),
+
+    {ok,simple,OkBin} = compile:file(Simple, [binary, {debug_info,{?MODULE,ok}}]), %Coverage
+    {ok,{simple,[{abstract_code,{raw_abstract_v1,[simple]}}]}} =
+	beam_lib:chunks(OkBin, [abstract_code]),
+    {ok,{simple,[{debug_info,{debug_info_v1,?MODULE,ok}}]}} =
+	beam_lib:chunks(OkBin, [debug_info]),
+
+    {ok,simple,ErrorBin} = compile:file(Simple, [binary, {debug_info,{?MODULE,error}}]), %Coverage
+    {ok,{simple,[{abstract_code,no_abstract_code}]}} =
+	beam_lib:chunks(ErrorBin, [abstract_code]),
+    {ok,{simple,[{debug_info,{debug_info_v1,?MODULE,error}}]}} =
+	beam_lib:chunks(ErrorBin, [debug_info]).
+
 cover(Config) when is_list(Config) ->
     io:format("~p\n", [compile:options()]),
     ok.
@@ -865,9 +893,7 @@ do_core_roundtrip_2(M, Core0, Outdir) ->
     case cmp_core(Core0, Core, M) of
 	true -> ok;
 	false -> error
-    end,
-
-    ok.
+    end.
 
 undo_var_translation(Tree) ->
     F = fun(Node) ->
@@ -920,11 +946,72 @@ diff(E, E) ->
 diff([H1|T1], [H2|T2]) ->
     [diff(H1, H2)|diff(T1, T2)];
 diff(T1, T2) when tuple_size(T1) =:= tuple_size(T2) ->
-    L = diff(tuple_to_list(T1), tuple_to_list(T2)),
-    list_to_tuple(L);
+    case cerl:is_c_var(T1) andalso cerl:is_c_var(T2) of
+        true ->
+            diff_var(T1, T2);
+        false ->
+            case cerl:is_c_map(T1) andalso cerl:is_c_map(T2) of
+                true ->
+                    diff_map(T1, T2);
+                false ->
+                    diff_tuple(T1, T2)
+            end
+    end;
 diff(E1, E2) ->
     {'DIFF',E1,E2}.
 
+diff_var(V1, V2) ->
+    case {cerl:var_name(V1),cerl:var_name(V2)} of
+        {Same,Same} ->
+            V1;
+        {Name1,Name2} ->
+            %% The inliner uses integers as variable names. Such integers
+            %% are read back as atoms.
+            case is_integer(Name1) andalso
+                list_to_atom(integer_to_list(Name1)) =:= Name2 of
+                true ->
+                    V1;
+                _ ->
+                    cerl:update_c_var(V1, {'DIFF',Name1,Name2})
+            end
+    end.
+
+%% Annotations for maps are not preserved exactly, but that is not
+%% a real problem. Workaround by not comparing all annotations when
+%% comparing maps.
+
+diff_map(M, M) ->
+    M;
+diff_map(M1, M2) ->
+    case cerl:get_ann(M1) =:= cerl:get_ann(M2) of
+        false ->
+            diff_tuple(M1, M2);
+        true ->
+            case remove_compiler_gen(M1) =:= remove_compiler_gen(M2) of
+                true ->
+                    M1;
+                false ->
+                    diff_tuple(M1, M2)
+            end
+    end.
+
+diff_tuple(T1, T2) ->
+    L = diff(tuple_to_list(T1), tuple_to_list(T2)),
+    list_to_tuple(L).
+
+remove_compiler_gen(M) ->
+    Arg0 = cerl:map_arg(M),
+    Arg = cerl:set_ann(Arg0, []),
+    Es0 = cerl:map_es(M),
+    Es = [remove_compiler_gen_1(Pair) || Pair <- Es0],
+    cerl:update_c_map(M, Arg, Es).
+
+remove_compiler_gen_1(Pair) ->
+    Op0 = cerl:map_pair_op(Pair),
+    Op = cerl:set_ann(Op0, []),
+    K = cerl:map_pair_key(Pair),
+    V = cerl:map_pair_val(Pair),
+    cerl:update_c_map_pair(Pair, Op, K, V).
 
 %% Compile to Beam assembly language (.S) and then try to
 %% run .S through the compiler again.

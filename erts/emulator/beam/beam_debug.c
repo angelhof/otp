@@ -308,7 +308,7 @@ erts_debug_disassemble_1(BIF_ALIST_1)
 		BIF_RET(am_undef);
 	    }
 	}
-        code_ptr = erts_codemfa_to_code(cmfa);
+        code_ptr = (BeamInstr*)erts_code_to_codeinfo(erts_codemfa_to_code(cmfa));
     } else {
 	goto error;
     }
@@ -853,15 +853,23 @@ dirty_test(Process *c_p, Eterm type, Eterm arg1, Eterm arg2, UWord *I)
 	    goto badarg;
 	esdp = erts_proc_sched_data(c_p);
 	if (!esdp)
-	    ERTS_BIF_PREP_RET(ret, am_error);
-	else if (!ERTS_SCHEDULER_IS_DIRTY(esdp))
+            goto scheduler_type_error;
+      
+        switch (esdp->type) {
+        case ERTS_SCHED_NORMAL:
 	    ERTS_BIF_PREP_RET(ret, am_normal);
-	else if (ERTS_SCHEDULER_IS_DIRTY_CPU(esdp))
+            break;
+        case ERTS_SCHED_DIRTY_CPU:
 	    ERTS_BIF_PREP_RET(ret, am_dirty_cpu);
-	else if (ERTS_SCHEDULER_IS_DIRTY_IO(esdp))
+            break;
+        case ERTS_SCHED_DIRTY_IO:
 	    ERTS_BIF_PREP_RET(ret, am_dirty_io);
-	else
+            break;
+        default:
+        scheduler_type_error:
 	    ERTS_BIF_PREP_RET(ret, am_error);
+            break;
+        }
     }
     else if (am_error == arg1) {
 	switch (arg2) {
@@ -1118,3 +1126,48 @@ ms_wait(Process *c_p, Eterm etimeout, int busy)
 }
 
 #endif /* ERTS_DIRTY_SCHEDULERS */
+
+#ifdef ERTS_SMP
+#  define ERTS_STACK_LIMIT ((char *) ethr_get_stacklimit())
+#else
+#  define ERTS_STACK_LIMIT ((char *) erts_scheduler_stack_limit)
+#endif
+
+/*
+ * The below functions is for testing of the stack
+ * limit functionality. They are intentionally
+ * written body recursive in order to prevent
+ * last call optimization...
+ */
+
+UWord
+erts_check_stack_recursion_downwards(char *start_c)
+{
+    char *limit = ERTS_STACK_LIMIT;
+    char c;
+    UWord res;
+    if (erts_check_below_limit(&c, limit + 1024))
+        return (char *) erts_ptr_id(start_c) - (char *) erts_ptr_id(&c);
+    res = erts_check_stack_recursion_downwards(start_c);
+    erts_ptr_id(&c);
+    return res;
+}
+
+UWord
+erts_check_stack_recursion_upwards(char *start_c)
+{
+    char *limit = ERTS_STACK_LIMIT;
+    char c;
+    UWord res;
+    if (erts_check_above_limit(&c, limit - 1024))
+        return (char *) erts_ptr_id(&c) - (char *) erts_ptr_id(start_c);
+    res = erts_check_stack_recursion_upwards(start_c);
+    erts_ptr_id(&c);
+    return res;
+}
+
+int
+erts_is_above_stack_limit(char *ptr)
+{
+    return (char *) ptr > ERTS_STACK_LIMIT;
+}
