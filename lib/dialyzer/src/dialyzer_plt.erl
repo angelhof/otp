@@ -89,7 +89,7 @@
                    exported_types :: ets:tid()
 		  }).
 
--opaque plt() :: #plt{} | #mini_plt{} | 'undefined'.
+-opaque plt() :: #plt{} | #mini_plt{}.
 
 -include("dialyzer.hrl").
 
@@ -520,7 +520,7 @@ init_md5_list_1([], DiffList, Acc) ->
 init_md5_list_1(Md5List, [], Acc) ->
   {ok, lists:reverse(Acc, Md5List)}.
 
--spec get_mini_plt(plt()) -> plt().
+-spec get_mini_plt(plt() | 'undefined') -> plt().
 
 get_mini_plt(#plt{info = Info,
                   types = Types,
