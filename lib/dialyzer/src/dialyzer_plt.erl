@@ -519,7 +519,7 @@ init_md5_list_1([], DiffList, Acc) ->
 init_md5_list_1(Md5List, [], Acc) ->
   {ok, lists:reverse(Acc, Md5List)}.
 
--spec get_mini_plt(plt() | 'undefined') -> plt().
+-spec get_mini_plt(plt() | 'undefined') -> plt() | 'undefined'.
 
 get_mini_plt(#plt{info = Info,
                   types = Types,
@@ -551,7 +551,7 @@ get_mini_plt(#plt{info = Info,
 get_mini_plt(undefined) ->
   undefined.
 
--spec restore_full_plt(plt()) -> plt().
+-spec restore_full_plt(plt() | 'undefined') -> plt() | 'undefined'.
 
 restore_full_plt(#mini_plt{info = ETSInfo,
                            types = ETSTypes,
