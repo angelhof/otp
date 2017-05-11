@@ -1471,7 +1471,8 @@ successors(I) ->
     #icode_comment{} -> [];
     %% the following are included here for handling linear code
     #icode_move{} -> [];
-    #icode_begin_handler{} -> []
+    #icode_begin_handler{} -> [];
+    _ -> []
   end.
 
 %%
@@ -1579,7 +1580,9 @@ redirect_jmp(Jmp, ToOld, ToNew) ->
 	case fail_label(Jmp) of
 	  ToOld -> Jmp#icode_fail{fail_label=ToNew};
 	  _ -> Jmp
-	end
+	end;
+      %% If it is any other instruction
+      _ -> Jmp
     end,
   %% Turn a branch into a goto if it has only one successor and it is
   %% safe to do so.
