@@ -196,9 +196,6 @@ return_types_before_analysis(Parent, NewCServer, State) ->
   % io:format("Contracts: ~p~n", [dialyzer_codeserver:get_contracts(NewCServer)]),
   % MiniPlt1 = dialyzer_plt:get_mini_plt(MiniPlt0),
   % {_Codeserver, MiniPlt} = move_data(NewCServer, MiniPlt1),
-  %% TODO:
-  %% Find out what this does and if this is useful 
-  rcv_and_send_ext_types(Parent),
   send_analysis_done_types(Parent, MiniPlt, DocPlt).
 
 analysis_cont(Parent, Analysis, Callgraph, State, Plt, NewCServer) ->

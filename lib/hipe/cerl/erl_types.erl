@@ -205,6 +205,7 @@
 	 t_var/1,
 	 t_var_name/1,
 	 %% t_assign_variables_to_subtype/2,
+         type_test_from_erl_type/1,
 	 type_is_defined/4,
 	 record_field_diffs_to_string/2,
 	 subst_all_vars_to_any/1,
@@ -2354,6 +2355,81 @@ t_from_term_shallow(T, _N) when is_port(T) ->      t_port();
 t_from_term_shallow(T, _N) when is_reference(T) -> t_reference();
 t_from_term_shallow(T, N) when is_tuple(T) ->
   t_tuple([t_from_term_shallow(E, N-1) || E <- tuple_to_list(T)]).
+
+%%-----------------------------------------------------------------------------
+%% Returns the type test for the specific type
+%%-----------------------------------------------------------------------------
+
+%% TODO: Fix the any type by importing the hipe_icode.hrl
+-spec type_test_from_erl_type(erl_type()) -> any().
+type_test_from_erl_type(?atom(_)) ->
+  atom;
+% Dont know how should i do this
+% type_test_from_erl_type() ->
+%   bignum;
+type_test_from_erl_type(?atom(_)) ->
+  binary;
+type_test_from_erl_type(?bitstr(_, _)) ->
+  bitstr;
+type_test_from_erl_type(?atom(_)) ->
+  boolean;
+%% Is this correct?
+type_test_from_erl_type(?nonempty_list(_, _)) ->
+  cons;
+% I dont know what this is
+% type_test_from_erl_type(?atom(_)) ->
+%   fixnum;
+type_test_from_erl_type(?float) ->
+  float;
+type_test_from_erl_type(?function(_, _)) ->
+  function;
+% I dont know what this is
+% type_test_from_erl_type(?function(_, _)) ->
+%   function2;
+type_test_from_erl_type(?integer(_)) ->
+  integer;
+% TODO: Check if this is possible to make correct 
+% type_test_from_erl_type(?list(_Type, _, _)) ->
+%   cons;
+type_test_from_erl_type(?list(_, _, _)) ->
+  list;
+type_test_from_erl_type(?map(_, _, _)) ->
+  map;
+type_test_from_erl_type(?nil) ->
+  nil;
+type_test_from_erl_type(?number(_, _)) ->
+  number;
+%% TODO: Fix this atrocity
+type_test_from_erl_type(?identifier(_) = Id) ->
+  case is_pid1(Id) of
+    true -> pid;
+    false ->
+      case is_port1(Id) of
+        true -> port;
+        false ->
+          case is_reference1(Id) of
+            true -> reference;
+            false -> any
+          end
+      end
+  end;
+type_test_from_erl_type(?tuple(_, _, _)) ->
+  tuple;
+% type_test_from_erl_type(?atom(Set)) ->
+%   {'atom', atom()};
+% type_test_from_erl_type(?atom(_)) ->
+%   {'integer', integer()};
+% type_test_from_erl_type(?atom(_)) ->
+%   {'record', atom(), non_neg_integer()};
+% type_test_from_erl_type(?tuple(Types, Arity, Qual)) ->
+%   {'tuple', non_neg_integer()};
+type_test_from_erl_type(_) ->
+  any.
+
+% -define(number(Set, Qualifier),    #c{tag=?number_tag, elements=Set, 
+%                                       qualifier=Qualifier}).
+% -define(product(Types),            #c{tag=?product_tag, elements=Types}).
+%                                       qualifier={Arity, Qual}}).
 
 
 %%-----------------------------------------------------------------------------

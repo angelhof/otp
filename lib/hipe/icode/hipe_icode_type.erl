@@ -30,7 +30,10 @@
 
 -export([replace_nones/1,
 	 update__info/2, new__info/1, return__info/1,
-	 return_none/0, return_none_args/2, return_any_args/2]).
+	 return_none/0, return_none_args/2, return_any_args/2,
+         check_opt_fun_info/1, check_opt_call_info/1, 
+         check_opt_return_info/1, combine_strict_with_optimistic/2,
+         runtime_server_running/0]).
 
 %%=====================================================================
 
@@ -108,25 +111,14 @@
 -spec cfg(cfg(), mfa(), comp_options(), #comp_servers{}) -> cfg().
 
 cfg(Cfg, MFA, Options, Servers) ->
-  case proplists:get_value(dynamic_type_annot, Options) of
-    undefined -> 
-      cfg1(Cfg, MFA, Options, Servers);      
-    List when is_list(List) ->
-      case proplists:get_value(MFA, List) of
-        undefined ->
-          cfg1(Cfg, MFA, Options, Servers);  
-        Arg_types ->
-          %%io:format(standard_error, "MFA: ~p, Types: ~p~n", [MFA, Arg_types]),
-          %% TODO: Append Arg_types to the list instead of just adding it
-          OCI = Cfg#cfg.info,
-          cfg1(Cfg#cfg{info = OCI#cfg_info{runtime_info = Arg_types}}, MFA, Options, Servers)
-      end
-  end.
-
-cfg1(Cfg, MFA, Options, Servers) ->
   case proplists:get_bool(concurrent_comp, Options) of
     true ->
-      concurrent_cfg(Cfg, MFA, Servers#comp_servers.type);
+      case proplists:get_value(optimistic_types, Options) of
+        undefined -> 
+          concurrent_cfg(Cfg, MFA, Servers#comp_servers.type);
+        _ ->
+          concurrent_cfg_with_optimistic(Cfg, MFA, Servers#comp_servers.type)
+      end;
     false ->
       ordinary_cfg(Cfg, MFA)
   end.
@@ -135,12 +127,143 @@ cfg1(Cfg, MFA, Options, Servers) ->
 concurrent_cfg(Cfg, MFA, CompServer) ->
   CompServer ! {ready, {MFA, self()}},
   {ArgsFun, CallFun, FinalFun} = do_analysis(Cfg, MFA),
-  % io:format(standard_error, "Cfg: ~p~n, MFA: ~p~n, ArgsFun: ~p~n, CallFun: ~p~n, FInalFun: ~p~n", [Cfg, MFA, ArgsFun, CallFun, FinalFun]),
-  % io:format(standard_error, "MFA: ~p~n, Param types: ~p~n", [MFA, CallFun(MFA, Cfg)]),
   Ans = do_rewrite(Cfg, MFA, ArgsFun, CallFun, FinalFun),
-  % io:format(standard_error, "After rewrite: ~p~n", [Ans]),
   CompServer ! {done_rewrite, MFA},
   Ans.
+
+concurrent_cfg_with_optimistic(SSACfg, MFA, CompServerType) ->
+  
+  %% Unconvert the Cfg from ssa form 
+  Cfg = hipe_icode_ssa:unconvert(SSACfg),
+
+  %% Create a copy of the cfg bbs
+  {CopiedCfg, LabelMappings} = copy_cfg(Cfg),
+
+  %% Find the starting label of the original and copied bbs
+  StartLbl = hipe_icode_cfg:start_label(Cfg),
+  {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
+
+  %% The optimistic arguments types
+  ArgTypes = check_opt_call_info(MFA),
+
+  %% Create a type test in the begining for each argument  
+  CfgWithTypeTests = add_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg),
+  
+  %% Reconvert back to SSA
+  SSACfgWithTypeTests = hipe_icode_ssa:convert(CfgWithTypeTests),
+  % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
+
+  CompServerType ! {ready, {MFA, self()}},
+  {ArgsFun, CallFun, FinalFun} = do_analysis(SSACfgWithTypeTests, MFA),
+  Ans = do_rewrite(SSACfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
+  CompServerType ! {done_rewrite, MFA},
+  Ans.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Add typetests for each argument at the beginning of the cfg
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+add_typetests(none, {_StartLbl, _StartLblOpt}, Cfg, _CopiedCfg) ->
+  Cfg;
+add_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg) ->
+  CfgParams = hipe_icode_cfg:params(Cfg),
+  ParamsTypes = lists:zip(CfgParams, ArgTypes),
+  {NewStartLabel, TypeTests} = argument_typetests(ParamsTypes, StartLbl, StartLblOpt),
+  CfgWithoutNewStartLabel = lists:foldl(
+    fun({Lbl, BB}, TempCfg) -> 
+      hipe_icode_cfg:bb_add(TempCfg, Lbl, BB) 
+    end, CopiedCfg, TypeTests),
+  hipe_icode_cfg:start_label_update(CfgWithoutNewStartLabel, NewStartLabel).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Returns a list of typetest bbs, one for each argument
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+argument_typetests(ParamsTypes, StartLbl1, StartLbl2) ->
+  argument_typetests(ParamsTypes, StartLbl1, StartLbl2, []).
+argument_typetests([], _StartLbl1, StartLbl2, TypeTests) ->
+  {StartLbl2, TypeTests};
+argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
+  TypeTest = erl_types:type_test_from_erl_type(Type),
+  case TypeTest of
+    any -> 
+      argument_typetests(Rest, FalseLabel, TrueLabel, TypeTests); % If the optimistic type is any()
+    _ ->
+      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel),
+      BB = hipe_bb:mk_bb([Instr]),
+      NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+      BBwithLabel = {NewStartLabel, BB},
+      argument_typetests(Rest, FalseLabel, NewStartLabel, [BBwithLabel|TypeTests])
+  end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Create a copy of the cfg ======================================
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+copy_cfg(Cfg) ->
+  %% Get the current Cfg Labels
+  Labels = hipe_icode_cfg:labels(Cfg),
+
+  %% Create the old to new label mappings
+  LabelMappings = lists:foldr(
+    fun(OldLbl, Mappings) ->
+      NewLbl = hipe_icode:label_name(hipe_icode:mk_new_label()),
+      [{OldLbl, NewLbl}|Mappings]
+    end, [], Labels),
+
+  %% Create a copy of all the bbs based on the label mappings
+  {copy_bbs(Labels, LabelMappings, Cfg), LabelMappings}.
+
+copy_bbs([OldLbl|Rest], LabelMappings, Cfg) ->
+  BB = hipe_icode_cfg:bb(Cfg, OldLbl),
+  Code = hipe_bb:code(BB),
+  NewCode = make_copies(Code, LabelMappings),
+  % NewBB = hipe_bb:code_update(BB, NewCode),
+  NewBB = hipe_bb:mk_bb(NewCode),
+  {_, NewLbl} = lists:keyfind(OldLbl, 1, LabelMappings),
+  NewCfg = hipe_icode_cfg:bb_add(Cfg, NewLbl, NewBB),  
+  copy_bbs(Rest, LabelMappings, NewCfg);
+copy_bbs([], _LabelMappings, Cfg) ->
+  Cfg.
+
+make_copies(Is, LabelMappings) ->
+  lists:flatten([copy_insn(I, LabelMappings) || I <- Is]).
+
+%% While copying instructions we have to also redirect all jumps and phis to correspond to the copied bbs
+
+copy_insn(I, LabelMappings) ->
+  Succs = hipe_icode:successors(I),
+  RedirectedJmpsI = redirect_jmps(Succs, LabelMappings, I),
+  case hipe_icode:is_phi(I) of
+    false -> 
+      RedirectedJmpsI;
+    true ->
+      Labels = [ Lbl || {Lbl, _} <- hipe_icode:phi_arglist(I)],
+      redirect_phis(Labels, LabelMappings, I)
+  end.
+
+redirect_phis([], _LabelMappings, I) ->
+  I;
+redirect_phis([Lbl|Rest], LabelMappings, I) ->
+  {_, NewLbl} = lists:keyfind(Lbl, 1, LabelMappings),
+  NewI = hipe_icode:phi_redirect_pred(I, Lbl, NewLbl),
+  redirect_phis(Rest, LabelMappings, NewI).
+
+
+redirect_jmps([], _LabelMappings, I) ->
+  I;
+redirect_jmps([Jmp|Rest], LabelMappings, I) ->
+  {_, NewLbl} = lists:keyfind(Jmp, 1, LabelMappings),
+  NewI = hipe_icode:redirect_jmp(I, Jmp, NewLbl),
+  redirect_jmps(Rest, LabelMappings, NewI).
+
+%% END: Create a copy of the cfg ======================================
 
 do_analysis(Cfg, MFA) ->
   receive
@@ -151,18 +274,22 @@ do_analysis(Cfg, MFA) ->
       Done
   end.
 
-do_rewrite(Cfg, MFA, ArgsFun, CallFun, FinalFun) ->
-  common_rewrite(Cfg, {MFA,ArgsFun,CallFun,FinalFun}).
+do_rewrite(Cfg, MFA,ArgsFun,CallFun,FinalFun) ->
+  State = safe_analyse(Cfg, {MFA,ArgsFun,CallFun,FinalFun}),
+  common_rewrite(State).
  
 ordinary_cfg(Cfg, MFA) ->
   Data = make_data(Cfg,MFA),
-  common_rewrite(Cfg, Data).
-  
-common_rewrite(Cfg, Data) ->
   State = safe_analyse(Cfg, Data),
+  common_rewrite(State).
+  
+common_rewrite(State) ->
   NewState = simplify_controlflow(State),  
   NewCfg = state__cfg(annotate_cfg(NewState)),
-  hipe_icode_cfg:remove_unreachable_code(specialize(NewCfg)).
+  SpecializedCfg = specialize(NewCfg),
+  FinalCfg = hipe_icode_cfg:remove_unreachable_code(SpecializedCfg),
+  FinalCfg.
+
 
 make_data(Cfg, {_M,_F,A}=MFA) ->
   NoArgs = 
@@ -213,7 +340,6 @@ analyse(Cfg, Data) ->
 safe_analyse(Cfg, {MFA,_,_,_}=Data) ->
   State = new_state(Cfg, Data),
   NewState = analyse_blocks(State,MFA),
-  % io:format("New mfa: ~p, Result type: ~p~n", [MFA, state__ret_type(NewState)]),
   (state__resultaction(NewState))(MFA,state__ret_type(NewState)),
   NewState.
 
@@ -312,7 +438,7 @@ do_basic_call(I, Info, LookupFun) ->
 	{M, F, A} = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
 	None = t_none(),
-  case check_rt_return_info({M,F,A}) of
+  case check_opt_return_info({M,F,A}) of
     none ->
       case erl_bif_types:type(M, F, A, ArgTypes) of
         None -> 
@@ -417,7 +543,7 @@ do_enter(I, Info, State, LookupFun) ->
       remote ->
 	{M, F, A} = hipe_icode:enter_fun(I),
 	None = t_none(),
-	case check_rt_return_info({M,F,A}) of
+	case check_opt_return_info({M,F,A}) of
     none ->
       case erl_bif_types:type(M, F, A, ArgTypes) of
     	  None -> 
@@ -2160,47 +2286,6 @@ find_signature(Primop, Arity) -> find_signature_primop(Primop, Arity).
 % is_spec({attribute, _, spec, _}) -> true;
 % is_spec(_) -> false.
 
-check_rt_fun_info(MFA) ->
-  case runtime_server_running() of 
-    false -> none;
-    true ->
-      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
-        not_found -> none;
-        {ok, {ArgTypes, RetType}} -> {ArgTypes, RetType}
-      end
-  end.
-
-check_rt_return_info(MFA) ->
-  case runtime_server_running() of 
-    false -> none;
-    true ->
-      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
-        not_found -> none;
-        {ok, {_, RetType}} -> RetType
-      end
-  end.
-% check_rt_call_info(MFA) ->
-%   case runtime_server_running() of 
-%     false -> none;
-%     true ->
-%       case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
-%         not_found -> none;
-%         {ok, {ArgTypes, _}} -> ArgTypes
-%       end
-%   end.
-
-runtime_server_running() ->
-  lists:member(runtime_type_server, erlang:registered()).
-
-
-find_dynamic_signature_mfa(MFA) ->
-  case check_rt_fun_info(MFA) of
-    none ->
-      find_signature_mfa(MFA);
-    {ArgTypes, RetType} ->
-      t_fun(ArgTypes, RetType)
-  end.
-
 find_signature_mfa(MFA) ->  
   case get_mfa_arg_types(MFA) of
     any ->
@@ -2324,6 +2409,70 @@ return_any_args(Cfg, {_M,_F,A}) ->
       false -> A
     end,
   lists:duplicate(NoArgs, erl_types:t_any()).
+
+%% This function combines a list of strict and a list of optimistic types
+%% For each type it returns the optimistic one 
+%%   ONLY if it is a subtype of the strict one
+-spec combine_strict_with_optimistic(
+        [erl_types:type()], [erl_types:type()]) -> [erl_types:type()].
+combine_strict_with_optimistic(Stricts, Optimistics) ->
+    Res = lists:zipwith(
+        fun(A,B) -> 
+            case t_is_subtype(B, A) of
+                true -> B;
+                _ -> A
+            end 
+        end, Optimistics, Stricts),
+    Res.
+
+-spec check_opt_fun_info(mfa()) -> 
+        'none' | {[erl_types:type()], erl_types:type()}.
+check_opt_fun_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {ArgTypes, RetType}} -> {ArgTypes, RetType}
+      end
+  end.
+
+-spec check_opt_return_info(mfa()) -> 
+        'none' | erl_types:type().
+check_opt_return_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {_, RetType}} -> RetType
+      end
+  end.
+
+-spec check_opt_call_info(mfa()) -> 
+        'none' | [erl_types:type()].
+check_opt_call_info(MFA) ->
+  case runtime_server_running() of 
+    false -> none;
+    true ->
+      case hipe_runtime_type_server:get_mfa(runtime_type_server, MFA) of
+        not_found -> none;
+        {ok, {ArgTypes, _}} -> ArgTypes
+      end
+  end.
+
+-spec runtime_server_running() -> boolean().
+runtime_server_running() ->
+  lists:member(runtime_type_server, erlang:registered()).
+
+
+find_dynamic_signature_mfa(MFA) ->
+  case check_opt_fun_info(MFA) of
+    none ->
+      find_signature_mfa(MFA);
+    {ArgTypes, RetType} ->
+      t_fun(ArgTypes, RetType)
+  end.
 
 %%=====================================================================
 %% Testing function below
