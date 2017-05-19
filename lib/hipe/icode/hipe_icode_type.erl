@@ -131,8 +131,28 @@ concurrent_cfg(Cfg, MFA, CompServer) ->
   CompServer ! {done_rewrite, MFA},
   Ans.
 
-concurrent_cfg_with_optimistic(SSACfg, MFA, CompServerType) ->
+concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
   
+  CfgWithTypeTests = add_optimistic_typetests(Cfg, MFA),
+
+  CompServer ! {ready, {MFA, self()}},
+  {ArgsFun, CallFun, FinalFun} = do_analysis(CfgWithTypeTests, MFA),
+  Ans = do_rewrite(CfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
+  CompServer ! {done_rewrite, MFA},
+  Ans.
+
+
+%%-------------------------------------------------------------------
+%% A pass that adds typetests with the optimistic types acquired
+%% from the dynamic type server at the beginning of the cfg so that
+%% further optimizations can happen when those types are indeed true.
+%%
+%% TODO:
+%% 1. If possible remove the unconvert - convert to SSA
+%%   
+%%-------------------------------------------------------------------
+
+add_optimistic_typetests(SSACfg, MFA) ->
   %% Unconvert the Cfg from ssa form 
   Cfg = hipe_icode_ssa:unconvert(SSACfg),
 
@@ -153,11 +173,7 @@ concurrent_cfg_with_optimistic(SSACfg, MFA, CompServerType) ->
   SSACfgWithTypeTests = hipe_icode_ssa:convert(CfgWithTypeTests),
   % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
 
-  CompServerType ! {ready, {MFA, self()}},
-  {ArgsFun, CallFun, FinalFun} = do_analysis(SSACfgWithTypeTests, MFA),
-  Ans = do_rewrite(SSACfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
-  CompServerType ! {done_rewrite, MFA},
-  Ans.
+  SSACfgWithTypeTests
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -193,7 +209,7 @@ argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
     any -> 
       argument_typetests(Rest, FalseLabel, TrueLabel, TypeTests); % If the optimistic type is any()
     _ ->
-      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel),
+      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel, 0.85),
       BB = hipe_bb:mk_bb([Instr]),
       NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
       BBwithLabel = {NewStartLabel, BB},
@@ -202,7 +218,7 @@ argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% Create a copy of the cfg ======================================
+%% Create a copy of the cfg by also redirecting jmps and phis
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -287,8 +303,7 @@ common_rewrite(State) ->
   NewState = simplify_controlflow(State),  
   NewCfg = state__cfg(annotate_cfg(NewState)),
   SpecializedCfg = specialize(NewCfg),
-  FinalCfg = hipe_icode_cfg:remove_unreachable_code(SpecializedCfg),
-  FinalCfg.
+  hipe_icode_cfg:remove_unreachable_code(SpecializedCfg).
 
 
 make_data(Cfg, {_M,_F,A}=MFA) ->
