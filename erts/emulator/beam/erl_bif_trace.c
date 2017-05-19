@@ -1058,7 +1058,7 @@ trace_info_func(Process* p, Eterm func_spec, Eterm key)
 #ifdef ERTS_SMP
     if ( (key == am_call_time) || (key == am_all)) {
 	erts_smp_proc_unlock(p, ERTS_PROC_LOCK_MAIN);
-	erts_smp_thr_progress_block();
+	// erts_smp_thr_progress_block();
     }
 #endif
 #ifdef ERTS_DIRTY_SCHEDULERS
@@ -1073,7 +1073,7 @@ trace_info_func(Process* p, Eterm func_spec, Eterm key)
 #endif
 #ifdef ERTS_SMP
     if ( (key == am_call_time) || (key == am_all)) {
-	erts_smp_thr_progress_unblock();
+	// erts_smp_thr_progress_unblock();
 	erts_smp_proc_lock(p, ERTS_PROC_LOCK_MAIN);
     }
 #endif

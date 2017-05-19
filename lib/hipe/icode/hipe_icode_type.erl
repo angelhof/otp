@@ -173,7 +173,7 @@ add_optimistic_typetests(SSACfg, MFA) ->
   SSACfgWithTypeTests = hipe_icode_ssa:convert(CfgWithTypeTests),
   % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
 
-  SSACfgWithTypeTests
+  SSACfgWithTypeTests.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
