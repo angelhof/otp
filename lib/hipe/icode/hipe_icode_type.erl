@@ -132,9 +132,7 @@ concurrent_cfg(Cfg, MFA, CompServer) ->
   Ans.
 
 concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
-  
   CfgWithTypeTests = add_optimistic_typetests(Cfg, MFA),
-
   CompServer ! {ready, {MFA, self()}},
   {ArgsFun, CallFun, FinalFun} = do_analysis(CfgWithTypeTests, MFA),
   Ans = do_rewrite(CfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
@@ -156,8 +154,11 @@ add_optimistic_typetests(SSACfg, MFA) ->
   %% Unconvert the Cfg from ssa form 
   Cfg = hipe_icode_ssa:unconvert(SSACfg),
 
+  %% Split every bb after every function call 
+  Cfg1 = divide_bbs_after_calls(Cfg),
+
   %% Create a copy of the cfg bbs
-  {CopiedCfg, LabelMappings} = copy_cfg(Cfg),
+  {CopiedCfg, LabelMappings} = copy_cfg(Cfg1),
 
   %% Find the starting label of the original and copied bbs
   StartLbl = hipe_icode_cfg:start_label(Cfg),
@@ -167,13 +168,101 @@ add_optimistic_typetests(SSACfg, MFA) ->
   ArgTypes = check_opt_call_info(MFA),
 
   %% Create a type test in the begining for each argument  
-  CfgWithTypeTests = add_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg),
+  CfgWithTypeTests = add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg),
   
-  %% Reconvert back to SSA
-  SSACfgWithTypeTests = hipe_icode_ssa:convert(CfgWithTypeTests),
-  % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
+  %% Create a typetest after the return from each function call
+  TotalCfg = add_function_return_typetests(LabelMappings, CfgWithTypeTests),
+  % io:format("Final: ~p~n", [TotalCfg]),
 
+  %% Reconvert back to SSA
+  SSACfgWithTypeTests = hipe_icode_ssa:convert(TotalCfg),
+  % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
   SSACfgWithTypeTests.
+
+
+
+add_function_return_typetests(LabelMappings, Cfg) ->
+  %% Create a set of the optimistic labels
+  OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
+  %% Add typetests after function returns
+  typetest_fun_returns(OptimisticLabels, LabelMappings, Cfg).
+
+typetest_fun_returns([Label|Rest], LabelMappings, Cfg) ->
+  BB = hipe_icode_cfg:bb(Cfg, Label),
+  Code = hipe_bb:code(BB),
+  NewCode = typetest_fun_return(Code, LabelMappings),
+  NewBB = hipe_bb:mk_bb(NewCode),
+  NewCfg = hipe_icode_cfg:bb_add(Cfg, Label, NewBB),  
+  typetest_fun_returns(Rest, LabelMappings, NewCfg);
+typetest_fun_returns([], _LabelMappings, Cfg) ->
+  Cfg.
+
+typetest_fun_return(Code, LabelMappings) ->
+  typetest_fun_return(Code, LabelMappings, []).
+typetest_fun_return([Ins1 = #icode_call{type=CallType}, Ins2 = #icode_goto{}| Rest], LabelMappings, NewCode) 
+    when CallType =:= local orelse CallType =:= remote ->
+  %% Get return type of function
+  MFA = hipe_icode:call_fun(Ins1),
+  case check_opt_return_info(MFA) of
+    none -> 
+      typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode]);
+    Type ->
+      %% Find label mapping
+      OptLabel = hipe_icode:goto_label(Ins2),
+      {StandLabel, _} = lists:keyfind(OptLabel, 2, LabelMappings),
+  
+      %% Create the typetest and put it instead of the goto
+      TypeTest = erl_types:type_test_from_erl_type(Type),
+      io:format("MFA: ~p, Type: ~p, TypeTest: ~p~n", [MFA, Type, TypeTest]),
+      case TypeTest of
+        any -> 
+          typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode]); % If the optimistic type is any()
+        _ ->
+          FunRet = hipe_icode:call_dstlist(Ins1),
+          TypeTestIns = hipe_icode:mk_type(FunRet, TypeTest, OptLabel, StandLabel, ?TYPE_TEST_PROB),
+          typetest_fun_return(Rest, LabelMappings, [TypeTestIns,Ins1|NewCode])
+      end
+  end;
+typetest_fun_return([Ins|Rest], LabelMappings, NewCode) ->
+  typetest_fun_return(Rest, LabelMappings, [Ins|NewCode]);
+typetest_fun_return([], _LabelMappings, NewCode) ->
+  lists:reverse(NewCode).
+
+
+
+divide_bbs_after_calls(Cfg) ->
+  
+  %% Make cfg linear and get code
+  Linear = hipe_icode_cfg:cfg_to_linear(Cfg),
+  Code = hipe_icode:icode_code(Linear),
+
+  NewCode = split_bbs(Code),
+  % io:format("New code: ~p~n", [NewCode]),
+
+  %% Update the Cfg
+  NewLinear = hipe_icode:icode_code_update(Linear, NewCode),
+  hipe_icode_cfg:linear_to_cfg(NewLinear).
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Create a new label after each function call
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+split_bbs(Code) ->
+  split_bbs(Code, []).
+split_bbs([Ins1 = #icode_call{},Ins2|Rest], NewCode) ->
+  LabelIns = hipe_icode:mk_new_label(),
+  NewLabel = hipe_icode:label_name(LabelIns),
+  GotoIns = hipe_icode:mk_goto(NewLabel),
+  split_bbs([Ins2|Rest], [LabelIns, GotoIns, Ins1|NewCode]);
+split_bbs([Ins1,Ins2|Rest], NewCode) ->
+  split_bbs([Ins2|Rest], [Ins1|NewCode]);
+split_bbs([Last], NewCode) ->
+  split_bbs([], [Last|NewCode]);
+split_bbs([], NewCode) ->
+  lists:reverse(NewCode).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -181,9 +270,9 @@ add_optimistic_typetests(SSACfg, MFA) ->
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-add_typetests(none, {_StartLbl, _StartLblOpt}, Cfg, _CopiedCfg) ->
-  Cfg;
-add_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg) ->
+add_argument_typetests(none, {_StartLbl, _StartLblOpt}, _Cfg, CopiedCfg) ->
+  CopiedCfg;
+add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg) ->
   CfgParams = hipe_icode_cfg:params(Cfg),
   ParamsTypes = lists:zip(CfgParams, ArgTypes),
   {NewStartLabel, TypeTests} = argument_typetests(ParamsTypes, StartLbl, StartLblOpt),
@@ -209,7 +298,7 @@ argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
     any -> 
       argument_typetests(Rest, FalseLabel, TrueLabel, TypeTests); % If the optimistic type is any()
     _ ->
-      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel, 0.85),
+      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
       BB = hipe_bb:mk_bb([Instr]),
       NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
       BBwithLabel = {NewStartLabel, BB},
@@ -453,18 +542,26 @@ do_basic_call(I, Info, LookupFun) ->
 	{M, F, A} = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
 	None = t_none(),
-  case check_opt_return_info({M,F,A}) of
-    none ->
-      case erl_bif_types:type(M, F, A, ArgTypes) of
-        None -> 
-          NewArgTypes = add_funs_to_arg_types(ArgTypes),
-          erl_bif_types:type(M, F, A, NewArgTypes);
-        Other ->
-          Other
-      end;
-    RetType ->
-      % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
-      RetType
+  %% WARNING: This is wrong. We cannot make any assumption about the return type
+  % case check_opt_return_info({M,F,A}) of
+  %   none ->
+  %     case erl_bif_types:type(M, F, A, ArgTypes) of
+  %       None -> 
+  %         NewArgTypes = add_funs_to_arg_types(ArgTypes),
+  %         erl_bif_types:type(M, F, A, NewArgTypes);
+  %       Other ->
+  %         Other
+  %     end;
+  %   RetType ->
+  %     % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
+  %     RetType
+  % end;
+  case erl_bif_types:type(M, F, A, ArgTypes) of
+    None -> 
+      NewArgTypes = add_funs_to_arg_types(ArgTypes),
+      erl_bif_types:type(M, F, A, NewArgTypes);
+    Other ->
+      Other
   end;
       local ->
 	MFA = hipe_icode:call_fun(I),
@@ -558,19 +655,27 @@ do_enter(I, Info, State, LookupFun) ->
       remote ->
 	{M, F, A} = hipe_icode:enter_fun(I),
 	None = t_none(),
-	case check_opt_return_info({M,F,A}) of
-    none ->
-      case erl_bif_types:type(M, F, A, ArgTypes) of
-    	  None -> 
-    	    NewArgTypes = add_funs_to_arg_types(ArgTypes),
-    	    erl_bif_types:type(M, F, A, NewArgTypes);
-    	  Other ->
-    	    Other
-      end;
-    RetType ->
-      % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
-      RetType
-	end;
+  %% WARNING: This is wrong. We cannot make any assumption about the return type
+	% case check_opt_return_info({M,F,A}) of
+ %    none ->
+ %      case erl_bif_types:type(M, F, A, ArgTypes) of
+ %    	  None -> 
+ %    	    NewArgTypes = add_funs_to_arg_types(ArgTypes),
+ %    	    erl_bif_types:type(M, F, A, NewArgTypes);
+ %    	  Other ->
+ %    	    Other
+ %      end;
+ %    RetType ->
+ %      % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
+ %      RetType
+	% end;
+        case erl_bif_types:type(M, F, A, ArgTypes) of
+          None -> 
+            NewArgTypes = add_funs_to_arg_types(ArgTypes),
+            erl_bif_types:type(M, F, A, NewArgTypes);
+          Other ->
+            Other
+        end;
       primop ->
 	Fun = hipe_icode:enter_fun(I),
 	primop_type(Fun, ArgTypes)             
@@ -2285,22 +2390,6 @@ update_call_arguments(I, Info) ->
 find_signature(MFA = {_, _, _}, _) -> find_dynamic_signature_mfa(MFA);
 find_signature(Primop, Arity) -> find_signature_primop(Primop, Arity).
 
-%% Used to get the specs from a loaded beam
-% get_module_specs(_Mod) ->
-%    ok.
-
-%% Used to get the spec for a specific function
-% get_mfa_spec({_M, _F, _A}=MFA) ->
-%   %% Use dialyzer_utils and check its usage in dialyzer_analysis_callgraph
-%   test_type_server ! {get_mfa_type, MFA, self()},
-%   receive
-%     any -> any;
-%     Type -> Type
-%   end.
-  
-% is_spec({attribute, _, spec, _}) -> true;
-% is_spec(_) -> false.
-
 find_signature_mfa(MFA) ->  
   case get_mfa_arg_types(MFA) of
     any ->
@@ -2487,7 +2576,9 @@ find_dynamic_signature_mfa(MFA) ->
       find_signature_mfa(MFA);
     {ArgTypes, RetType} ->
       t_fun(ArgTypes, RetType)
-  end.
+  end,
+  %% WARNING: The above is wrong. We cannot make any assumptions about the types
+  find_signature_mfa(MFA).
 
 %%=====================================================================
 %% Testing function below
