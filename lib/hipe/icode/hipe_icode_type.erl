@@ -132,7 +132,7 @@ concurrent_cfg(Cfg, MFA, CompServer) ->
   Ans.
 
 concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
-  CfgWithTypeTests = add_optimistic_typetests(Cfg, MFA),
+  CfgWithTypeTests = add_optimistic_typetests_ssa(Cfg, MFA),
   CompServer ! {ready, {MFA, self()}},
   {ArgsFun, CallFun, FinalFun} = do_analysis(CfgWithTypeTests, MFA),
   Ans = do_rewrite(CfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
@@ -150,160 +150,388 @@ concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
 %%   
 %%-------------------------------------------------------------------
 
-add_optimistic_typetests(SSACfg, MFA) ->
-  %% Unconvert the Cfg from ssa form 
+add_optimistic_typetests_ssa(SSACfg, MFA) ->
   Cfg = hipe_icode_ssa:unconvert(SSACfg),
+  % add_optimistic_typetests(Cfg, MFA),
+  FinalNonSSA = add_optimistic_typetests_experimental(Cfg, MFA),
+  Final = hipe_icode_ssa:convert(FinalNonSSA),
+  % io:format("Final: ~p~n", [Final]),
+  Final.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% TODO: Implement this experimental workflow
+
+add_optimistic_typetests_experimental(Cfg, _MFA) ->
   %% Split every bb after every function call 
-  Cfg1 = divide_bbs_after_calls(Cfg),
+  %% TODO: Implement function
+  Cfg1 = separate_calls_into_bbs(Cfg),
 
-  %% Create a copy of the cfg bbs
+  % %% Create a copy of the cfg bbs
   {CopiedCfg, LabelMappings} = copy_cfg(Cfg1),
 
-  %% Find the starting label of the original and copied bbs
-  StartLbl = hipe_icode_cfg:start_label(Cfg),
+  % %% Find the starting label of the original and copied bbs
+  StartLbl = hipe_icode_cfg:start_label(Cfg1),
   {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
 
-  %% The optimistic arguments types
-  ArgTypes = check_opt_call_info(MFA),
+  %% Create a goto the starting label of the optimistic CFG as the new starting
+  CombinedCfg = combine_copied_cfg(CopiedCfg, StartLbl, StartLblOpt),
 
-  %% Create a type test in the begining for each argument  
-  CfgWithTypeTests = add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg),
-  
-  %% Create a typetest after the return from each function call
-  TotalCfg = add_function_return_typetests(LabelMappings, CfgWithTypeTests),
-  % io:format("Final: ~p~n", [TotalCfg]),
+  %% Create a typetest after the return of each non-branch function call
+  FinalCfg = add_typetests(CombinedCfg, LabelMappings),
 
-  %% Reconvert back to SSA
-  SSACfgWithTypeTests = hipe_icode_ssa:convert(TotalCfg),
-  % io:format("MFA: ~p~nAfter SSA: ~p~n", [MFA, SSACfgWithTypeTests]),
-  SSACfgWithTypeTests.
+  % io:format("Final: ~p~n", [FinalCfg]),
+  FinalCfg.
 
-
-
-add_function_return_typetests(LabelMappings, Cfg) ->
-  %% Create a set of the optimistic labels
+add_typetests(CombinedCfg, LabelMappings) ->
   OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
-  %% Add typetests after function returns
-  typetest_fun_returns(OptimisticLabels, LabelMappings, Cfg).
+  FinalCfg = lists:foldr(
+    fun(Lbl, Cfg) ->
+      add_typetest_fun_return(Lbl, Cfg, LabelMappings)
+    end, CombinedCfg, OptimisticLabels),
+  FinalCfg.
 
-typetest_fun_returns([Label|Rest], LabelMappings, Cfg) ->
-  BB = hipe_icode_cfg:bb(Cfg, Label),
+add_typetest_fun_return(OptLabel, Cfg, LabelMappings) ->
+  BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
-  NewCode = typetest_fun_return(Code, LabelMappings),
-  NewBB = hipe_bb:mk_bb(NewCode),
-  NewCfg = hipe_icode_cfg:bb_add(Cfg, Label, NewBB),  
-  typetest_fun_returns(Rest, LabelMappings, NewCfg);
-typetest_fun_returns([], _LabelMappings, Cfg) ->
-  Cfg.
+  case last_2(Code) of
+    [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] ->
+      case function_to_typetest(Ins1) of
+        true ->
+          MFA = hipe_icode:call_fun(Ins1),
+          case hipe_icode:call_dstlist(Ins1) of
+            [] -> Cfg;
+            RetVal ->
+              case check_opt_return_info(MFA) of
+                none -> Cfg;
+                RetType ->
+                  case erl_types:type_test_from_erl_type(RetType) of
+                    any -> Cfg; %% No typetest
+                    Typetest ->
+                      OptGotoLabel = hipe_icode:goto_label(Ins2),
+                      {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
 
-typetest_fun_return(Code, LabelMappings) ->
-  typetest_fun_return(Code, LabelMappings, []).
-typetest_fun_return([Ins1 = #icode_call{type=CallType}, Ins2 = #icode_goto{}| Rest], LabelMappings, NewCode) 
-    when CallType =:= local orelse CallType =:= remote ->
-  %% Get return type of function
-  MFA = hipe_icode:call_fun(Ins1),
-  case check_opt_return_info(MFA) of
-    none -> 
-      typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode]);
-    Type ->
-      %% Find label mapping
-      OptLabel = hipe_icode:goto_label(Ins2),
-      {StandLabel, _} = lists:keyfind(OptLabel, 2, LabelMappings),
-  
-      %% Create the typetest and put it instead of the goto
-      TypeTest = erl_types:type_test_from_erl_type(Type),
-      io:format("MFA: ~p, Type: ~p, TypeTest: ~p~n", [MFA, Type, TypeTest]),
-      case TypeTest of
-        any -> 
-          typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode]); % If the optimistic type is any()
-        _ ->
-          FunRet = hipe_icode:call_dstlist(Ins1),
-          TypeTestIns = hipe_icode:mk_type(FunRet, TypeTest, OptLabel, StandLabel, ?TYPE_TEST_PROB),
-          typetest_fun_return(Rest, LabelMappings, [TypeTestIns,Ins1|NewCode])
-      end
-  end;
-typetest_fun_return([Ins|Rest], LabelMappings, NewCode) ->
-  typetest_fun_return(Rest, LabelMappings, [Ins|NewCode]);
-typetest_fun_return([], _LabelMappings, NewCode) ->
-  lists:reverse(NewCode).
+                      TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptGotoLabel, StdGotoLabel, ?TYPE_TEST_PROB),
+                      NewCode = init_2(Code) ++ [Ins1, TypetestIns],
+                      NewBB = hipe_bb:code_update(BB, NewCode),
+                      hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB)
+                  end
+              end
+          end;
+        false -> Cfg
+      end;
+    _ -> Cfg
+  end.
 
 
 
-divide_bbs_after_calls(Cfg) ->
-  
+last_2(Xs) ->
+  case lists:reverse(Xs) of
+    [X1,X2|_] ->
+      [X2,X1];
+    _ ->
+      []
+  end.
+
+init_2(Xs) ->
+  case lists:reverse(Xs) of
+    [_,_|Rest] ->
+      lists:reverse(Rest);
+    _ ->
+      []
+  end.
+
+separate_calls_into_bbs(Cfg) -> 
   %% Make cfg linear and get code
   Linear = hipe_icode_cfg:cfg_to_linear(Cfg),
   Code = hipe_icode:icode_code(Linear),
 
-  NewCode = split_bbs(Code),
+  NewCodeRev = lists:foldl(fun separate_calls_into_bbs_fun/2, [], Code),
+  NewCode = lists:reverse(NewCodeRev),
   % io:format("New code: ~p~n", [NewCode]),
 
   %% Update the Cfg
   NewLinear = hipe_icode:icode_code_update(Linear, NewCode),
   hipe_icode_cfg:linear_to_cfg(NewLinear).
 
+separate_calls_into_bbs_fun(Ins = #icode_call{}, Code) ->
+  case function_to_typetest(Ins) of
+    true ->
+      LabelIns = hipe_icode:mk_new_label(),
+      NewLabel = hipe_icode:label_name(LabelIns),
+      GotoIns = hipe_icode:mk_goto(NewLabel),
+      [LabelIns, GotoIns, Ins|Code];
+    false ->
+      [Ins|Code]
+  end;
+separate_calls_into_bbs_fun(Ins, Code) ->
+  [Ins|Code].
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
-%% Create a new label after each function call
-%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function_to_typetest(Ins = #icode_call{type=CallType})
+  when CallType =:= local orelse CallType =:= remote ->
+  case hipe_icode:is_branch(Ins) of
+    false -> true;
+    true -> false
+  end;
+function_to_typetest(_Ins) ->
+  false.
 
-split_bbs(Code) ->
-  split_bbs(Code, []).
-split_bbs([Ins1 = #icode_call{},Ins2|Rest], NewCode) ->
-  LabelIns = hipe_icode:mk_new_label(),
-  NewLabel = hipe_icode:label_name(LabelIns),
-  GotoIns = hipe_icode:mk_goto(NewLabel),
-  split_bbs([Ins2|Rest], [LabelIns, GotoIns, Ins1|NewCode]);
-split_bbs([Ins1,Ins2|Rest], NewCode) ->
-  split_bbs([Ins2|Rest], [Ins1|NewCode]);
-split_bbs([Last], NewCode) ->
-  split_bbs([], [Last|NewCode]);
-split_bbs([], NewCode) ->
-  lists:reverse(NewCode).
+combine_copied_cfg(CopiedCfg, StartLbl, StartLblOpt) ->
+  InitialGoto = hipe_icode:mk_if('=:=', [hipe_icode:mk_const(true), hipe_icode:mk_const(true)], StartLblOpt, StartLbl),
+  % InitialGoto = hipe_icode:mk_goto(StartLblOpt),
+  NewStartingBB = hipe_bb:mk_bb([InitialGoto]),
+  NewStartingLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+  UpdatedCfg = hipe_icode_cfg:bb_add(CopiedCfg, NewStartingLabel, NewStartingBB),
+  hipe_icode_cfg:start_label_update(UpdatedCfg, NewStartingLabel).
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
-%% Add typetests for each argument at the beginning of the cfg
-%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-add_argument_typetests(none, {_StartLbl, _StartLblOpt}, _Cfg, CopiedCfg) ->
-  CopiedCfg;
-add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg) ->
-  CfgParams = hipe_icode_cfg:params(Cfg),
-  ParamsTypes = lists:zip(CfgParams, ArgTypes),
-  {NewStartLabel, TypeTests} = argument_typetests(ParamsTypes, StartLbl, StartLblOpt),
-  CfgWithoutNewStartLabel = lists:foldl(
-    fun({Lbl, BB}, TempCfg) -> 
-      hipe_icode_cfg:bb_add(TempCfg, Lbl, BB) 
-    end, CopiedCfg, TypeTests),
-  hipe_icode_cfg:start_label_update(CfgWithoutNewStartLabel, NewStartLabel).
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
-%% Returns a list of typetest bbs, one for each argument
-%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% add_optimistic_typetests(Cfg, MFA) ->
+%   %% Split every bb after every function call 
+%   Cfg1 = divide_bbs_after_calls(Cfg),
 
-argument_typetests(ParamsTypes, StartLbl1, StartLbl2) ->
-  argument_typetests(ParamsTypes, StartLbl1, StartLbl2, []).
-argument_typetests([], _StartLbl1, StartLbl2, TypeTests) ->
-  {StartLbl2, TypeTests};
-argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
-  TypeTest = erl_types:type_test_from_erl_type(Type),
-  case TypeTest of
-    any -> 
-      argument_typetests(Rest, FalseLabel, TrueLabel, TypeTests); % If the optimistic type is any()
-    _ ->
-      Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
-      BB = hipe_bb:mk_bb([Instr]),
-      NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
-      BBwithLabel = {NewStartLabel, BB},
-      argument_typetests(Rest, FalseLabel, NewStartLabel, [BBwithLabel|TypeTests])
-  end.
+%   %% Create a copy of the cfg bbs
+%   {CopiedCfg, LabelMappings} = copy_cfg(Cfg1),
+
+%   %% Find the starting label of the original and copied bbs
+%   StartLbl = hipe_icode_cfg:start_label(Cfg),
+%   {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
+
+%   %% The optimistic arguments types
+%   ArgTypes = check_opt_call_info(MFA),
+
+%   %% Create a type test in the begining for each argument  
+%   CfgWithTypeTests = add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg),
+
+%   case MFA of
+%     {dialyzer_utils, get_core_from_abstract_code, 2} ->
+%       io:format("Before: ~p~n", [CfgWithTypeTests]);
+%     _ -> ok
+%   end,
+
+%   %% Create a typetest after the return from each function call
+%   TotalCfg = add_function_return_typetests(LabelMappings, CfgWithTypeTests),
+%   % io:format("Final: ~p~n", [TotalCfg]),
+%   case MFA of
+%     {dialyzer_utils, get_core_from_abstract_code, 2} ->
+%       io:format("Final: ~p~n", [TotalCfg]);
+%     _ -> ok
+%   end,
+  
+%   TotalCfg.
+
+
+
+% add_function_return_typetests(LabelMappings, Cfg) ->
+%   %% Create a set of the optimistic labels
+%   OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
+%   % %% Add typetests after function returns when the calls have no continuation
+%   % Cfg1 = typetest_fun_returns_in_calls_with_no_continuation(OptimisticLabels, LabelMappings, Cfg),
+%   % %% Add typetests after function returns when the calls HAVE a continuation label
+%   typetest_fun_returns_in_calls_with_no_continuation(OptimisticLabels, LabelMappings, Cfg),
+%   typetest_fun_returns_in_calls_with_continuation(OptimisticLabels, LabelMappings, Cfg).
+
+% typetest_fun_returns_in_calls_with_no_continuation([Label|Rest], LabelMappings, Cfg) ->
+%   BB = hipe_icode_cfg:bb(Cfg, Label),
+%   Code = hipe_bb:code(BB),
+%   NewCode = typetest_fun_return(Code, LabelMappings),
+%   NewBB = hipe_bb:mk_bb(NewCode),
+%   NewCfg = hipe_icode_cfg:bb_add(Cfg, Label, NewBB),  
+%   typetest_fun_returns_in_calls_with_no_continuation(Rest, LabelMappings, NewCfg);
+% typetest_fun_returns_in_calls_with_no_continuation([], _LabelMappings, Cfg) ->
+%   Cfg.
+
+% %% TODO: This function is written in a very bad way, making a lot of assumptions
+% %% PLEASE FIX THIS ASAP DON'T LET IT STAY HERE
+% typetest_fun_returns_in_calls_with_continuation([Label|Rest], LabelMappings, Cfg) ->
+%   BB = hipe_icode_cfg:bb(Cfg, Label),
+%   Code = hipe_bb:code(BB),
+%   %% Find whether this bb has a call that has a continuation
+%   LastIntruction = last(Code),
+%   case LastIntruction of
+%     #icode_call{in_guard=false} ->
+%       case hipe_icode:call_continuation(LastIntruction) of
+%         [] ->
+%           typetest_fun_returns_in_calls_with_no_continuation(Rest, LabelMappings, Cfg);
+%         ContinuationLabel ->
+%           %% The true label
+%           {OldContinuationLabel, _} = lists:keyfind(ContinuationLabel, 2, LabelMappings),
+
+%           %% Get return value and mfa of function
+%           MFA = hipe_icode:call_fun(LastIntruction),
+%           FunRet = hipe_icode:call_dstlist(LastIntruction),
+
+%           case create_typetest_for_mfa_return(MFA, FunRet, ContinuationLabel, OldContinuationLabel) of
+%             [] ->
+%               typetest_fun_returns_in_calls_with_no_continuation(Rest, LabelMappings, Cfg);
+%             [TypeTestIns] ->
+%               %% If we should indeed put a typetest we have to create a new bb to bridge the old and the new with a typetest
+%               NewLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+%               BridgeBB = hipe_bb:mk_bb([TypeTestIns]),
+
+%               NewCode = init(Code) ++ [hipe_icode:call_set_continuation(LastIntruction, NewLabel)],
+%               NewBB = hipe_bb:code_update(BB, NewCode),
+%               Cfg1 = hipe_icode_cfg:bb_add(Cfg, Label, NewBB),
+%               FinalCfg = hipe_icode_cfg:bb_add(Cfg1, NewLabel, BridgeBB),
+%               typetest_fun_returns_in_calls_with_no_continuation(Rest, LabelMappings, FinalCfg)
+%           end
+%       end;
+%     _ ->
+%       typetest_fun_returns_in_calls_with_no_continuation(Rest, LabelMappings, Cfg)
+%   end;
+% typetest_fun_returns_in_calls_with_continuation([], _LabelMappings, Cfg) ->
+%   Cfg.
+
+% last([]) -> [];
+% last([X]) -> X;
+% last([_|Rest]) -> last(Rest).
+
+% init(List) -> init(List, []).
+% init([], _) -> [];
+% init([_], Init) -> lists:reverse(Init);
+% init([X|Rest], Init) -> init(Rest, [X|Init]).
+
+% create_typetest_for_mfa_return(MFA, ReturnVal, TrueLabel, FalseLabel) ->
+%   case check_opt_return_info(MFA) of
+%     none -> 
+%       []; %% No typetest
+%     Type ->
+%       %% Create the typetest and put it instead of the goto
+%       TypeTest = erl_types:type_test_from_erl_type(Type),
+%       % io:format("MFA: ~p, Type: ~p, TypeTest: ~p~n", [MFA, Type, TypeTest]),
+%       case TypeTest of
+%         any -> 
+%           []; %% No typetest
+%         _ ->
+%           TypeTestIns = hipe_icode:mk_type(ReturnVal, TypeTest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
+%           [TypeTestIns]
+%       end
+%   end.
+
+% typetest_fun_return(Code, LabelMappings) ->
+%   typetest_fun_return(Code, LabelMappings, []).
+% typetest_fun_return([Ins1 = #icode_call{type=CallType, in_guard=false}, Ins2 = #icode_goto{}| Rest], LabelMappings, NewCode) 
+%     %% Warning: If the function is in guard we shouldn't try to add a typetest after it
+%     when CallType =:= local orelse CallType =:= remote ->
+%   case hipe_icode:is_branch(Ins1) of
+%     false ->
+%       %% Find label mapping
+%       OptLabel = hipe_icode:goto_label(Ins2),
+%       {StandLabel, _} = lists:keyfind(OptLabel, 2, LabelMappings),
+      
+%       %% Get return value and mfa of function
+%       MFA = hipe_icode:call_fun(Ins1),
+%       FunRet = hipe_icode:call_dstlist(Ins1),
+
+%       %% Create the typetest
+%       case create_typetest_for_mfa_return(MFA, FunRet, OptLabel, StandLabel) of
+%         [] ->
+%           typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode]);
+%         [TypeTestIns] ->
+%           typetest_fun_return(Rest, LabelMappings, [TypeTestIns, Ins1|NewCode])
+%       end;
+%     %% We take care of function calls that have continuation else where
+%     true ->
+%       typetest_fun_return([Ins2|Rest], LabelMappings, [Ins1|NewCode])
+%   end;
+% typetest_fun_return([Ins|Rest], LabelMappings, NewCode) ->
+%   typetest_fun_return(Rest, LabelMappings, [Ins|NewCode]);
+% typetest_fun_return([], _LabelMappings, NewCode) ->
+%   lists:reverse(NewCode).
+
+
+
+% divide_bbs_after_calls(Cfg) ->
+  
+%   %% Make cfg linear and get code
+%   Linear = hipe_icode_cfg:cfg_to_linear(Cfg),
+%   Code = hipe_icode:icode_code(Linear),
+
+%   NewCode = split_bbs(Code),
+%   % io:format("New code: ~p~n", [NewCode]),
+
+%   %% Update the Cfg
+%   NewLinear = hipe_icode:icode_code_update(Linear, NewCode),
+%   % io:format("Linear: ~p~n", [NewLinear]),
+%   hipe_icode_cfg:linear_to_cfg(NewLinear).
+
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% %%
+% %% Create a new label after each function call
+% %%
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% split_bbs(Code) ->
+%   split_bbs(Code, []).
+% %% If the call is in guard there is no need to add a typetest after it
+% split_bbs([Ins1 = #icode_call{type=CallType, in_guard=false},Ins2|Rest], NewCode)
+%     %% Warning: If the function is in guard we shouldn't try to add a typetest after it
+%     when CallType =:= local orelse CallType =:= remote ->
+%   case hipe_icode:is_branch(Ins1) of
+%     false ->
+%       LabelIns = hipe_icode:mk_new_label(),
+%       NewLabel = hipe_icode:label_name(LabelIns),
+      
+%       %% Alternative to goto is the continuation
+%       % GotoIns = hipe_icode:mk_goto(NewLabel),
+%       % split_bbs([Ins2|Rest], [LabelIns, GotoIns, Ins1|NewCode]);
+
+%       %% COntinuation
+%       NewIns1 = hipe_icode:call_set_continuation(Ins1, NewLabel),
+%       split_bbs([Ins2|Rest], [LabelIns, NewIns1|NewCode]);      
+%     true ->
+%       %% Don't add a new bb if the call has a continuation or a fail label
+%       split_bbs([Ins2|Rest], [Ins1|NewCode])
+%   end;
+% split_bbs([Ins1,Ins2|Rest], NewCode) ->
+%   split_bbs([Ins2|Rest], [Ins1|NewCode]);
+% split_bbs([Last], NewCode) ->
+%   split_bbs([], [Last|NewCode]);
+% split_bbs([], NewCode) ->
+%   lists:reverse(NewCode).
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% %%
+% %% Add typetests for each argument at the beginning of the cfg
+% %%
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% add_argument_typetests(none, {_StartLbl, _StartLblOpt}, _Cfg, CopiedCfg) ->
+%   CopiedCfg;
+% add_argument_typetests(ArgTypes, {StartLbl, StartLblOpt}, Cfg, CopiedCfg) ->
+%   CfgParams = hipe_icode_cfg:params(Cfg),
+%   ParamsTypes = lists:zip(CfgParams, ArgTypes),
+%   {NewStartLabel, TypeTests} = argument_typetests(ParamsTypes, StartLbl, StartLblOpt),
+%   CfgWithoutNewStartLabel = lists:foldl(
+%     fun({Lbl, BB}, TempCfg) -> 
+%       hipe_icode_cfg:bb_add(TempCfg, Lbl, BB) 
+%     end, CopiedCfg, TypeTests),
+%   hipe_icode_cfg:start_label_update(CfgWithoutNewStartLabel, NewStartLabel).
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% %%
+% %% Returns a list of typetest bbs, one for each argument
+% %%
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% argument_typetests(ParamsTypes, StartLbl1, StartLbl2) ->
+%   argument_typetests(ParamsTypes, StartLbl1, StartLbl2, []).
+% argument_typetests([], _StartLbl1, StartLbl2, TypeTests) ->
+%   {StartLbl2, TypeTests};
+% argument_typetests([{Arg, Type}|Rest], FalseLabel, TrueLabel, TypeTests) ->
+%   TypeTest = erl_types:type_test_from_erl_type(Type),
+%   case TypeTest of
+%     any -> 
+%       argument_typetests(Rest, FalseLabel, TrueLabel, TypeTests); % If the optimistic type is any()
+%     _ ->
+%       Instr = hipe_icode:mk_type([Arg], TypeTest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
+%       BB = hipe_bb:mk_bb([Instr]),
+%       NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+%       BBwithLabel = {NewStartLabel, BB},
+%       argument_typetests(Rest, FalseLabel, NewStartLabel, [BBwithLabel|TypeTests])
+%   end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -316,7 +544,7 @@ copy_cfg(Cfg) ->
   Labels = hipe_icode_cfg:labels(Cfg),
 
   %% Create the old to new label mappings
-  LabelMappings = lists:foldr(
+  LabelMappings = lists:foldl(
     fun(OldLbl, Mappings) ->
       NewLbl = hipe_icode:label_name(hipe_icode:mk_new_label()),
       [{OldLbl, NewLbl}|Mappings]
@@ -443,9 +671,15 @@ analyse(Cfg, Data) ->
 
 safe_analyse(Cfg, {MFA,_,_,_}=Data) ->
   State = new_state(Cfg, Data),
-  NewState = analyse_blocks(State,MFA),
-  (state__resultaction(NewState))(MFA,state__ret_type(NewState)),
-  NewState.
+  try 
+    NewState = analyse_blocks(State,MFA),
+    (state__resultaction(NewState))(MFA,state__ret_type(NewState)),
+    NewState
+  catch
+    _:Reason ->
+      io:format("MFA: ~p~nCfg: ~p~n", [MFA, Cfg]),
+      error(Reason)
+  end.
 
 analyse_blocks(State, MFA) ->
   Work = init_work(State),
@@ -783,9 +1017,15 @@ int_range_lt_propagator(IntArg1, IntArg2) ->
    t_from_range(Min2, FalseMax2)}.
 
 do_type(I, Info) ->
-  case hipe_icode:args(I) of
-    [Var] -> do_type(I, Info, Var);
-    [Var1,Var2] -> do_type2(I, Info, Var1, Var2)
+  try
+    case hipe_icode:args(I) of
+      [Var] -> do_type(I, Info, Var);
+      [Var1,Var2] -> do_type2(I, Info, Var1, Var2)
+    end
+  catch
+    _:Reason ->
+      io:format("Instr: ~p~nInfo: ~p~n", [I, Info]),
+      error(Reason)
   end.
 
 do_type2(I, Info, FunVar, ArityVar) -> % function2(Fun,Arity)
