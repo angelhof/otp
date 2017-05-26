@@ -197,36 +197,67 @@ add_typetests(CombinedCfg, LabelMappings) ->
 add_typetest_fun_return(OptLabel, Cfg, LabelMappings) ->
   BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
-  case last_2(Code) of
-    [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] ->
-      case function_to_typetest(Ins1) of
-        true ->
-          MFA = hipe_icode:call_fun(Ins1),
-          case hipe_icode:call_dstlist(Ins1) of
-            [] -> Cfg;
-            RetVal ->
-              case check_opt_return_info(MFA) of
-                none -> Cfg;
-                RetType ->
-                  case erl_types:type_test_from_erl_type(RetType) of
-                    any -> Cfg; %% No typetest
-                    Typetest ->
-                      OptGotoLabel = hipe_icode:goto_label(Ins2),
-                      {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
+  case typetest_fun_without_continuation(LabelMappings, Code) of
+    Code -> %% In case nothing changed, check if the function is 
+      typetest_fun_with_continuation(OptLabel, LabelMappings, Code, BB, Cfg);      
+    NewCode ->
+      NewBB = hipe_bb:code_update(BB, NewCode),
+      hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB)
+  end.
+  % NewCode = typetest_fun_without_continuation(LabelMappings, Code),
+  % NewBB = hipe_bb:code_update(BB, NewCode),
+  % hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB).
 
-                      TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptGotoLabel, StdGotoLabel, ?TYPE_TEST_PROB),
-                      NewCode = init_2(Code) ++ [Ins1, TypetestIns],
-                      NewBB = hipe_bb:code_update(BB, NewCode),
-                      hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB)
-                  end
-              end
+%% TODO: Prettify this mess of a function
+typetest_fun_with_continuation(OptLabel, LabelMappings, Code, BB, Cfg) ->
+  case last(Code) of
+    [Ins = #icode_call{}] ->
+      case function_to_typetest_with_continuation(Ins) of
+        true ->
+          MFA = hipe_icode:call_fun(Ins),
+          RetVal = hipe_icode:call_dstlist(Ins),
+          case function_worth_typetesting(MFA) of
+            {true, Typetest} ->
+              OptContLabel = hipe_icode:call_continuation(Ins),
+              {StdContLabel, _} = lists:keyfind(OptContLabel, 2, LabelMappings),
+
+              %% Add the typetest BB
+              TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptContLabel, StdContLabel, ?TYPE_TEST_PROB),
+              TypetestLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+              TypetestBB = hipe_bb:mk_bb([TypetestIns]),
+              Cfg1 = hipe_icode_cfg:bb_add(Cfg, TypetestLabel, TypetestBB),
+
+              %% Update the continuation Label
+              NewCode = init(Code) ++ [hipe_icode:call_set_continuation(Ins, TypetestLabel)],
+              NewBB = hipe_bb:code_update(BB, NewCode),
+              hipe_icode_cfg:bb_add(Cfg1, OptLabel, NewBB);
+            false -> Cfg
           end;
         false -> Cfg
       end;
     _ -> Cfg
   end.
 
+typetest_fun_without_continuation(LabelMappings, Code) ->
+  case last_2(Code) of
+    [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] ->
+      case function_to_typetest_without_continuation(Ins1) of
+        true ->
+          MFA = hipe_icode:call_fun(Ins1),
+          RetVal = hipe_icode:call_dstlist(Ins1),
+          case function_worth_typetesting(MFA) of
+            {true, Typetest} ->
+              OptGotoLabel = hipe_icode:goto_label(Ins2),
+              {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
 
+              TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptGotoLabel, StdGotoLabel, ?TYPE_TEST_PROB),
+              init_2(Code) ++ [Ins1, TypetestIns];
+            false -> Code
+          end;
+        false -> Code
+      end;
+    _ -> Code
+  end.
 
 last_2(Xs) ->
   case lists:reverse(Xs) of
@@ -243,6 +274,23 @@ init_2(Xs) ->
     _ ->
       []
   end.
+
+last(Xs) ->
+  case lists:reverse(Xs) of
+    [X|_] ->
+      [X];
+    _ ->
+      []
+  end.
+
+init(Xs) ->
+  case lists:reverse(Xs) of
+    [_|Rest] ->
+      lists:reverse(Rest);
+    _ ->
+      []
+  end.
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -265,7 +313,7 @@ separate_calls_into_bbs(Cfg) ->
   hipe_icode_cfg:linear_to_cfg(NewLinear).
 
 separate_calls_into_bbs_fun(Ins = #icode_call{}, Code) ->
-  case function_to_typetest(Ins) of
+  case function_to_typetest_without_continuation(Ins) of
     true ->
       LabelIns = hipe_icode:mk_new_label(),
       NewLabel = hipe_icode:label_name(LabelIns),
@@ -277,15 +325,32 @@ separate_calls_into_bbs_fun(Ins = #icode_call{}, Code) ->
 separate_calls_into_bbs_fun(Ins, Code) ->
   [Ins|Code].
 
+function_to_typetest_without_continuation(Ins) ->
+  not hipe_icode:is_branch(Ins) 
+    andalso function_to_typetest(Ins).
+
+function_to_typetest_with_continuation(Ins) ->
+  hipe_icode:is_branch(Ins) 
+    andalso function_to_typetest(Ins).
+
 function_to_typetest(Ins = #icode_call{type=CallType})
   when CallType =:= local orelse CallType =:= remote ->
-  case hipe_icode:is_branch(Ins) of
-    false -> true;
-    true -> false
-  end;
+  hipe_icode:call_dstlist(Ins) =/= [];
 function_to_typetest(_Ins) ->
   false.
 
+function_worth_typetesting(MFA) -> 
+  case check_opt_return_info(MFA) of
+    none -> 
+      false;
+    RetType ->
+      case erl_types:type_test_from_erl_type(RetType) of
+        any -> 
+          false; %% No typetest
+        Typetest ->
+          {true, Typetest}
+      end
+  end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% This function combines the optimistic and the original cfg  
