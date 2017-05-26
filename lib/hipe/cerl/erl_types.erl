@@ -2362,17 +2362,19 @@ t_from_term_shallow(T, N) when is_tuple(T) ->
 
 %% TODO: Fix the any type by importing the hipe_icode.hrl
 -spec type_test_from_erl_type(erl_type()) -> any().
+type_test_from_erl_type(?atom([Atom])) ->
+  {'atom', Atom};
+type_test_from_erl_type(?atom([true,false])) ->
+  boolean;
 type_test_from_erl_type(?atom(_)) ->
   atom;
 % Dont know how should i do this
 % type_test_from_erl_type() ->
 %   bignum;
-type_test_from_erl_type(?atom(_)) ->
-  binary;
+% type_test_from_erl_type(?bitstr(_, _)) ->
+%   binary;
 type_test_from_erl_type(?bitstr(_, _)) ->
   bitstr;
-type_test_from_erl_type(?atom(_)) ->
-  boolean;
 %% Is this correct?
 type_test_from_erl_type(?nonempty_list(_, _)) ->
   cons;
@@ -2386,6 +2388,8 @@ type_test_from_erl_type(?function(_, _)) ->
 % I dont know what this is
 % type_test_from_erl_type(?function(_, _)) ->
 %   function2;
+type_test_from_erl_type(?int_set([Integer])) ->
+  {'integer', Integer};
 type_test_from_erl_type(?integer(_)) ->
   integer;
 % TODO: Check if this is possible to make correct 
@@ -2413,21 +2417,13 @@ type_test_from_erl_type(?identifier(_) = Id) ->
           end
       end
   end;
-type_test_from_erl_type(?tuple(_, _, _)) ->
-  tuple;
-% type_test_from_erl_type(?atom(Set)) ->
-%   {'atom', atom()};
-% type_test_from_erl_type(?atom(_)) ->
-%   {'integer', integer()};
+type_test_from_erl_type(?tuple(_, Arity, _)) ->
+  {'tuple', Arity};
 % type_test_from_erl_type(?atom(_)) ->
 %   {'record', atom(), non_neg_integer()};
-% type_test_from_erl_type(?tuple(Types, Arity, Qual)) ->
-%   {'tuple', non_neg_integer()};
 type_test_from_erl_type(_) ->
   any.
 
-% -define(number(Set, Qualifier),    #c{tag=?number_tag, elements=Set, 
-%                                       qualifier=Qualifier}).
 % -define(product(Types),            #c{tag=?product_tag, elements=Types}).
 %                                       qualifier={Arity, Qual}}).
 
