@@ -194,69 +194,90 @@ add_typetests(CombinedCfg, LabelMappings) ->
     end, CombinedCfg, OptimisticLabels),
   FinalCfg.
 
+
+%% WARNING: This function is implemented in a very bad way, performance wise while also clarity wise
+%% TODO: Prettify and optimize
 add_typetest_fun_return(OptLabel, Cfg, LabelMappings) ->
   BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
-  case typetest_fun_without_continuation(LabelMappings, Code) of
-    Code -> %% In case nothing changed, check if the function is 
-      typetest_fun_with_continuation(OptLabel, LabelMappings, Code, BB, Cfg);      
-    NewCode ->
-      NewBB = hipe_bb:code_update(BB, NewCode),
-      hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB)
-  end.
-  % NewCode = typetest_fun_without_continuation(LabelMappings, Code),
-  % NewBB = hipe_bb:code_update(BB, NewCode),
-  % hipe_icode_cfg:bb_add(Cfg, OptLabel, NewBB).
-
-%% TODO: Prettify this mess of a function
-typetest_fun_with_continuation(OptLabel, LabelMappings, Code, BB, Cfg) ->
-  case last(Code) of
-    [Ins = #icode_call{}] ->
-      case function_to_typetest_with_continuation(Ins) of
+  case final_call(Code) of
+    none ->
+      Cfg;
+    {Call, continuation} ->
+      case function_to_typetest_with_continuation(Call) of
         true ->
-          MFA = hipe_icode:call_fun(Ins),
-          RetVal = hipe_icode:call_dstlist(Ins),
-          case function_worth_typetesting(MFA) of
-            {true, Typetest} ->
-              OptContLabel = hipe_icode:call_continuation(Ins),
-              {StdContLabel, _} = lists:keyfind(OptContLabel, 2, LabelMappings),
-
-              %% Add the typetest BB
-              TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptContLabel, StdContLabel, ?TYPE_TEST_PROB),
-              TypetestLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
-              TypetestBB = hipe_bb:mk_bb([TypetestIns]),
-              Cfg1 = hipe_icode_cfg:bb_add(Cfg, TypetestLabel, TypetestBB),
-
-              %% Update the continuation Label
-              NewCode = init(Code) ++ [hipe_icode:call_set_continuation(Ins, TypetestLabel)],
-              NewBB = hipe_bb:code_update(BB, NewCode),
-              hipe_icode_cfg:bb_add(Cfg1, OptLabel, NewBB);
-            false -> Cfg
-          end;
+          typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg);
         false -> Cfg
       end;
-    _ -> Cfg
+    {Call, no_continuation} ->
+      case function_to_typetest_without_continuation(Call) of
+        true ->
+          typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg);
+        false -> Cfg
+      end
   end.
 
-typetest_fun_without_continuation(LabelMappings, Code) ->
-  case last_2(Code) of
-    [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] ->
-      case function_to_typetest_without_continuation(Ins1) of
-        true ->
-          MFA = hipe_icode:call_fun(Ins1),
-          RetVal = hipe_icode:call_dstlist(Ins1),
-          case function_worth_typetesting(MFA) of
-            {true, Typetest} ->
-              OptGotoLabel = hipe_icode:goto_label(Ins2),
-              {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
+final_call(Code) ->
+  case last(Code) of
+    [FinalCall = #icode_call{}] ->
+      {FinalCall, continuation};
+    _ ->
+      case last_2(Code) of
+        [Ins1 = #icode_call{}, #icode_goto{}] ->
+          {Ins1, no_continuation};
+        _ ->
+          none
+      end
+  end.
 
-              TypetestIns = hipe_icode:mk_type(RetVal, Typetest, OptGotoLabel, StdGotoLabel, ?TYPE_TEST_PROB),
-              init_2(Code) ++ [Ins1, TypetestIns];
-            false -> Code
-          end;
-        false -> Code
-      end;
-    _ -> Code
+%% TODO: Prettify this mess of a function
+typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg) ->
+  BB = hipe_icode_cfg:bb(Cfg, OptLabel),
+  Code = hipe_bb:code(BB),
+  [Ins = #icode_call{}] = last(Code),
+  %% Sanity assertion
+  true = function_to_typetest_with_continuation(Ins),
+  MFA = hipe_icode:call_fun(Ins),
+  [RetVal] = hipe_icode:call_dstlist(Ins),
+  case function_worth_typetesting(MFA) of
+    {true, TypetestTree} ->
+      OptContLabel = hipe_icode:call_continuation(Ins),
+      {StdContLabel, _} = lists:keyfind(OptContLabel, 2, LabelMappings),
+
+      %% Add the typetests in the typetest list
+      TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), 100),
+      % io:format("With cont MFA: ~p~nTypetest List: ~p~n", [MFA, TypetestList]),
+      {Cfg1, TypetestLabel, _} = lists:foldr(fun add_typetests_fun/2, {Cfg, OptContLabel, StdContLabel}, TypetestList),
+
+      %% Update the continuation Label
+      NewCode = init(Code) ++ [hipe_icode:call_set_continuation(Ins, TypetestLabel)],
+      NewBB = hipe_bb:code_update(BB, NewCode),
+      hipe_icode_cfg:bb_add(Cfg1, OptLabel, NewBB);
+    false -> Cfg
+  end.
+
+typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg) ->
+  BB = hipe_icode_cfg:bb(Cfg, OptLabel),
+  Code = hipe_bb:code(BB),
+  [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] = last_2(Code),
+  true = function_to_typetest_without_continuation(Ins1),
+  MFA = hipe_icode:call_fun(Ins1),
+  [RetVal] = hipe_icode:call_dstlist(Ins1),
+  case function_worth_typetesting(MFA) of
+    {true, TypetestTree} ->
+      OptGotoLabel = hipe_icode:goto_label(Ins2),
+      {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
+
+      %% Add the typetests in the typetest list
+      TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), 100),
+      % io:format("Without cont MFA: ~p~nTypetest List: ~p~n", [MFA, TypetestList]),
+      {Cfg1, TypetestLabel, _} = lists:foldr(fun add_typetests_fun/2, {Cfg, OptGotoLabel, StdGotoLabel}, TypetestList),
+
+      %% Update the continuation Label
+      NewCode = init_2(Code) ++ [Ins1, hipe_icode:mk_goto(TypetestLabel)],
+      NewBB = hipe_bb:code_update(BB, NewCode),
+      hipe_icode_cfg:bb_add(Cfg1, OptLabel, NewBB);
+    false -> Cfg
   end.
 
 last_2(Xs) ->
@@ -344,11 +365,11 @@ function_worth_typetesting(MFA) ->
     none -> 
       false;
     RetType ->
-      case erl_types:type_test_from_erl_type(RetType) of
+      case erl_types:t_test_tree_from_erl_type(RetType) of
         any -> 
           false; %% No typetest
-        Typetest ->
-          {true, Typetest}
+        TypetestTree ->
+          {true, TypetestTree}
       end
   end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -368,41 +389,89 @@ combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt) ->
       ArgTypesTemp ->
         ArgTypesTemp
     end,
-  ArgTypetests = [erl_types:type_test_from_erl_type(Type) || Type <- ArgTypes],
-  ParamsTypes = lists:zip(CfgParams, ArgTypetests),
-
-  %% Create the typetests
-  {UpdatedCfg, NewStartLabel, StartLbl} = lists:foldl(
-    fun add_argument_typetests_fun/2, {CopiedCfg, StartLblOpt, StartLbl}, ParamsTypes),
+  %% New version that might add more than one typetest for each argument
+  ArgTypetestTrees = lists:zip([erl_types:t_test_tree_from_erl_type(Type) || Type <- ArgTypes], [hipe_icode:mk_move(X, X) || X <- CfgParams]),
+  ArgTypetestLists = [traverse_test_tree(Tree, Param, 100) || {Tree, Param} <- ArgTypetestTrees],
+  {UpdatedCfg, NewStartLabel, _} = lists:foldr(fun add_typetests_fun/2, {CopiedCfg, StartLblOpt, StartLbl}, lists:flatten(ArgTypetestLists)),
   
   %% Check if any typetest has been really added
   case NewStartLabel of
     StartLblOpt ->
-      %% Very important, in order to combine both cfgs in case no typetest has been added
+      %% WARNING: This is very important, in order to combine both cfgs in case no typetest has been added
       InitialGoto = hipe_icode:mk_if('=:=', [hipe_icode:mk_const(true), hipe_icode:mk_const(true)], StartLblOpt, StartLbl),
       NewStartingBB = hipe_bb:mk_bb([InitialGoto]),
       NewStartingLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
       SimpleUpdatedCfg = hipe_icode_cfg:bb_add(CopiedCfg, NewStartingLabel, NewStartingBB),
       hipe_icode_cfg:start_label_update(SimpleUpdatedCfg, NewStartingLabel);
     _ ->
-      UpdatedCfg
+     hipe_icode_cfg:start_label_update(UpdatedCfg, NewStartLabel)
   end.
 
-add_argument_typetests_fun({Arg, Typetest}, {Cfg, TrueLabel, FalseLabel}) ->
-  case Typetest of
-    any -> 
-      {Cfg, TrueLabel, FalseLabel}; % If the optimistic type is any()
+
+%% This function is used as a foldr function on the typetest list
+add_typetests_fun({Typetest, Instruction}, {Cfg, TrueLabel, FalseLabel}) ->
+  BB = case Typetest of
+    any ->
+      FakeGoto = hipe_icode:mk_if('=:=', [hipe_icode:mk_const(true), hipe_icode:mk_const(true)], TrueLabel, FalseLabel),
+      hipe_bb:mk_bb([Instruction, FakeGoto]);
     _ ->
-      %% Create the new instruction, bb and label
-      Instr = hipe_icode:mk_type([Arg], Typetest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
-      BB = hipe_bb:mk_bb([Instr]),
-      NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
-      
-      %% Update the cfg
-      Cfg1 = hipe_icode_cfg:bb_add(Cfg, NewStartLabel, BB),
-      Cfg2 = hipe_icode_cfg:start_label_update(Cfg1, NewStartLabel),
-      {Cfg2, NewStartLabel, FalseLabel}
-  end.
+      Arg = get_icode_element(Instruction),
+      TypetestIns = hipe_icode:mk_type([Arg], Typetest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
+      hipe_bb:mk_bb([Instruction, TypetestIns])
+  end,
+  NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
+
+  Cfg1 = hipe_icode_cfg:bb_add(Cfg, NewStartLabel, BB),
+  %% This shouldn't be here
+  % Cfg2 = hipe_icode_cfg:start_label_update(Cfg1, NewStartLabel),
+  {Cfg1, NewStartLabel, FalseLabel}.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% This function traverses a typetest tree (for one value and its
+%% sub-values) in dfs order and returns a typetest list 
+%% which also contains the essential instructions in order to 
+%% extract the sub-values before applying the typetests  
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% TODO: 
+%% 1. Find better smaller names
+
+traverse_test_tree(_Node, _IcodeIns, 0) ->
+  [];
+traverse_test_tree({leaf, Typetest}, IcodeIns, _N) ->
+  [{Typetest, IcodeIns}];
+traverse_test_tree({node, Typetest, Children}, IcodeCall, N) ->
+  ChildrenExtraction = lists:zip(element_extract_primop(Typetest, length(Children)), Children),
+  IcodeElement = get_icode_element(IcodeCall),
+  ChildrenTestTrees = [traverse_test_tree(Child, element_extract_instruction(Ins, IcodeElement), N-1)
+                        || {Ins, Child} <- ChildrenExtraction],
+  [{Typetest, IcodeCall}| lists:flatten(ChildrenTestTrees)].
+
+%% TODO: Check if we also need fp_var or reg or other commands except from cariable
+element_extract_instruction(Primop, Argument) ->
+  DstVar = hipe_icode:mk_new_var(),
+  hipe_icode:mk_primop([DstVar], Primop, [Argument]).
+
+%% Returns a command to extract each child value from the father value
+element_extract_primop(tuple, LenChildren) ->
+  [#unsafe_element{index=Index} || Index <- lists:seq(1,LenChildren)];
+element_extract_primop({tuple, LenChildren}, LenChildren) ->
+  [#unsafe_element{index=Index} || Index <- lists:seq(1,LenChildren)].
+
+%% TODO: Maybe the icode element is not always a call or a var (reg, fvar???)
+get_icode_element(Ins = #icode_call{}) ->
+  [Dst] = hipe_icode:call_dstlist(Ins),
+  Dst;
+get_icode_element(Ins = #icode_move{}) ->
+  hipe_icode:move_dst(Ins);
+get_icode_element(Var = #icode_variable{}) ->
+  Var.
+
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
