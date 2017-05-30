@@ -205,7 +205,8 @@
 	 t_var/1,
 	 t_var_name/1,
 	 %% t_assign_variables_to_subtype/2,
-         type_test_from_erl_type/1,
+   t_test_from_erl_type/1,
+   t_test_tree_from_erl_type/1,
 	 type_is_defined/4,
 	 record_field_diffs_to_string/2,
 	 subst_all_vars_to_any/1,
@@ -2361,50 +2362,50 @@ t_from_term_shallow(T, N) when is_tuple(T) ->
 %%-----------------------------------------------------------------------------
 
 %% TODO: Fix the any type by importing the hipe_icode.hrl
--spec type_test_from_erl_type(erl_type()) -> any().
-type_test_from_erl_type(?atom([Atom])) ->
+-spec t_test_from_erl_type(erl_type()) -> any().
+t_test_from_erl_type(?atom([Atom])) ->
   {'atom', Atom};
-type_test_from_erl_type(?atom([true,false])) ->
+t_test_from_erl_type(?atom([true,false])) ->
   boolean;
-type_test_from_erl_type(?atom(_)) ->
+t_test_from_erl_type(?atom(_)) ->
   atom;
 % Dont know how should i do this
-% type_test_from_erl_type() ->
+% t_test_from_erl_type() ->
 %   bignum;
-% type_test_from_erl_type(?bitstr(_, _)) ->
+% t_test_from_erl_type(?bitstr(_, _)) ->
 %   binary;
-type_test_from_erl_type(?bitstr(_, _)) ->
+t_test_from_erl_type(?bitstr(_, _)) ->
   bitstr;
 %% Is this correct?
-type_test_from_erl_type(?nonempty_list(_, _)) ->
+t_test_from_erl_type(?nonempty_list(_, _)) ->
   cons;
 % I dont know what this is
-% type_test_from_erl_type(?atom(_)) ->
+% t_test_from_erl_type(?atom(_)) ->
 %   fixnum;
-type_test_from_erl_type(?float) ->
+t_test_from_erl_type(?float) ->
   float;
-type_test_from_erl_type(?function(_, _)) ->
+t_test_from_erl_type(?function(_, _)) ->
   function;
 % I dont know what this is
-% type_test_from_erl_type(?function(_, _)) ->
+% t_test_from_erl_type(?function(_, _)) ->
 %   function2;
-type_test_from_erl_type(?int_set([Integer])) ->
+t_test_from_erl_type(?int_set([Integer])) ->
   {'integer', Integer};
-type_test_from_erl_type(?integer(_)) ->
+t_test_from_erl_type(?integer(_)) ->
   integer;
 % TODO: Check if this is possible to make correct 
-% type_test_from_erl_type(?list(_Type, _, _)) ->
+% t_test_from_erl_type(?list(_Type, _, _)) ->
 %   cons;
-type_test_from_erl_type(?list(_, _, _)) ->
+t_test_from_erl_type(?list(_, _, _)) ->
   list;
-type_test_from_erl_type(?map(_, _, _)) ->
+t_test_from_erl_type(?map(_, _, _)) ->
   map;
-type_test_from_erl_type(?nil) ->
+t_test_from_erl_type(?nil) ->
   nil;
-type_test_from_erl_type(?number(_, _)) ->
+t_test_from_erl_type(?number(_, _)) ->
   number;
 %% TODO: Fix this atrocity
-type_test_from_erl_type(?identifier(_) = Id) ->
+t_test_from_erl_type(?identifier(_) = Id) ->
   case is_pid1(Id) of
     true -> pid;
     false ->
@@ -2417,16 +2418,21 @@ type_test_from_erl_type(?identifier(_) = Id) ->
           end
       end
   end;
-type_test_from_erl_type(?tuple(_, Arity, _)) ->
+t_test_from_erl_type(?tuple(_, Arity, _)) ->
   {'tuple', Arity};
-% type_test_from_erl_type(?atom(_)) ->
+% t_test_from_erl_type(?atom(_)) ->
 %   {'record', atom(), non_neg_integer()};
-type_test_from_erl_type(_) ->
+t_test_from_erl_type(_) ->
   any.
 
-% -define(product(Types),            #c{tag=?product_tag, elements=Types}).
-%                                       qualifier={Arity, Qual}}).
-
+-spec t_test_tree_from_erl_type(erl_type()) -> any().
+t_test_tree_from_erl_type(?tuple(Types, _, _) = ErlType) ->
+  { node
+  , t_test_from_erl_type(ErlType)
+  , [t_test_tree_from_erl_type(X) || X <- Types]
+  };
+t_test_tree_from_erl_type(Any) ->
+  {leaf, t_test_from_erl_type(Any)}.
 
 %%-----------------------------------------------------------------------------
 %% Integer types from a range.
