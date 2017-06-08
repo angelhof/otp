@@ -17,4 +17,6 @@
 %%%-------------------------------------------------------------------
 
 -define(TYPE_DEPTH, 3).
+
 -define(TYPE_TEST_PROB, 0.85).
+-define(TYPETEST_TREE_DEPTH, 100).
