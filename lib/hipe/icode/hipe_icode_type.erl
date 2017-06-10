@@ -245,10 +245,10 @@ typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg) ->
       {StdContLabel, _} = lists:keyfind(OptContLabel, 2, LabelMappings),
 
       %% Add the typetests in the typetest list
-      
+
       TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), ?TYPETEST_TREE_DEPTH),
       % TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), 0),
-      
+
       % io:format("With cont MFA: ~p~nTypetest List: ~p~n", [MFA, TypetestList]),
       {Cfg1, TypetestLabel, _} = lists:foldr(fun add_typetests_fun/2, {Cfg, OptContLabel, StdContLabel}, TypetestList),
 
@@ -275,7 +275,7 @@ typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg) ->
 
       TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), ?TYPETEST_TREE_DEPTH),
       % TypetestList = traverse_test_tree(TypetestTree, hipe_icode:mk_move(RetVal, RetVal), 0),
-      
+
       % io:format("Without cont MFA: ~p~nTypetest List: ~p~n", [MFA, TypetestList]),
       {Cfg1, TypetestLabel, _} = lists:foldr(fun add_typetests_fun/2, {Cfg, OptGotoLabel, StdGotoLabel}, TypetestList),
 
@@ -321,12 +321,12 @@ init(Xs) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% This function breaks the bbs after each function that 
+%% This function breaks the bbs after each function that
 %% doesn't have a continuation label
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-separate_calls_into_bbs(Cfg) -> 
+separate_calls_into_bbs(Cfg) ->
   %% Make cfg linear and get code
   Linear = hipe_icode_cfg:cfg_to_linear(Cfg),
   Code = hipe_icode:icode_code(Linear),
@@ -353,11 +353,11 @@ separate_calls_into_bbs_fun(Ins, Code) ->
   [Ins|Code].
 
 function_to_typetest_without_continuation(Ins) ->
-  not hipe_icode:is_branch(Ins) 
+  not hipe_icode:is_branch(Ins)
     andalso function_to_typetest(Ins).
 
 function_to_typetest_with_continuation(Ins) ->
-  hipe_icode:is_branch(Ins) 
+  hipe_icode:is_branch(Ins)
     andalso function_to_typetest(Ins).
 
 function_to_typetest(Ins = #icode_call{type=CallType})
@@ -366,13 +366,13 @@ function_to_typetest(Ins = #icode_call{type=CallType})
 function_to_typetest(_Ins) ->
   false.
 
-function_worth_typetesting(MFA) -> 
+function_worth_typetesting(MFA) ->
   case check_opt_return_info(MFA) of
-    none -> 
+    none ->
       false;
     RetType ->
       case erl_types:t_test_tree_from_erl_type(RetType) of
-        any -> 
+        any ->
           false; %% No typetest
         TypetestTree ->
           {true, TypetestTree}
@@ -380,7 +380,7 @@ function_worth_typetesting(MFA) ->
   end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% This function combines the optimistic and the original cfg  
+%% This function combines the optimistic and the original cfg
 %% using a series of typetests for the function's arguments
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -388,7 +388,7 @@ function_worth_typetesting(MFA) ->
 combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt) ->
   %% The optimistic arguments types, zipped with the arguments
   CfgParams = hipe_icode_cfg:params(CopiedCfg),
-  ArgTypes = 
+  ArgTypes =
     case check_opt_call_info(MFA) of
       none ->
         [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
@@ -401,12 +401,11 @@ combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt) ->
   ArgTypetestLists = [traverse_test_tree(Tree, Param, ?TYPETEST_TREE_DEPTH) || {Tree, Param} <- ArgTypetestTrees],
   % ArgTypetestLists = [traverse_test_tree(Tree, Param, 0) || {Tree, Param} <- ArgTypetestTrees],
   {UpdatedCfg, NewStartLabel, _} = lists:foldr(fun add_typetests_fun/2, {CopiedCfg, StartLblOpt, StartLbl}, lists:flatten(ArgTypetestLists)),
-  
   %% Check if any typetest has been really added
   case NewStartLabel of
     StartLblOpt ->
       %% WARNING: This is very important, in order to combine both cfgs in case no typetest has been added
-      InitialGoto = hipe_icode:mk_if('=:=', [hipe_icode:mk_const(true), hipe_icode:mk_const(true)], StartLblOpt, StartLbl),
+      InitialGoto = fake_goto(StartLblOpt, StartLbl),
       NewStartingBB = hipe_bb:mk_bb([InitialGoto]),
       NewStartingLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
       SimpleUpdatedCfg = hipe_icode_cfg:bb_add(CopiedCfg, NewStartingLabel, NewStartingBB),
@@ -420,7 +419,7 @@ combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt) ->
 add_typetests_fun({Typetest, Instruction}, {Cfg, TrueLabel, FalseLabel}) ->
   BB = case Typetest of
     any ->
-      FakeGoto = hipe_icode:mk_if('=:=', [hipe_icode:mk_const(true), hipe_icode:mk_const(true)], TrueLabel, FalseLabel),
+      FakeGoto = fake_goto(TrueLabel, FalseLabel),
       hipe_bb:mk_bb([Instruction, FakeGoto]);
     _ ->
       Arg = get_icode_element(Instruction),
@@ -434,18 +433,19 @@ add_typetests_fun({Typetest, Instruction}, {Cfg, TrueLabel, FalseLabel}) ->
   % Cfg2 = hipe_icode_cfg:start_label_update(Cfg1, NewStartLabel),
   {Cfg1, NewStartLabel, FalseLabel}.
 
-
+fake_goto(TrueLabel, FalseLabel) ->
+  hipe_icode:mk_type([hipe_icode:mk_const(true)], atom, TrueLabel, FalseLabel).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% This function traverses a typetest tree (for one value and its
-%% sub-values) in dfs order and returns a typetest list 
-%% which also contains the essential instructions in order to 
-%% extract the sub-values before applying the typetests  
+%% sub-values) in dfs order and returns a typetest list
+%% which also contains the essential instructions in order to
+%% extract the sub-values before applying the typetests
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%% TODO: 
+%% TODO:
 %% 1. Find better smaller names
 
 traverse_test_tree(_Node, _IcodeIns, 0) ->
@@ -508,7 +508,7 @@ copy_bbs([OldLbl|Rest], LabelMappings, Cfg) ->
   % NewBB = hipe_bb:code_update(BB, NewCode),
   NewBB = hipe_bb:mk_bb(NewCode),
   {_, NewLbl} = lists:keyfind(OldLbl, 1, LabelMappings),
-  NewCfg = hipe_icode_cfg:bb_add(Cfg, NewLbl, NewBB),  
+  NewCfg = hipe_icode_cfg:bb_add(Cfg, NewLbl, NewBB),
   copy_bbs(Rest, LabelMappings, NewCfg);
 copy_bbs([], _LabelMappings, Cfg) ->
   Cfg.
@@ -522,7 +522,7 @@ copy_insn(I, LabelMappings) ->
   Succs = hipe_icode:successors(I),
   RedirectedJmpsI = redirect_jmps(Succs, LabelMappings, I),
   case hipe_icode:is_phi(I) of
-    false -> 
+    false ->
       RedirectedJmpsI;
     true ->
       Labels = [ Lbl || {Lbl, _} <- hipe_icode:phi_arglist(I)],
@@ -558,33 +558,33 @@ do_analysis(Cfg, MFA) ->
 do_rewrite(Cfg, MFA,ArgsFun,CallFun,FinalFun) ->
   State = safe_analyse(Cfg, {MFA,ArgsFun,CallFun,FinalFun}),
   common_rewrite(State).
- 
+
 ordinary_cfg(Cfg, MFA) ->
   Data = make_data(Cfg,MFA),
   State = safe_analyse(Cfg, Data),
   common_rewrite(State).
-  
+
 common_rewrite(State) ->
-  NewState = simplify_controlflow(State),  
+  NewState = simplify_controlflow(State),
   NewCfg = state__cfg(annotate_cfg(NewState)),
   SpecializedCfg = specialize(NewCfg),
   hipe_icode_cfg:remove_unreachable_code(SpecializedCfg).
 
 
 make_data(Cfg, {_M,_F,A}=MFA) ->
-  NoArgs = 
+  NoArgs =
     case hipe_icode_cfg:is_closure(Cfg) of
       true -> hipe_icode_cfg:closure_arity(Cfg);
       false -> A
     end,
-  Args = lists:duplicate(NoArgs, t_any()), 
+  Args = lists:duplicate(NoArgs, t_any()),
   ArgsFun = fun(_,_) -> Args end,
   CallFun = fun(_,_) -> t_any() end,
   FinalFun = fun(_,_) -> ok end,
   {MFA,ArgsFun,CallFun,FinalFun}.
 
 %%debug_make_data(Cfg, {_M,_F,A}=MFA) ->
-%%  NoArgs = 
+%%  NoArgs =
 %%    case hipe_icode_cfg:is_closure(Cfg) of
 %%      true -> hipe_icode_cfg:closure_arity(Cfg);
 %%      false -> A
@@ -619,7 +619,7 @@ analyse(Cfg, Data) ->
 
 safe_analyse(Cfg, {MFA,_,_,_}=Data) ->
   State = new_state(Cfg, Data),
-  try 
+  try
     NewState = analyse_blocks(State,MFA),
     (state__resultaction(NewState))(MFA,state__ret_type(NewState)),
     NewState
@@ -648,7 +648,7 @@ analyse_blocks(Work, State, MFA) ->
       NewWork2 = add_work(NewWork, NewLabels),
       analyse_blocks(NewWork2, NewState, MFA)
   end.
-  
+
 analyse_block(Label, InfoIn, State) ->
   BB = state__bb(State, Label),
   Code = hipe_bb:butlast(BB),
