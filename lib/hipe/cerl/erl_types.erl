@@ -2372,10 +2372,11 @@ t_test_from_erl_type(?atom(_)) ->
 % Dont know how should i do this
 % t_test_from_erl_type() ->
 %   bignum;
-% t_test_from_erl_type(?bitstr(_, _)) ->
-%   binary;
-t_test_from_erl_type(?bitstr(_, _)) ->
-  bitstr;
+t_test_from_erl_type(?bitstr(_, _) = BitStr) ->
+  case t_is_binary(BitStr) of
+    true -> binary;
+    false -> bitstr
+  end;
 %% Is this correct?
 t_test_from_erl_type(?nonempty_list(_, _)) ->
   cons;
