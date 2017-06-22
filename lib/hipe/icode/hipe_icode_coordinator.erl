@@ -227,9 +227,6 @@ final_funs(Pid,Mod) ->
 info_server(Mod) ->
   info_server_loop(gb_trees:empty(), gb_trees:empty(), Mod).
 
-%% Info server now keeps both the standard type info for all functions
-%% but also the dynamic(optimistic) type info 
-%% which corresponds to specs and types traced through runtime 
 info_server_loop(CallInfo, ReturnInfo, Mod) ->
   receive
     {update_return, MFA, NewInfo, Pid, Ref} ->
@@ -246,23 +243,7 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
           {value, TypesComp} ->
             Mod:return__info((TypesComp))
         end,
-      % Added for the runtime type info
-      Ans1 = Ans,
-        % TODO: Remove completely if you find that there is no need for it
-        % case Mod of
-        %   hipe_icode_type -> 
-        %     case Mod:check_opt_return_info(MFA)  of
-        %       none -> Ans;
-        %       RtAns -> 
-        %         % {_, Res} = Mod:update__info([RtAns], Ans),
-        %         Res = Mod:combine_strict_with_optimistic(Ans, [RtAns]),
-        %         % io:format("Return: ~p -> Runtype: ~p, Stattype:~p~n", [MFA, Res, Ans]),
-        %         Res
-        %     end;
-        %   _ ->
-        %     Ans
-        % end,
-      Pid ! {Ref, Ans1},
+      Pid ! {Ref, Ans},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {get_call, MFA, Cfg, Pid, Ref} ->
       Ans = 
@@ -274,25 +255,7 @@ info_server_loop(CallInfo, ReturnInfo, Mod) ->
           {value, TypesComp} ->
             Mod:return__info(TypesComp)
         end,
-      % Added for the runtime type info
-      Ans1 = Ans,
-        % TODO: Remove completely if you find that there is no need for it
-        % case Mod of
-        %   hipe_icode_type -> 
-        %     case Mod:check_opt_call_info(MFA) of
-        %       none -> 
-        %         % io:format("Call: ~p -> ~n\tStattype:~p~n", [MFA, Ans]),
-        %         Ans;
-        %       RtAns -> 
-        %         % {_, Res} = Mod:update__info(RtAns, Ans),
-        %         Res = Mod:combine_strict_with_optimistic(Ans, RtAns),
-        %         % io:format("Call: ~p -> ~n\tRuntype: ~p, ~n\tStattype:~p~n", [MFA, RtAns, Ans]),
-        %         Res
-        %     end;
-        %   _ ->
-        %     Ans
-        % end,
-      Pid ! {Ref, Ans1},
+      Pid ! {Ref, Ans},
       info_server_loop(CallInfo, ReturnInfo, Mod);
     {set_escaping, MFA} ->
       NewCallInfo = gb_trees:enter(MFA, escaping, CallInfo),
