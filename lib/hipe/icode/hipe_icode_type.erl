@@ -151,10 +151,7 @@ concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
 %%-------------------------------------------------------------------
 
 add_optimistic_typetests_ssa(SSACfg, MFA) ->
-  % Cfg = hipe_icode_ssa:unconvert(SSACfg),
-  FinalNonSSA = add_optimistic_typetests(SSACfg, MFA),
-  Final = hipe_icode_ssa:convert(FinalNonSSA),
-  % io:format("Final: ~p~n", [Final]),
+  Final = add_optimistic_typetests(SSACfg, MFA),
   Final.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -175,12 +172,15 @@ add_optimistic_typetests(SSACfg, MFA) ->
   {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
 
   CopiedCfgSSA = add_move_to_copied(CopiedCfg, VarMap, StartLblOpt),
+  % io:format("Cfg: ~p~nCopy: ~p~n", [Cfg1, CopiedCfgSSA]),
 
   %% Combine the two Cfgs with argument typetests
   CombinedCfgSSA = combine_copied_cfg(MFA, CopiedCfgSSA, StartLbl, StartLblOpt),
 
+  % io:format("Cfg: ~p~nCopy: ~p~nCombin: ~p~n", [Cfg1, CopiedCfgSSA, CombinedCfgSSA]),
+
   %% TODO: There is a problem and this returns many warnings
-  % ok = hipe_icode_ssa:check(CombinedCfgSSA),
+  ok = hipe_icode_ssa:check(CombinedCfgSSA),
 
   %% Unconvert SSA CFG
   CombinedCfg = hipe_icode_ssa:unconvert(CombinedCfgSSA),
@@ -189,9 +189,11 @@ add_optimistic_typetests(SSACfg, MFA) ->
 
   %% Create a typetest after the return of each non-branch function call
   FinalCfg = add_typetests(CombinedCfg, LabelMappings),
-
   % io:format("Final: ~p~n", [FinalCfg]),
-  FinalCfg.
+
+  Final = hipe_icode_ssa:convert(FinalCfg),
+  % io:format("Final: ~p~n", [Final]),
+  Final.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -454,18 +456,28 @@ add_typetests_fun({Typetest, Instruction}, {Cfg, TrueLabel, FalseLabel}) ->
   BB = case Typetest of
     any ->
       FakeGoto = fake_goto(TrueLabel, FalseLabel),
-      hipe_bb:mk_bb([Instruction, FakeGoto]);
+      Code = [Ins || Ins <- [Instruction, FakeGoto], not is_useless_move(Ins)],
+      hipe_bb:mk_bb(Code);
     _ ->
       Arg = get_icode_element(Instruction),
       TypetestIns = hipe_icode:mk_type([Arg], Typetest, TrueLabel, FalseLabel, ?TYPE_TEST_PROB),
-      hipe_bb:mk_bb([Instruction, TypetestIns])
+      Code = [Ins || Ins <- [Instruction, TypetestIns], not is_useless_move(Ins)],
+      hipe_bb:mk_bb(Code)
   end,
   NewStartLabel = hipe_icode:label_name(hipe_icode:mk_new_label()),
-
   Cfg1 = hipe_icode_cfg:bb_add(Cfg, NewStartLabel, BB),
   %% This shouldn't be here
   % Cfg2 = hipe_icode_cfg:start_label_update(Cfg1, NewStartLabel),
   {Cfg1, NewStartLabel, FalseLabel}.
+
+is_useless_move(Ins = #icode_move{}) ->
+  Dst = hipe_icode:move_dst(Ins),
+  case hipe_icode:move_src(Ins) of
+    Dst -> true;
+    _ -> false
+  end;
+is_useless_move(_) ->
+  false.
 
 fake_goto(TrueLabel, FalseLabel) ->
   hipe_icode:mk_type([hipe_icode:mk_const(true)], atom, TrueLabel, FalseLabel).
