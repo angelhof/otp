@@ -162,24 +162,30 @@ add_optimistic_typetests_ssa(SSACfg, MFA) ->
 add_optimistic_typetests(SSACfg, MFA) ->
 
   %% Split every bb after every function call
-  Cfg = separate_calls(SSACfg),
+  Cfg1 = separate_calls(SSACfg),
   % io:format(standard_error, "~p: Calls separated!~nCfg: ~p~n", [MFA, Cfg]),
 
-  ok = hipe_icode_ssa:check(Cfg),
+  ok = hipe_icode_ssa:check(Cfg1),
 
-  %% Unconvert SSA CFG
-  Cfg1 = hipe_icode_ssa:unconvert(Cfg),
-  % io:format(standard_error, "~p: SSA Unconverted!~n", [MFA]),
+  %% Create a copy of the cfg bbs
+  {CopiedCfg, LabelMappings, VarMap} = copy_cfg(Cfg1),
 
-  % %% Create a copy of the cfg bbs
-  {CopiedCfg, LabelMappings} = copy_cfg(Cfg1),
-
-  % %% Find the starting label of the original and copied bbs
+  %% Find the starting label of the original and copied bbs
   StartLbl = hipe_icode_cfg:start_label(Cfg1),
   {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
 
-  %% Create a goto the starting label of the optimistic CFG as the new starting
-  CombinedCfg = combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt),
+  CopiedCfgSSA = add_move_to_copied(CopiedCfg, VarMap, StartLblOpt),
+
+  %% Combine the two Cfgs with argument typetests
+  CombinedCfgSSA = combine_copied_cfg(MFA, CopiedCfgSSA, StartLbl, StartLblOpt),
+
+  %% TODO: There is a problem and this returns many warnings
+  % ok = hipe_icode_ssa:check(CombinedCfgSSA),
+
+  %% Unconvert SSA CFG
+  CombinedCfg = hipe_icode_ssa:unconvert(CombinedCfgSSA),
+  % io:format("Cfg: ~p~nCopy: ~p~n", [Cfg1, CombinedCfg]),
+  % io:format(standard_error, "~p: SSA Unconverted!~n", [MFA]),
 
   %% Create a typetest after the return of each non-branch function call
   FinalCfg = add_typetests(CombinedCfg, LabelMappings),
@@ -195,7 +201,10 @@ add_optimistic_typetests(SSACfg, MFA) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 add_typetests(CombinedCfg, LabelMappings) ->
-  OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
+  Labels = hipe_icode_cfg:labels(CombinedCfg),
+  OptimisticLabels = [Lbl || Lbl <- Labels,
+      false =/= lists:keyfind(Lbl, 2, LabelMappings)],
+  % OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
   FinalCfg = lists:foldr(
     fun(Lbl, Cfg) ->
       add_typetest_fun_return(Lbl, Cfg, LabelMappings)
@@ -461,6 +470,17 @@ add_typetests_fun({Typetest, Instruction}, {Cfg, TrueLabel, FalseLabel}) ->
 fake_goto(TrueLabel, FalseLabel) ->
   hipe_icode:mk_type([hipe_icode:mk_const(true)], atom, TrueLabel, FalseLabel).
 
+
+add_move_to_copied(Cfg, VarMap, StartLblOpt) ->
+  Moves = [hipe_icode:mk_move(maps:get(V, VarMap), V) ||
+            V <- hipe_icode_cfg:params(Cfg)],
+  BB = hipe_icode_cfg:bb(Cfg, StartLblOpt),
+  Code = hipe_bb:code(BB),
+  NewCode = Moves ++ Code,
+  NewBB = hipe_bb:mk_bb(NewCode),
+  NewCfg = hipe_icode_cfg:bb_add(Cfg, StartLblOpt, NewBB),
+  NewCfg.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% This function traverses a typetest tree (for one value and its
@@ -524,7 +544,42 @@ copy_cfg(Cfg) ->
     end, [], Labels),
 
   %% Create a copy of all the bbs based on the label mappings
-  {copy_bbs(Labels, LabelMappings, Cfg), LabelMappings}.
+  CopiedCfg = copy_bbs(Labels, LabelMappings, Cfg),
+
+  NewLabels = [NewLbl || {_, NewLbl} <- LabelMappings],
+  VarMapList = [{Var, hipe_icode:mk_new_var()} || Var <- hipe_icode_cfg:params(CopiedCfg)],
+  VarMap0 = maps:from_list(VarMapList),
+  {FinalCfg, VarMap} = lists:foldl(fun rename_variables/2, {CopiedCfg, VarMap0}, NewLabels),
+  {FinalCfg, LabelMappings, VarMap}.
+
+-spec rename_variables(icode_lbl(), Acc) -> Acc
+          when Acc :: {cfg(), #{icode_var() => icode_var()}}.
+rename_variables(Label, {Cfg, VarMap}) ->
+  BB = hipe_icode_cfg:bb(Cfg, Label),
+  Code = hipe_bb:code(BB),
+
+  {NewCode, NewVarMap} = lists:foldr(fun rename_variables_fun/2, {[], VarMap}, Code),
+
+  NewBB = hipe_bb:mk_bb(NewCode),
+  % io:format("BB: ~p~nNew BB: ~p~n", [BB, NewBB]),
+  NewCfg = hipe_icode_cfg:bb_add(Cfg, Label, NewBB),
+  {NewCfg, NewVarMap}.
+
+rename_variables_fun(Ins, {Code, VarMap}) ->
+  Vars = hipe_icode:uses(Ins) ++ hipe_icode:defines(Ins),
+  {Subst, NewVarMap} = lists:foldl(fun create_substitutions/2, {[], VarMap}, Vars),
+  RenamedIns = hipe_icode:subst(Subst, Ins),
+  {[RenamedIns|Code], NewVarMap}.
+
+create_substitutions(Var, {Subst, VarMap}) ->
+  case maps:get(Var, VarMap, none) of
+    none ->
+      NewVar = hipe_icode:mk_new_var(),
+      {[{Var, NewVar}|Subst], VarMap#{Var => NewVar}};
+    NewVar ->
+      {[{Var, NewVar}|Subst], VarMap}
+  end.
+
 
 copy_bbs([OldLbl|Rest], LabelMappings, Cfg) ->
   BB = hipe_icode_cfg:bb(Cfg, OldLbl),
