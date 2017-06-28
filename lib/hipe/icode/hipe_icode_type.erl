@@ -151,17 +151,25 @@ concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
 %%-------------------------------------------------------------------
 
 add_optimistic_typetests_ssa(SSACfg, MFA) ->
-  Cfg = hipe_icode_ssa:unconvert(SSACfg),
-  FinalNonSSA = add_optimistic_typetests(Cfg, MFA),
+  % Cfg = hipe_icode_ssa:unconvert(SSACfg),
+  FinalNonSSA = add_optimistic_typetests(SSACfg, MFA),
   Final = hipe_icode_ssa:convert(FinalNonSSA),
   % io:format("Final: ~p~n", [Final]),
   Final.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-add_optimistic_typetests(Cfg, MFA) ->
-  %% Split every bb after every function call 
-  Cfg1 = separate_calls_into_bbs(Cfg),
+add_optimistic_typetests(SSACfg, MFA) ->
+
+  %% Split every bb after every function call
+  Cfg = separate_calls(SSACfg),
+  % io:format(standard_error, "~p: Calls separated!~nCfg: ~p~n", [MFA, Cfg]),
+
+  ok = hipe_icode_ssa:check(Cfg),
+
+  %% Unconvert SSA CFG
+  Cfg1 = hipe_icode_ssa:unconvert(Cfg),
+  % io:format(standard_error, "~p: SSA Unconverted!~n", [MFA]),
 
   % %% Create a copy of the cfg bbs
   {CopiedCfg, LabelMappings} = copy_cfg(Cfg1),
@@ -326,31 +334,48 @@ init(Xs) ->
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-separate_calls_into_bbs(Cfg) ->
+separate_calls(Cfg) ->
   %% Make cfg linear and get code
   Linear = hipe_icode_cfg:cfg_to_linear(Cfg),
   Code = hipe_icode:icode_code(Linear),
 
-  NewCodeRev = lists:foldl(fun separate_calls_into_bbs_fun/2, [], Code),
+  %% Put a new label after each call (that has no continuation) and
+  %% keep a mapping from the old labels to the new ones in order to redirect phis
+  {NewCodeRev, OldToNew} = separate_calls1(Code),
   NewCode = lists:reverse(NewCodeRev),
   % io:format("New code: ~p~n", [NewCode]),
 
+  %% Redirect Phi instructions based on the oldToNew label mapping
+  FinalCode = [redirect_phis(Ins, OldToNew) || Ins <- NewCode],
+
   %% Update the Cfg
-  NewLinear = hipe_icode:icode_code_update(Linear, NewCode),
+  NewLinear = hipe_icode:icode_code_update(Linear, FinalCode),
   hipe_icode_cfg:linear_to_cfg(NewLinear).
 
-separate_calls_into_bbs_fun(Ins = #icode_call{}, Code) ->
+separate_calls1(Code) ->
+  {NewCodeRev, OldToNew, LastLabel, LabelBuffer} =
+    lists:foldl(fun separate_calls_fun/2, {[], [], none, []}, Code),
+  NewOldToNew = [{Lbl,LastLabel} || Lbl <- LabelBuffer],
+  {NewCodeRev, NewOldToNew ++ OldToNew}.
+
+-spec separate_calls_fun(icode_instr(), Acc) -> Acc
+          when Acc :: {icode_instrs(), [{icode_lbl(),icode_lbl()}], icode_lbl() | 'none', [icode_lbl()]}.
+separate_calls_fun(Ins = #icode_call{}, {Code, OldToNew, CurrLabel, LabelBuffer}) ->
   case function_to_typetest_without_continuation(Ins) of
     true ->
       LabelIns = hipe_icode:mk_new_label(),
       NewLabel = hipe_icode:label_name(LabelIns),
       GotoIns = hipe_icode:mk_goto(NewLabel),
-      [LabelIns, GotoIns, Ins|Code];
+      {[LabelIns, GotoIns, Ins|Code], OldToNew, NewLabel, [CurrLabel|LabelBuffer]};
     false ->
-      [Ins|Code]
+      {[Ins|Code], OldToNew, CurrLabel, LabelBuffer}
   end;
-separate_calls_into_bbs_fun(Ins, Code) ->
-  [Ins|Code].
+separate_calls_fun(Ins = #icode_label{}, {Code, OldToNew, CurrLabel, LabelBuffer}) ->
+  NewCurrLabel = hipe_icode:label_name(Ins),
+  NewOldToNew = [{Lbl,CurrLabel} || Lbl <- LabelBuffer],
+  {[Ins|Code], NewOldToNew ++ OldToNew, NewCurrLabel, []};
+separate_calls_fun(Ins, {Code, OldToNew, CurrLabel, LabelBuffer}) ->
+  {[Ins|Code], OldToNew, CurrLabel, LabelBuffer}.
 
 function_to_typetest_without_continuation(Ins) ->
   not hipe_icode:is_branch(Ins)
@@ -520,29 +545,33 @@ make_copies(Is, LabelMappings) ->
 
 copy_insn(I, LabelMappings) ->
   Succs = hipe_icode:successors(I),
-  RedirectedJmpsI = redirect_jmps(Succs, LabelMappings, I),
-  case hipe_icode:is_phi(I) of
+  RedirectedJmpsI = redirect_jmp(Succs, LabelMappings, I),
+  redirect_phis(RedirectedJmpsI, LabelMappings).
+
+redirect_phi([], _LabelMappings, I) ->
+  I;
+redirect_phi([Lbl|Rest], LabelMappings, I) ->
+  case lists:keyfind(Lbl, 1, LabelMappings) of
     false ->
-      RedirectedJmpsI;
-    true ->
-      Labels = [ Lbl || {Lbl, _} <- hipe_icode:phi_arglist(I)],
-      redirect_phis(Labels, LabelMappings, I)
+      redirect_phi(Rest, LabelMappings, I);
+    {_, NewLbl} ->
+      NewI = hipe_icode:phi_redirect_pred(I, Lbl, NewLbl),
+      redirect_phi(Rest, LabelMappings, NewI)
   end.
 
-redirect_phis([], _LabelMappings, I) ->
-  I;
-redirect_phis([Lbl|Rest], LabelMappings, I) ->
-  {_, NewLbl} = lists:keyfind(Lbl, 1, LabelMappings),
-  NewI = hipe_icode:phi_redirect_pred(I, Lbl, NewLbl),
-  redirect_phis(Rest, LabelMappings, NewI).
 
-
-redirect_jmps([], _LabelMappings, I) ->
+redirect_jmp([], _LabelMappings, I) ->
   I;
-redirect_jmps([Jmp|Rest], LabelMappings, I) ->
+redirect_jmp([Jmp|Rest], LabelMappings, I) ->
   {_, NewLbl} = lists:keyfind(Jmp, 1, LabelMappings),
   NewI = hipe_icode:redirect_jmp(I, Jmp, NewLbl),
-  redirect_jmps(Rest, LabelMappings, NewI).
+  redirect_jmp(Rest, LabelMappings, NewI).
+
+redirect_phis(Ins = #icode_phi{}, LabelMappings) ->
+  PhiLabels = [Lbl || {Lbl, _Var} <- hipe_icode:phi_arglist(Ins)],
+  redirect_phi(PhiLabels, LabelMappings, Ins);
+redirect_phis(Ins, _) ->
+  Ins.
 
 %% END: Create a copy of the cfg ======================================
 
