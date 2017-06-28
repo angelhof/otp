@@ -54,6 +54,26 @@
 -export([test/0]).
 -endif.
 
+% -define(WITH_DYN_SERVER, true).
+-define(WITH_DYN_SERVER, false).
+
+% -define(timing, true).
+
+-ifdef(timing).
+-define(TIME_START(Flag),
+  put(Flag, erlang:monotonic_time())).
+-else.
+-define(TIME_START(_Flag), true).
+-endif.
+
+-ifdef(timing).
+-define(TIME_STOP(Flag, Text),
+  io:format(standard_error, "  Duration: ~pms, ~s~n", [round((erlang:monotonic_time()-get(Flag))/1000000), Text])).
+-else.
+-define(TIME_STOP(_Flag, _Text), true).
+-endif.
+
+
 -define(MFA_debug, fun(_, _, _) -> ok end).
 
 %-define(debug, fun(X, Y) -> io:format("~s ~p~n", [X, Y]) end).
@@ -114,10 +134,11 @@ cfg(Cfg, MFA, Options, Servers) ->
   case proplists:get_bool(concurrent_comp, Options) of
     true ->
       case proplists:get_value(optimistic_types, Options) of
-        undefined -> 
+        undefined ->
           concurrent_cfg(Cfg, MFA, Servers#comp_servers.type);
-        _ ->
-          concurrent_cfg_with_optimistic(Cfg, MFA, Servers#comp_servers.type)
+        Types ->
+          % io:format(standard_error, "Types: ~p~n", [Types]),
+          concurrent_cfg_with_optimistic(Cfg, MFA, Servers#comp_servers.type, Types)
       end;
     false ->
       ordinary_cfg(Cfg, MFA)
@@ -131,8 +152,8 @@ concurrent_cfg(Cfg, MFA, CompServer) ->
   CompServer ! {done_rewrite, MFA},
   Ans.
 
-concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
-  CfgWithTypeTests = add_optimistic_typetests_ssa(Cfg, MFA),
+concurrent_cfg_with_optimistic(Cfg, MFA, CompServer, Types) ->
+  CfgWithTypeTests = add_optimistic_typetests_ssa(Cfg, MFA, Types),
   CompServer ! {ready, {MFA, self()}},
   {ArgsFun, CallFun, FinalFun} = do_analysis(CfgWithTypeTests, MFA),
   Ans = do_rewrite(CfgWithTypeTests, MFA, ArgsFun, CallFun, FinalFun),
@@ -150,16 +171,22 @@ concurrent_cfg_with_optimistic(Cfg, MFA, CompServer) ->
 %%   
 %%-------------------------------------------------------------------
 
-add_optimistic_typetests_ssa(SSACfg, MFA) ->
+add_optimistic_typetests_ssa(SSACfg, MFA, Types) ->
+  ?TIME_START(unconvert),
   Cfg = hipe_icode_ssa:unconvert(SSACfg),
-  FinalNonSSA = add_optimistic_typetests(Cfg, MFA),
+  ?TIME_STOP(unconvert, " of unconverting the icode from ssa"),
+
+  FinalNonSSA = add_optimistic_typetests(Cfg, MFA, Types),
+
+  ?TIME_START(convert),
   Final = hipe_icode_ssa:convert(FinalNonSSA),
+  ?TIME_STOP(convert, " of converting the icode from ssa"),
   % io:format("Final: ~p~n", [Final]),
   Final.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-add_optimistic_typetests(Cfg, MFA) ->
+add_optimistic_typetests(Cfg, MFA, TypesMap) ->
   %% Split every bb after every function call 
   Cfg1 = separate_calls_into_bbs(Cfg),
 
@@ -170,11 +197,11 @@ add_optimistic_typetests(Cfg, MFA) ->
   StartLbl = hipe_icode_cfg:start_label(Cfg1),
   {_, StartLblOpt} = lists:keyfind(StartLbl, 1, LabelMappings),
 
-  %% Create a goto the starting label of the optimistic CFG as the new starting
-  CombinedCfg = combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt),
+  %% Create typetests for each argument to combine the cfgs
+  CombinedCfg = combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt, TypesMap),
 
   %% Create a typetest after the return of each non-branch function call
-  FinalCfg = add_typetests(CombinedCfg, LabelMappings),
+  FinalCfg = add_typetests(CombinedCfg, LabelMappings, TypesMap),
 
   % io:format("Final: ~p~n", [FinalCfg]),
   FinalCfg.
@@ -186,18 +213,18 @@ add_optimistic_typetests(Cfg, MFA) ->
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-add_typetests(CombinedCfg, LabelMappings) ->
+add_typetests(CombinedCfg, LabelMappings, TypesMap) ->
   OptimisticLabels = [Opt || {_, Opt} <- LabelMappings],
   FinalCfg = lists:foldr(
     fun(Lbl, Cfg) ->
-      add_typetest_fun_return(Lbl, Cfg, LabelMappings)
+      add_typetest_fun_return(Lbl, Cfg, LabelMappings, TypesMap)
     end, CombinedCfg, OptimisticLabels),
   FinalCfg.
 
 
 %% WARNING: This function is implemented in a very bad way, performance wise while also clarity wise
 %% TODO: Prettify and optimize
-add_typetest_fun_return(OptLabel, Cfg, LabelMappings) ->
+add_typetest_fun_return(OptLabel, Cfg, LabelMappings, TypesMap) ->
   BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
   case final_call(Code) of
@@ -206,13 +233,13 @@ add_typetest_fun_return(OptLabel, Cfg, LabelMappings) ->
     {Call, continuation} ->
       case function_to_typetest_with_continuation(Call) of
         true ->
-          typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg);
+          typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg, TypesMap);
         false -> Cfg
       end;
     {Call, no_continuation} ->
       case function_to_typetest_without_continuation(Call) of
         true ->
-          typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg);
+          typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg, TypesMap);
         false -> Cfg
       end
   end.
@@ -231,7 +258,7 @@ final_call(Code) ->
   end.
 
 %% TODO: Prettify this mess of a function
-typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg) ->
+typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg, TypesMap) ->
   BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
   [Ins = #icode_call{}] = last(Code),
@@ -239,7 +266,7 @@ typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg) ->
   true = function_to_typetest_with_continuation(Ins),
   MFA = hipe_icode:call_fun(Ins),
   [RetVal] = hipe_icode:call_dstlist(Ins),
-  case function_worth_typetesting(MFA) of
+  case function_worth_typetesting(MFA, TypesMap) of
     {true, TypetestTree} ->
       OptContLabel = hipe_icode:call_continuation(Ins),
       {StdContLabel, _} = lists:keyfind(OptContLabel, 2, LabelMappings),
@@ -259,14 +286,14 @@ typetest_fun_with_continuation(OptLabel, LabelMappings, Cfg) ->
     false -> Cfg
   end.
 
-typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg) ->
+typetest_fun_without_continuation(OptLabel, LabelMappings, Cfg, TypesMap) ->
   BB = hipe_icode_cfg:bb(Cfg, OptLabel),
   Code = hipe_bb:code(BB),
   [Ins1 = #icode_call{}, Ins2 = #icode_goto{}] = last_2(Code),
   true = function_to_typetest_without_continuation(Ins1),
   MFA = hipe_icode:call_fun(Ins1),
   [RetVal] = hipe_icode:call_dstlist(Ins1),
-  case function_worth_typetesting(MFA) of
+  case function_worth_typetesting(MFA, TypesMap) of
     {true, TypetestTree} ->
       OptGotoLabel = hipe_icode:goto_label(Ins2),
       {StdGotoLabel, _} = lists:keyfind(OptGotoLabel, 2, LabelMappings),
@@ -366,18 +393,36 @@ function_to_typetest(Ins = #icode_call{type=CallType})
 function_to_typetest(_Ins) ->
   false.
 
-function_worth_typetesting(MFA) ->
-  case check_opt_return_info(MFA) of
-    none ->
-      false;
-    RetType ->
-      case erl_types:t_test_tree_from_erl_type(RetType) of
-        any ->
-          false; %% No typetest
-        TypetestTree ->
-          {true, TypetestTree}
+function_worth_typetesting(MFA, TypesMap) ->
+  case ?WITH_DYN_SERVER of
+    true ->
+      %% Old one based on type server
+      case check_opt_return_info(MFA) of
+        none ->
+          false;
+        RetType ->
+          case erl_types:t_test_tree_from_erl_type(RetType) of
+            any ->
+              false; %% No typetest
+            TypetestTree ->
+              {true, TypetestTree}
+          end
+      end;
+    false ->
+      case maps:get(MFA, TypesMap, none) of
+        none ->
+          false;
+        {_, RetType} ->
+          case erl_types:t_test_tree_from_erl_type(RetType) of
+            any ->
+              false; %% No typetest
+            TypetestTree ->
+              {true, TypetestTree}
+          end
       end
   end.
+
+  
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% This function combines the optimistic and the original cfg
@@ -385,16 +430,30 @@ function_worth_typetesting(MFA) ->
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt) ->
+combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt, TypesMap) ->
   %% The optimistic arguments types, zipped with the arguments
   CfgParams = hipe_icode_cfg:params(CopiedCfg),
+
   ArgTypes =
-    case check_opt_call_info(MFA) of
-      none ->
-        [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
-      ArgTypesTemp ->
-        ArgTypesTemp
+    case ?WITH_DYN_SERVER of
+      true ->
+        %% Old one based on runtime_type_server
+        case check_opt_call_info(MFA) of
+          none ->
+            [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
+          ArgTypesTemp ->
+            ArgTypesTemp
+        end;
+      false ->
+        %% New one
+        case maps:get(MFA, TypesMap, none) of
+          none ->
+            [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
+          {ArgTypesTemp, _} ->
+            ArgTypesTemp
+        end
     end,
+
   %% New version that might add more than one typetest for each argument
   ArgTypetestTrees = lists:zip([erl_types:t_test_tree_from_erl_type(Type) || Type <- ArgTypes], [hipe_icode:mk_move(X, X) || X <- CfgParams]),
   %% Comment one line if you dont want typetests in arguments
