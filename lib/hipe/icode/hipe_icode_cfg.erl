@@ -20,6 +20,7 @@
 	 closure_arity/1,
          linear_to_cfg/1,
          labels/1, start_label/1,
+         function/1,
 	 pp/1, pp/2,
 	 params/1, params_update/2,
          pred/2,

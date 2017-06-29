@@ -63,7 +63,7 @@ DOC_MODULES = hipe_beam_to_icode \
 	hipe_icode_ssa_copy_prop hipe_icode_ssa_struct_reuse \
 	hipe_icode_type $(HIPE_MODULES)
 
-MODULES = $(DOC_MODULES) hipe_icode_ebb hipe_icode_mulret hipe_runtime_type_server
+MODULES = $(DOC_MODULES) hipe_icode_ebb hipe_icode_mulret hipe_runtime_type_server hipe_icode_optimistic_types
 
 HRL_FILES=hipe_icode.hrl hipe_icode_primops.hrl hipe_icode_type.hrl
 ERL_FILES= $(MODULES:%=%.erl)

@@ -99,7 +99,8 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   IcodeCfg0 = icode_linear_to_cfg(LinearIcode1, Options),
   %% hipe_icode_cfg:pp(IcodeCfg0),
   IcodeCfg1 = icode_handle_exceptions(IcodeCfg0, MFA, Options),
-  IcodeCfg3 = icode_inline_bifs(IcodeCfg1, Options),
+  IcodeCfg2 = icode_inline_bifs(IcodeCfg1, Options),
+  IcodeCfg3 = icode_optimistic_types(IcodeCfg2, Options),
   pp(IcodeCfg3, MFA, icode, pp_icode, Options, Servers),
   IcodeCfg4 = icode_ssa(IcodeCfg3, MFA, Options, Servers),
   IcodeCfg5 = icode_split_arith(IcodeCfg4, MFA, Options),
@@ -168,6 +169,15 @@ icode_inline_bifs(IcodeCfg, Options) ->
 		   "Icode inline bifs", Options);
     false ->
       IcodeCfg
+  end.
+
+icode_optimistic_types(IcodeCfg, Options) ->  
+  case proplists:get_value(optimistic_types, Options) of
+    undefined ->
+      IcodeCfg;
+    Types ->
+      ?option_time(hipe_icode_optimistic_types:cfg(IcodeCfg, Types),
+       "Icode optimistic types", Options)
   end.
 
 %%---------------------------------------------------------------------
