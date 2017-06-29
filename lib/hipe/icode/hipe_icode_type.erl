@@ -162,7 +162,7 @@ add_optimistic_typetests(SSACfg, MFA) ->
   Cfg1 = separate_calls(SSACfg),
   % io:format(standard_error, "~p: Calls separated!~nCfg: ~p~n", [MFA, Cfg]),
 
-  ok = hipe_icode_ssa:check(Cfg1),
+  % ok = hipe_icode_ssa:check(Cfg1),
 
   %% Create a copy of the cfg bbs
   {CopiedCfg, LabelMappings, VarMap} = copy_cfg(Cfg1),
@@ -178,22 +178,24 @@ add_optimistic_typetests(SSACfg, MFA) ->
   CombinedCfgSSA = combine_copied_cfg(MFA, CopiedCfgSSA, StartLbl, StartLblOpt),
 
   % io:format("Cfg: ~p~nCopy: ~p~nCombin: ~p~n", [Cfg1, CopiedCfgSSA, CombinedCfgSSA]),
-
+  % io:format("Combin: ~p~n", [CombinedCfgSSA]),
   %% TODO: There is a problem and this returns many warnings
   ok = hipe_icode_ssa:check(CombinedCfgSSA),
 
   %% Unconvert SSA CFG
-  CombinedCfg = hipe_icode_ssa:unconvert(CombinedCfgSSA),
+  % CombinedCfg = hipe_icode_ssa:unconvert(CombinedCfgSSA),
+  % io:format("Combin: ~p~nUnconv: ~p~n", [CombinedCfgSSA, CombinedCfg]),
   % io:format("Cfg: ~p~nCopy: ~p~n", [Cfg1, CombinedCfg]),
   % io:format(standard_error, "~p: SSA Unconverted!~n", [MFA]),
 
   %% Create a typetest after the return of each non-branch function call
-  FinalCfg = add_typetests(CombinedCfg, LabelMappings),
+  Final = add_typetests(CombinedCfgSSA, LabelMappings),
   % io:format("Final: ~p~n", [FinalCfg]),
 
-  Final = hipe_icode_ssa:convert(FinalCfg),
-  % io:format("Final: ~p~n", [Final]),
-  Final.
+  % Final = hipe_icode_ssa:convert(CombinedCfg),
+  io:format("Combin: ~p~nFinal: ~p~n", [CombinedCfgSSA, Final]),
+  ok = hipe_icode_ssa:check(Final),
+  CombinedCfgSSA.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
