@@ -2398,7 +2398,7 @@ t_test_from_erl_type(?integer(_)) ->
 % t_test_from_erl_type(?list(_Type, _, _)) ->
 %   cons;
 t_test_from_erl_type(?list(_, _, _)) ->
-  list;
+  cons;
 t_test_from_erl_type(?map(_, _, _)) ->
   map;
 t_test_from_erl_type(?nil) ->
