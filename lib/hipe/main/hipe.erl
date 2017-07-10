@@ -803,9 +803,18 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
 					      NonEscaping, hipe_icode_range)
 	end,
       RangeServer = spawn_link(RangeServerFun),
+      InlineServerFun =
+        fun() ->
+            hipe_icode_profile_driven_inline:init(
+                proplists:get_value(profile_driven_inline, Opts),
+                length(MfaIcodeList))
+        end,
+      InlineServer = spawn_link(InlineServerFun),
       Servers = #comp_servers{pp_server = PPServer,
 			      range = RangeServer,
-			      type = TypeServer},
+			      type = TypeServer,
+                              inline = InlineServer},
+      ServersList = [PPServer, TypeServer, RangeServer, InlineServer],
       CompFuns =
 	[fun() ->
 	     set_architecture(Opts),
@@ -816,8 +825,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
       lists:foreach(fun (F) -> spawn_link(F) end, CompFuns),
       Final = [receive Res when element(1, Res) =:= MFA -> Res end
 	       || {MFA, _} <- MfaIcodeList],
-      lists:foreach(fun (Pid) -> stop_and_wait(Pid) end,
-		    [PPServer, TypeServer, RangeServer]),
+      lists:foreach(fun (Pid) -> stop_and_wait(Pid) end, ServersList),
       Final;
     [] ->
       []
@@ -1382,6 +1390,7 @@ opt_keys() ->
      pp_rtl_lcm,
      pp_rtl_ssapre,
      pp_rtl_linear,
+     profile_driven_inline,
      ra_partitioned,
      ra_prespill,
      ra_range_split,

@@ -101,16 +101,17 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   IcodeCfg1 = icode_handle_exceptions(IcodeCfg0, MFA, Options),
   IcodeCfg2 = icode_inline_bifs(IcodeCfg1, Options),
   IcodeCfg3 = icode_optimistic_types(IcodeCfg2, Options),
-  pp(IcodeCfg3, MFA, icode, pp_icode, Options, Servers),
-  IcodeCfg4 = icode_ssa(IcodeCfg3, MFA, Options, Servers),
-  IcodeCfg5 = icode_split_arith(IcodeCfg4, MFA, Options),
-  pp(IcodeCfg5, MFA, icode, pp_icode_split_arith, Options, Servers),
-  IcodeCfg6 = icode_heap_test(IcodeCfg5, Options),
-  IcodeCfg7 = icode_remove_trivial_bbs(IcodeCfg6, Options),
-  pp(IcodeCfg7, MFA, icode, pp_opt_icode, Options, Servers),
-  pp(IcodeCfg7, MFA, icode_liveness, pp_icode_liveness, Options, Servers),
+  IcodeCfg4 = icode_profile_driven_inline(IcodeCfg3, Options, Servers),
+  pp(IcodeCfg4, MFA, icode, pp_icode, Options, Servers),
+  IcodeCfg5 = icode_ssa(IcodeCfg4, MFA, Options, Servers),
+  IcodeCfg6 = icode_split_arith(IcodeCfg5, MFA, Options),
+  pp(IcodeCfg6, MFA, icode, pp_icode_split_arith, Options, Servers),
+  IcodeCfg7 = icode_heap_test(IcodeCfg6, Options),
+  IcodeCfg8 = icode_remove_trivial_bbs(IcodeCfg7, Options),
+  pp(IcodeCfg8, MFA, icode, pp_opt_icode, Options, Servers),
+  pp(IcodeCfg8, MFA, icode_liveness, pp_icode_liveness, Options, Servers),
 
-  FinalIcode = hipe_icode_cfg:cfg_to_linear(IcodeCfg7),
+  FinalIcode = hipe_icode_cfg:cfg_to_linear(IcodeCfg8),
   ?opt_stop_timer("Icode"),
   {LinearRTL, Roots} = ?option_time(icode_to_rtl(MFA, FinalIcode, Options, Servers),
           "RTL", Options),
@@ -180,6 +181,14 @@ icode_optimistic_types(IcodeCfg, Options) ->
        "Icode optimistic types", Options)
   end.
 
+icode_profile_driven_inline(IcodeCfg, Options, Servers) ->
+  case proplists:get_value(profile_driven_inline, Options) of
+    undefined ->
+      IcodeCfg;
+    _Data ->
+      ?option_time(hipe_icode_profile_driven_inline:cfg(IcodeCfg, Servers),
+       "Icode inline based on profiling", Options)
+  end.
 %%---------------------------------------------------------------------
 
 icode_split_arith(IcodeCfg, MFA, Options) ->
