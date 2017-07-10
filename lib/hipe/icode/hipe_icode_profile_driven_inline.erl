@@ -53,7 +53,8 @@ cfg(Cfg, CompServers) ->
 init(Data, NumberProcs) ->
   case pre_pass(NumberProcs) of
     {IcodeMap, Pids} ->
-      NewIcodeMap = process(Data, IcodeMap),
+      NewData = filter_data(Data, IcodeMap),
+      NewIcodeMap = process(NewData, IcodeMap),
       % io:format(standard_error, "All good~nOld: ~p~nNew: ~p~n", [maps:get({huff,make_codes,3}, IcodeMap),
                                                                  % maps:get({huff,make_codes,3}, NewIcodeMap)]),
       post_pass(NewIcodeMap, Pids),
@@ -76,6 +77,26 @@ pre_pass(N, IcodeMap, Pids) ->
       stop
   end.
 
+
+%% IMPORTANT: Atm we don't allow tail recursive functions to be inlined
+filter_data(Data, IcodeMap) ->
+  %% Find if each function is tail recursive
+  Leafness = maps:map(
+    fun(_MFA, Icode) ->
+      IcodeCode = hipe_icode:icode_code(Icode),
+      IsClosure = hipe_icode:icode_is_closure(Icode),
+      hipe_beam_to_icode:leafness(IcodeCode, IsClosure)
+    end, IcodeMap),
+  % io:format("Leafness: ~p~n", [Leafness]),
+
+  maps:filter(
+    fun(_Caller, {Callee, _N}) ->
+      case maps:get(Callee, Leafness) of
+        selfrec -> false;
+        _ -> true
+      end
+    end,Data).
+
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
 
@@ -85,6 +106,7 @@ process(Data, IcodeMap) ->
   NewIcodeMap = loop(Data, IcodeMap, CallsList),
 
   NewIcodeMap.
+
 
 
 loop(Data, IcodeMap, CallsList) ->

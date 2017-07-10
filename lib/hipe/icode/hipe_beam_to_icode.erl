@@ -28,6 +28,8 @@
 
 -export([module/2]).
 
+
+-export([leafness/2]).
 %%-----------------------------------------------------------------------
 
 %% Uncomment the following lines to turn on debugging for this module
@@ -173,6 +175,7 @@ trans_mfa_code(M,F,A, FunBeamCode, ClosureInfo) ->
 
 mk_redtest() -> hipe_icode:mk_primop([], redtest, []).
 
+-spec leafness(icode_instrs(), boolean()) -> atom().
 leafness(Is, IsClosure) -> % -> true, selfrec, closure, or false
   leafness(Is, IsClosure, true).
 
