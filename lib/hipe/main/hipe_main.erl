@@ -95,15 +95,21 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   hipe_gensym:set_var_range(icode, VMin, VMax+1),
   %%hipe_icode_pp:pp(LinearIcode0),
   ?opt_start_timer("Icode"),
-  LinearIcode1 = icode_no_comment(LinearIcode0, Options),
-  IcodeCfg0 = icode_linear_to_cfg(LinearIcode1, Options),
+
+  LinearIcode1 = icode_optimistic_types(LinearIcode0, Options),
+  LinearIcode2 = icode_profile_driven_inline(LinearIcode1, Options, Servers),
+
+  LinearIcode3 = icode_no_comment(LinearIcode2, Options),
+  IcodeCfg0 = icode_linear_to_cfg(LinearIcode3, Options),
   %% hipe_icode_cfg:pp(IcodeCfg0),
   IcodeCfg1 = icode_handle_exceptions(IcodeCfg0, MFA, Options),
   IcodeCfg2 = icode_inline_bifs(IcodeCfg1, Options),
-  IcodeCfg3 = icode_optimistic_types(IcodeCfg2, Options),
-  IcodeCfg4 = icode_profile_driven_inline(IcodeCfg3, Options, Servers),
-  pp(IcodeCfg4, MFA, icode, pp_icode, Options, Servers),
-  IcodeCfg5 = icode_ssa(IcodeCfg4, MFA, Options, Servers),
+
+  % IcodeCfg3 = icode_optimistic_types(IcodeCfg2, Options),
+  % IcodeCfg4 = icode_profile_driven_inline(IcodeCfg3, Options, Servers),
+
+  pp(IcodeCfg2, MFA, icode, pp_icode, Options, Servers),
+  IcodeCfg5 = icode_ssa(IcodeCfg2, MFA, Options, Servers),
   IcodeCfg6 = icode_split_arith(IcodeCfg5, MFA, Options),
   pp(IcodeCfg6, MFA, icode, pp_icode_split_arith, Options, Servers),
   IcodeCfg7 = icode_heap_test(IcodeCfg6, Options),
@@ -172,21 +178,21 @@ icode_inline_bifs(IcodeCfg, Options) ->
       IcodeCfg
   end.
 
-icode_optimistic_types(IcodeCfg, Options) ->  
+icode_optimistic_types(Icode, Options) ->  
   case proplists:get_value(optimistic_types, Options) of
     undefined ->
-      IcodeCfg;
+      Icode;
     Types ->
-      ?option_time(hipe_icode_optimistic_types:cfg(IcodeCfg, Types),
+      ?option_time(hipe_icode_optimistic_types:linear(Icode, Types),
        "Icode optimistic types", Options)
   end.
 
-icode_profile_driven_inline(IcodeCfg, Options, Servers) ->
+icode_profile_driven_inline(Icode, Options, Servers) ->
   case proplists:get_value(profile_driven_inline, Options) of
     undefined ->
-      IcodeCfg;
+      Icode;
     _Data ->
-      ?option_time(hipe_icode_profile_driven_inline:cfg(IcodeCfg, Servers),
+      ?option_time(hipe_icode_profile_driven_inline:linear(Icode, Servers),
        "Icode inline based on profiling", Options)
   end.
 %%---------------------------------------------------------------------

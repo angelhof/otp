@@ -1,7 +1,7 @@
 -module(hipe_icode_profile_driven_inline).
 
 
--export([cfg/2]).
+-export([cfg/2, linear/2]).
 
 %% Server Functions
 -export([init/2]).
@@ -34,15 +34,20 @@
 %% gathered during execution
 %%-------------------------------------------------------------------
 
--spec cfg(cfg(), #comp_servers{}) -> cfg().
-cfg(Cfg, #comp_servers{inline = ServerPid}) ->
-  MFA = hipe_icode_cfg:function(Cfg),
-  Icode = hipe_icode_cfg:cfg_to_linear(Cfg),
+-spec linear(icode(), #comp_servers{}) -> icode().
+linear(Icode, #comp_servers{inline = ServerPid}) ->
+  MFA = hipe_icode:icode_fun(Icode),
   ServerPid ! {ready, Icode, MFA, self()},
   receive
     {done, NewIcode} ->
-      hipe_icode_cfg:linear_to_cfg(NewIcode)
+      NewIcode
   end.
+
+-spec cfg(cfg(), #comp_servers{}) -> cfg().
+cfg(Cfg, CompServers) ->
+  Icode = hipe_icode_cfg:cfg_to_linear(Cfg),
+  NewIcode = linear(Icode, CompServers),
+  hipe_icode_cfg:linear_to_cfg(NewIcode).
 
 -spec init(map(), non_neg_integer()) -> ok.
 init(Data, NumberProcs) ->

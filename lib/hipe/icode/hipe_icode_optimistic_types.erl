@@ -1,6 +1,6 @@
 -module(hipe_icode_optimistic_types).
 
--export([cfg/2]).
+-export([cfg/2, linear/2]).
 
 -export([check_opt_fun_info/1]).
 
@@ -36,6 +36,12 @@
 %% from the dynamic type server at the beginning of the cfg so that
 %% further optimizations can happen when those types are indeed true.
 %%-------------------------------------------------------------------
+
+-spec linear(icode(), map()) -> icode().
+linear(Icode, Types) ->
+  Cfg = hipe_icode_cfg:linear_to_cfg(Icode),
+  NewCfg = cfg(Cfg, Types),
+  hipe_icode_cfg:cfg_to_linear(NewCfg).
 
 -spec cfg(cfg(), map()) -> cfg().
 cfg(Cfg, Types) ->
