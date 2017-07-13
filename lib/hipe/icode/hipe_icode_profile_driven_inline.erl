@@ -34,6 +34,8 @@
 %% gathered during execution
 %%-------------------------------------------------------------------
 
+%% IMPORTANT: Atm we don't allow tail recursive functions to be inlined
+
 -spec linear(icode(), #comp_servers{}) -> icode().
 linear(Icode, #comp_servers{inline = ServerPid}) ->
   MFA = hipe_icode:icode_fun(Icode),
@@ -95,19 +97,19 @@ filter_data(Data, IcodeMap) ->
     end, IcodeMap),
   % io:format("Leafness: ~p~n", [Leafness]),
 
-  maps:filter(
-    fun(_Caller, {Callee, _N}) ->
-      case maps:get(Callee, Leafness) of
-        selfrec -> false;
-        _ -> true
-      end
+  maps:map(
+    fun(_Caller, CalleeList) ->
+      [{Callee, N} || {Callee,N} <- CalleeList, maps:get(Callee, Leafness) =/= selfrec]
     end,Data).
+
 
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
 
   %% Create a list with all the call info
-  CallsList = maps:to_list(Data),
+  CallsList0 = [[{Caller, C} || C <- CalleeList]
+                  || {Caller, CalleeList} <- maps:to_list(Data)],
+  CallsList = lists:flatten(CallsList0),
 
   NewIcodeMap = loop(Data, IcodeMap, CallsList),
 
