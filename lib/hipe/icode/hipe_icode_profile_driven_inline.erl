@@ -40,7 +40,7 @@ linear(Icode, #comp_servers{inline = ServerPid}) ->
   ServerPid ! {ready, Icode, MFA, self()},
   receive
     {done, NewIcode} ->
-      NewIcode
+      update_ranges(NewIcode)
   end.
 
 -spec cfg(cfg(), #comp_servers{}) -> cfg().
@@ -55,13 +55,19 @@ init(Data, NumberProcs) ->
     {IcodeMap, Pids} ->
       NewData = filter_data(Data, IcodeMap),
       NewIcodeMap = process(NewData, IcodeMap),
-      % io:format(standard_error, "All good~nOld: ~p~nNew: ~p~n", [maps:get({huff,make_codes,3}, IcodeMap),
-                                                                 % maps:get({huff,make_codes,3}, NewIcodeMap)]),
       post_pass(NewIcodeMap, Pids),
       stop();
     stop ->
       ok
   end.
+
+update_ranges(Icode) ->
+  IcodeCode = hipe_icode:icode_code(Icode),
+  HighVar = hipe_icode:highest_var(IcodeCode),
+  HighLabel = hipe_icode:highest_label(IcodeCode),
+  hipe_gensym:set_var(icode, HighVar + 1),
+  hipe_gensym:set_label(icode, HighLabel + 1),
+  Icode.
 
 pre_pass(N) ->
   pre_pass(N, #{}, []).
