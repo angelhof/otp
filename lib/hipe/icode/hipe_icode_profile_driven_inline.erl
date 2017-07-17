@@ -86,21 +86,34 @@ pre_pass(N, IcodeMap, Pids) ->
   end.
 
 
-%% IMPORTANT: Atm we don't allow tail recursive functions to be inlined
-filter_data(Data, IcodeMap) ->
-  %% Find if each function is tail recursive
-  Leafness = maps:map(
-    fun(_MFA, Icode) ->
-      IcodeCode = hipe_icode:icode_code(Icode),
-      IsClosure = hipe_icode:icode_is_closure(Icode),
-      hipe_beam_to_icode:leafness(IcodeCode, IsClosure)
-    end, IcodeMap),
-  % io:format("Leafness: ~p~n", [Leafness]),
+filter_data(Data, _IcodeMap) ->
 
-  maps:map(
-    fun(_Caller, CalleeList) ->
-      [{Callee, N} || {Callee,N} <- CalleeList, maps:get(Callee, Leafness) =/= selfrec]
-    end,Data).
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %% IMPORTANT: This existed previously because we didn't allow for
+  %% tail recursive functions to be inlined because it created an infinite loop
+  %% However the problem was probably caused by something else and now it seems
+  %% fixed. We can remove the following filtering for now
+  %%
+  %%
+  %% Find if each function is tail recursive
+  % Leafness = maps:map(
+  %   fun(_MFA, Icode) ->
+  %     IcodeCode = hipe_icode:icode_code(Icode),
+  %     IsClosure = hipe_icode:icode_is_closure(Icode),
+  %     hipe_beam_to_icode:leafness(IcodeCode, IsClosure)
+  %   end, IcodeMap),
+  % io:format("Leafness: ~p~n", [Leafness]),
+  %%
+  % maps:map(
+  %   fun(_Caller, CalleeList) ->
+  %     [{Callee, N} || {Callee,N} <- CalleeList, maps:get(Callee, Leafness) =/= selfrec]
+  %   end,Data),
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+  Data.
 
 
 %% TODO: Implement the naive algorithm here
@@ -191,26 +204,74 @@ make_inlines(CallerIcode, _Callee, CalleeIcode) ->
 
   NewCallerIcode.
 
-
+%% TODO: Make inline for enters
 check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
   Callee = hipe_icode:icode_fun(CalleeIcode),
-  case hipe_icode:is_call(Ins) andalso
-        hipe_icode:successors(Ins) =:= [] of
-          true ->
-            case hipe_icode:call_fun(Ins) of
-              Callee ->
-                {InlinedCallee, NewVarOffset, NewLabelOffset} =
-                  make_inline_call(Ins, CalleeIcode, VarOffset, LabelOffset),
-                {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
-                % {[Ins|Code], VarOffset, LabelOffset};
-              _ ->
-                {[Ins|Code], VarOffset, LabelOffset}
-            end;
-          _ ->
-            {[Ins|Code], VarOffset, LabelOffset}
+  case Ins of
+    #icode_call{} ->
+      case hipe_icode:successors(Ins) of
+        [] ->
+          case hipe_icode:call_fun(Ins) of
+            Callee ->
+              {InlinedCallee, NewVarOffset, NewLabelOffset} =
+                make_inline_call(Ins, CalleeIcode, VarOffset, LabelOffset),
+              {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
+              % {[Ins|Code], VarOffset, LabelOffset};
+            _ ->
+              {[Ins|Code], VarOffset, LabelOffset}
+          end;
+        _Successors ->
+          {[Ins|Code], VarOffset, LabelOffset}
+      end;
+    #icode_enter{} ->
+      case hipe_icode:enter_fun(Ins) of
+        Callee ->
+          {InlinedCallee, NewVarOffset, NewLabelOffset} =
+            make_inline_enter(Ins, CalleeIcode, VarOffset, LabelOffset),
+          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
+        _ ->
+          {[Ins|Code], VarOffset, LabelOffset}
+      end;
+    _ ->
+      {[Ins|Code], VarOffset, LabelOffset}
   end.
 
 make_inline_call(IcodeCall, CalleeIcode, VarOffset, LabelOffset) ->
+  {CalleeIcodeCode, MoveInstructions} =
+    common_inline(IcodeCall, CalleeIcode, VarOffset, LabelOffset),
+  %% Because this is a call we have to transform all enters into calls
+  CalleeIcodeCode1 = transform_enters(CalleeIcodeCode),
+
+  %% Create a return label
+  {_, MaxLabel} = hipe_icode:icode_label_range(CalleeIcode),
+  ReturnLabelName = MaxLabel + LabelOffset + 1,
+  ReturnLabel = hipe_icode:mk_label(ReturnLabelName),
+
+  [DstVar] = hipe_icode:call_dstlist(IcodeCall),
+  CalleeIcodeCode2 = transform_returns(DstVar, ReturnLabelName, CalleeIcodeCode1),
+
+  {_, MaxVar} = hipe_icode:icode_var_range(CalleeIcode),
+  NewVarOffset = MaxVar + VarOffset + 1,
+  NewLabelOffset = MaxLabel + LabelOffset + 2,
+
+  FinalIcodeCode = MoveInstructions ++ CalleeIcodeCode2 ++ [ReturnLabel],
+  % io:format(standard_error, "OldIcode: ~p~nNewIcode: ~p~n", [CalleeIcodeCode, FinalIcodeCode]),
+  {FinalIcodeCode, NewVarOffset, NewLabelOffset}.
+
+make_inline_enter(IcodeCall, CalleeIcode, VarOffset, LabelOffset) ->
+  {CalleeIcodeCode, MoveInstructions} =
+    common_inline(IcodeCall, CalleeIcode, VarOffset, LabelOffset),
+
+  {_, MaxLabel} = hipe_icode:icode_label_range(CalleeIcode),
+  {_, MaxVar} = hipe_icode:icode_var_range(CalleeIcode),
+  NewVarOffset = MaxVar + VarOffset + 1,
+  NewLabelOffset = MaxLabel + LabelOffset + 1,
+
+  FinalIcodeCode = MoveInstructions ++ CalleeIcodeCode,
+  % io:format(standard_error, "OldIcode: ~p~nNewIcode: ~p~n", [CalleeIcodeCode, FinalIcodeCode]),
+  {FinalIcodeCode, NewVarOffset, NewLabelOffset}.
+
+common_inline(IcodeCall, CalleeIcode, VarOffset, LabelOffset) ->
   CalleeIcodeCode = hipe_icode:icode_code(CalleeIcode),
 
   %% Map and substitute variables
@@ -224,28 +285,9 @@ make_inline_call(IcodeCall, CalleeIcode, VarOffset, LabelOffset) ->
 
   %% Move arguments
   Params = [subst_var(Var, VarOffset) || Var <- hipe_icode:icode_params(CalleeIcode)],
-  Args = hipe_icode:call_args(IcodeCall),
+  Args = args(IcodeCall),
   MoveInstructions = lists:zipwith(fun hipe_icode:mk_move/2, Params, Args),
-  % io:format(standard_error, "Moves: ~p~n", [MoveInstructions]),
-
-  %% Because this is a call we have to transform all enters into calls
-  CalleeIcodeCode4 = transform_enters(CalleeIcodeCode3),
-
-  %% Create a return label
-  {_, MaxLabel} = hipe_icode:icode_label_range(CalleeIcode),
-  ReturnLabelName = MaxLabel + LabelOffset + 1,
-  ReturnLabel = hipe_icode:mk_label(ReturnLabelName),
-
-  [DstVar] = hipe_icode:call_dstlist(IcodeCall),
-  CalleeIcodeCode5 = transform_returns(DstVar, ReturnLabelName, CalleeIcodeCode4),
-
-  {_, MaxVar} = hipe_icode:icode_var_range(CalleeIcode),
-  NewVarOffset = MaxVar + VarOffset + 1,
-  NewLabelOffset = MaxLabel + LabelOffset + 2,
-
-  FinalIcodeCode = MoveInstructions ++ CalleeIcodeCode5 ++ [ReturnLabel],
-  % io:format(standard_error, "OldIcode: ~p~nNewIcode: ~p~n", [CalleeIcodeCode, FinalIcodeCode]),
-  {FinalIcodeCode, NewVarOffset, NewLabelOffset}.
+  {CalleeIcodeCode3, MoveInstructions}.
 
 transform_enters(Code) ->
   transform_enters(Code, []).
@@ -296,6 +338,9 @@ is_redtest(Instr) ->
       false
   end.
 
+args(#icode_call{} = Call) -> hipe_icode:call_args(Call);
+args(#icode_enter{} = Enter) -> hipe_icode:enter_args(Enter).
+
 map_labels(Icode, LabelOffset) ->
   NewIcode = [subst_labels(Instr, LabelOffset) || Instr <- Icode],
   % io:format(standard_error, "OldIcode: ~p~nNewIcode: ~p~n", [Icode, NewIcode]),
@@ -306,7 +351,12 @@ subst_labels(Instr, LabelOffset) ->
     true ->
       subst_label(Instr, LabelOffset);
     false ->
-      OldLabels = hipe_icode:successors(Instr),
+      OldLabels0 = hipe_icode:successors(Instr),
+      %% WARNING: Very important to sort labels
+      %% and process them from higher to lower so that
+      %% they don't overlap
+      SortingFun = fun(A,B) -> A > B end,
+      OldLabels = lists:sort(SortingFun, OldLabels0),
       lists:foldl(fun(L, I) -> redirect_jmps(L, LabelOffset, I) end, Instr, OldLabels)
   end.
 
