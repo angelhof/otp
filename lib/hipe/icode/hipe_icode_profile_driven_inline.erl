@@ -115,47 +115,74 @@ filter_data(Data, _IcodeMap) ->
 
   Data.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Priority Queue Implementation
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+prepare_call_pq(Data) ->
+  CallsList0 = [[{{Caller, Callee}, N} || {Callee, N} <- CalleeList]
+                  || {Caller, CalleeList} <- maps:to_list(Data)],
+  CallsList = lists:flatten(CallsList0),
+  % CallMap = maps:from_list(CallsList),
+  % CallMap.
+  CallsList.
+
+pop_call_from_pq(CallMap) ->
+  case CallMap of
+    [] -> none;
+    [Max|Rest] -> {Max, Rest}
+  end.
+
+%% TODO: Fill this stub
+update_call_pq(_Max, CallMap) ->
+  CallMap.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
 
   %% Create a list with all the call info
-  CallsList0 = [[{Caller, C} || C <- CalleeList]
-                  || {Caller, CalleeList} <- maps:to_list(Data)],
-  CallsList = lists:flatten(CallsList0),
-
-  NewIcodeMap = loop(Data, IcodeMap, CallsList),
+  CallMap = prepare_call_pq(Data),
+  NewIcodeMap = loop(IcodeMap, CallMap),
 
   NewIcodeMap.
 
 
 
-loop(Data, IcodeMap, CallsList) ->
+loop(IcodeMap, CallsList) ->
   CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
   CurrentInlines = sets:from_list(CurrentInlinesList),
-  loop(Data, IcodeMap, CurrentInlines, CallsList).
+  loop(IcodeMap, CurrentInlines, CallsList).
 
 
--spec loop(map(),                               % A map that contains information about number of calls
-           #{mfa() := icode()},                 % A map from mfas to cfgs
+%% TODO: Fix wrong spec
+-spec loop(#{mfa() := icode()},                 % A map from mfas to cfgs
            sets:set({mfa(), mfa()}),            % A map with the already done inlining for each function. This exists to prevent loops
            [{mfa(), {mfa(), integer()}}]) ->    % A list with all calls and their numbers
               #{mfa() := icode()}.              % A map with the new cfgs
 
-loop(_Data, IcodeMap, _CurrentInlines, []) ->
-  IcodeMap;
-loop(Data, IcodeMap, CurrentInlines, [Max|CallsList]) ->
-  case inline_call(Max, IcodeMap, CurrentInlines) of
-    {ok, NewIcodeMap} ->
-      {Caller, {Callee, _NumCalls}} = Max,
-      NewCurrentInlines = sets:add_element({Caller, Callee}, CurrentInlines),
-      NewCallsList = update_calls_list(Max, Data, CallsList),
-      loop(Data, NewIcodeMap, NewCurrentInlines, NewCallsList);
-    rec ->
-      loop(Data, IcodeMap, CurrentInlines, CallsList)
-  end.
+loop(IcodeMap, CurrentInlines, CallMap) ->
+  case pop_call_from_pq(CallMap) of
+    none ->
+      IcodeMap;
+    {Max, Rest} ->
+      case inline_call(Max, IcodeMap, CurrentInlines) of
+        {ok, NewIcodeMap} ->
+          {{Caller, Callee}, _NumCalls} = Max,
+          NewCurrentInlines =
+            sets:add_element({Caller, Callee}, CurrentInlines),
+          NewCallMap = update_call_pq(Max, Rest),
+          loop(NewIcodeMap, NewCurrentInlines, NewCallMap);
+        rec ->
+          loop(IcodeMap, CurrentInlines, CallMap)
+      end
+    end.
 
-inline_call({Caller, {Callee, _NumberCalls}}, IcodeMap, CurrentInlines) ->
+inline_call({{Caller, Callee}, _NumberCalls}, IcodeMap, CurrentInlines) ->
   case sets:is_element({Caller, Callee}, CurrentInlines) of
     false ->
       % io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
@@ -384,9 +411,6 @@ subst_var(OldVar, VarOffset) ->
   NewName = OldName + VarOffset,
   hipe_icode:mk_var(NewName).
 
-%% TODO: Fill this stub
-update_calls_list(_Max, _Data, CallsList) ->
-  CallsList.
 
 
 
