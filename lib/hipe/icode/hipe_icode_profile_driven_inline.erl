@@ -126,59 +126,102 @@ prepare_call_pq(Data) ->
   CallsList0 = [[{{Caller, Callee}, N} || {Callee, N} <- CalleeList]
                   || {Caller, CalleeList} <- maps:to_list(Data)],
   CallsList = lists:flatten(CallsList0),
-  % CallMap = maps:from_list(CallsList),
-  % CallMap.
-  CallsList.
-
-pop_call_from_pq(CallMap) ->
-  case CallMap of
-    [] -> none;
-    [Max|Rest] -> {Max, Rest}
-  end.
-
-%% TODO: Fill this stub
-update_call_pq(_Max, CallMap) ->
+  CallMap = maps:from_list(CallsList),
   CallMap.
 
+%% TODO: Find a more elegant way to initialize the fold
+pop_call_from_pq(CallMap) ->
+  case maps:size(CallMap) of
+    0 ->
+      none;
+    _ ->
+      {MaxKey, MaxVal} =
+        maps:fold(fun keep_max/3, {{undef, undef}, 0}, CallMap),
+      {MaxVal, RestCallMap} = maps:take(MaxKey, CallMap),
+      {{MaxKey, MaxVal}, RestCallMap}
+  end.
+
+keep_max(Key, N, {_MaxKey, MaxN}) when N > MaxN ->
+  {Key, N};
+keep_max(_Key, _N, {MaxKey, MaxN}) ->
+  {MaxKey, MaxN}.
+
+%% TODO: Complete update call_pq
+%% (OK) Pre. Before calling the loop/3 function create a map containing
+%%           how many times each function has been called in total
+%% 1. Find all {b,x,Nbx} calls
+%% 2. Add them to the Map as {a,x,(Nab/Nb)*Nbx}
+%% 3. If {a,x,OldNax} already exists add the new Nax
+update_call_pq({{FunA, FunB}, Nab}, CallMap, TimesCalled) ->
+  CalleeCalls =
+    maps:filter(
+      fun({Fun, _}, _) ->
+        Fun =:= FunB
+      end, CallMap),
+  #{FunB := Nb} = TimesCalled,
+  NewCallerCalls =
+    [{{FunA, Callee}, round((Nab/Nb)*Nbx)}
+      || {{_FunB, Callee}, Nbx} <- maps:to_list(CalleeCalls)],
+  % io:format(standard_error, "NewCallerCalls: ~p~n", [NewCallerCalls]),
+  NewCallMap = lists:foldl(fun update_call_map/2, CallMap, NewCallerCalls),
+  % io:format(standard_error, "NewCallMap: ~p~n", [NewCallMap]),
+  NewCallMap.
+
+update_call_map({{Caller, Callee}, NewN}, CallMap) ->
+  maps:update_with({Caller, Callee},
+    fun(OldN) -> OldN + NewN end, NewN, CallMap).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+total_calls(IcodeMap, CallMap) ->
+  MfaMap = maps:map(fun(_MFA,_) -> 0 end, IcodeMap),
+  maps:fold(fun sum_calls/3, MfaMap, CallMap).
+
+sum_calls({_Caller, Callee}, Times, TotalCalls) ->
+  maps:update_with(Callee, fun(X) -> X + Times end, TotalCalls).
 
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
 
   %% Create a list with all the call info
   CallMap = prepare_call_pq(Data),
+  % io:format(standard_error, "Initial Call Map: ~p~n", [CallMap]),
   NewIcodeMap = loop(IcodeMap, CallMap),
 
   NewIcodeMap.
 
 
 
-loop(IcodeMap, CallsList) ->
+loop(IcodeMap, CallMap) ->
   CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
   CurrentInlines = sets:from_list(CurrentInlinesList),
-  loop(IcodeMap, CurrentInlines, CallsList).
+
+  TotalCalls = total_calls(IcodeMap, CallMap),
+  loop(IcodeMap, TotalCalls, CurrentInlines, CallMap).
 
 
 %% TODO: Fix wrong spec
 -spec loop(#{mfa() := icode()},                 % A map from mfas to cfgs
+           #{mfa() := integer()},               % A map from mfas to number of times called
            sets:set({mfa(), mfa()}),            % A map with the already done inlining for each function. This exists to prevent loops
            [{mfa(), {mfa(), integer()}}]) ->    % A list with all calls and their numbers
               #{mfa() := icode()}.              % A map with the new cfgs
 
-loop(IcodeMap, CurrentInlines, CallMap) ->
+loop(IcodeMap, TotalCalls, CurrentInlines, CallMap) ->
   case pop_call_from_pq(CallMap) of
     none ->
       IcodeMap;
     {Max, Rest} ->
+      io:format(standard_error, "Next: ~p~nRest: ~p~n", [Max, Rest]),
       case inline_call(Max, IcodeMap, CurrentInlines) of
         {ok, NewIcodeMap} ->
           {{Caller, Callee}, _NumCalls} = Max,
           NewCurrentInlines =
             sets:add_element({Caller, Callee}, CurrentInlines),
-          NewCallMap = update_call_pq(Max, Rest),
-          loop(NewIcodeMap, NewCurrentInlines, NewCallMap);
+          NewCallMap = update_call_pq(Max, Rest, TotalCalls),
+          loop(NewIcodeMap, TotalCalls, NewCurrentInlines, NewCallMap);
         rec ->
-          loop(IcodeMap, CurrentInlines, CallMap)
+          loop(IcodeMap, TotalCalls, CurrentInlines, CallMap)
       end
     end.
 
