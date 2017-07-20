@@ -141,7 +141,7 @@ pop_call_from_pq(CallMap) ->
       {{MaxKey, MaxVal}, RestCallMap}
   end.
 
-keep_max(Key, N, {_MaxKey, MaxN}) when N > MaxN ->
+keep_max(Key, N, {_MaxKey, MaxN}) when N >= MaxN ->
   {Key, N};
 keep_max(_Key, _N, {MaxKey, MaxN}) ->
   {MaxKey, MaxN}.
@@ -212,31 +212,45 @@ loop(IcodeMap, TotalCalls, CurrentInlines, CallMap) ->
     none ->
       IcodeMap;
     {Max, Rest} ->
-      io:format(standard_error, "Next: ~p~nRest: ~p~n", [Max, Rest]),
-      case inline_call(Max, IcodeMap, CurrentInlines) of
+      % io:format(standard_error, "Next: ~p~nRest: ~p~n", [Max, Rest]),
+      case check_inline_call(Max, IcodeMap, CurrentInlines) of
         {ok, NewIcodeMap} ->
           {{Caller, Callee}, _NumCalls} = Max,
           NewCurrentInlines =
             sets:add_element({Caller, Callee}, CurrentInlines),
           NewCallMap = update_call_pq(Max, Rest, TotalCalls),
           loop(NewIcodeMap, TotalCalls, NewCurrentInlines, NewCallMap);
-        rec ->
-          loop(IcodeMap, TotalCalls, CurrentInlines, CallMap)
+        false ->
+          loop(IcodeMap, TotalCalls, CurrentInlines, Rest)
       end
     end.
 
-inline_call({{Caller, Callee}, _NumberCalls}, IcodeMap, CurrentInlines) ->
-  case sets:is_element({Caller, Callee}, CurrentInlines) of
-    false ->
-      % io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
-      #{Caller := CallerIcode} = IcodeMap,
-      #{Callee := CalleeIcode} = IcodeMap,
-      NewCallerIcode = make_inlines(CallerIcode, Callee, CalleeIcode),
-      NewIcodeMap = IcodeMap#{Caller := NewCallerIcode},
-      {ok, NewIcodeMap};
+
+check_inline_call(Call, IcodeMap, CurrInl) ->
+  Conditions =
+    [fun has_been_inlined_already/3,
+     fun happens_enough_times/3],
+  case lists:all(fun id/1, [F(Call, IcodeMap, CurrInl) || F <- Conditions]) of
     true ->
-      rec
+      inline_call(Call, IcodeMap);
+    false ->
+      false
   end.
+
+has_been_inlined_already({{Caller, Callee}, _NumberCalls}, _IcodeMap, CurrentInlines) ->
+  not sets:is_element({Caller, Callee}, CurrentInlines).
+
+happens_enough_times({_, NumberCalls}, _IcodeMap, _CurrentInlines) ->
+  NumberCalls > 10.
+
+inline_call({{Caller, Callee}, _NumberCalls}, IcodeMap) ->
+  % io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
+  #{Caller := CallerIcode} = IcodeMap,
+  #{Callee := CalleeIcode} = IcodeMap,
+  NewCallerIcode = make_inlines(CallerIcode, Callee, CalleeIcode),
+  NewIcodeMap = IcodeMap#{Caller := NewCallerIcode},
+  {ok, NewIcodeMap}.
+
 
 %% TODO: Make inline should become a fold function so that if more than
 %%       one inline of the same callee in the same caller happens,
@@ -376,10 +390,13 @@ transform_enters([Ins|Code], NewCode) ->
   end.
 
 icode_enter_to_call(Enter, DstList) ->
-  {M,F,_A} = hipe_icode:enter_fun(Enter),
+  % io:format(standard_error, "Enter: ~p~n", [Enter]),
+  % {M,F,_A} = hipe_icode:enter_fun(Enter),
+  Fun = hipe_icode:enter_fun(Enter),
   Args = hipe_icode:enter_args(Enter),
   Type = hipe_icode:enter_type(Enter),
-  hipe_icode:mk_call(DstList, M, F, Args, Type).
+  hipe_icode:make_call(DstList, Fun, Args, Type, [], [], false).
+  % hipe_icode:mk_call(DstList, M, F, Args, Type).
 
 transform_returns(DstVar, ReturnLabelName, Code) ->
   transform_returns(DstVar, ReturnLabelName, [], Code).
@@ -469,3 +486,5 @@ stop() ->
     {stop, MainPid} ->
       MainPid ! ok
   end.
+
+id(X) -> X.

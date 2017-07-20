@@ -470,6 +470,7 @@
 	                   %%         Continuation, Fail)
 	 mk_call/8,	   %% mk_call(Dst, Mod, Fun, Args, Type,
 	                   %%         Continuation, Fail, Guard)
+	 make_call/7,
 	 call_dstlist/1,
 	 call_dstlist_update/2,
 	 %% call_dst_type/1,
