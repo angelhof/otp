@@ -390,13 +390,17 @@ transform_enters([Ins|Code], NewCode) ->
   end.
 
 icode_enter_to_call(Enter, DstList) ->
-  % io:format(standard_error, "Enter: ~p~n", [Enter]),
-  % {M,F,_A} = hipe_icode:enter_fun(Enter),
-  Fun = hipe_icode:enter_fun(Enter),
+  %% IMPORTANT: This case is important because entering
+  %%            an anonymous function happens by calling
+  %%            the enter_fun primop
+  Fun =
+    case hipe_icode:enter_fun(Enter) of
+      enter_fun -> call_fun;
+      F -> F
+    end,
   Args = hipe_icode:enter_args(Enter),
   Type = hipe_icode:enter_type(Enter),
   hipe_icode:make_call(DstList, Fun, Args, Type, [], [], false).
-  % hipe_icode:mk_call(DstList, M, F, Args, Type).
 
 transform_returns(DstVar, ReturnLabelName, Code) ->
   transform_returns(DstVar, ReturnLabelName, [], Code).
