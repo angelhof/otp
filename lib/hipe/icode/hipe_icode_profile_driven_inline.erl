@@ -292,7 +292,7 @@ make_inlines(CallerIcode, _Callee, CalleeIcode) ->
 check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
   Callee = hipe_icode:icode_fun(CalleeIcode),
   case Ins of
-    #icode_call{} ->
+    #icode_call{type = local} ->
       case hipe_icode:successors(Ins) of
         [] ->
           case hipe_icode:call_fun(Ins) of
@@ -307,7 +307,7 @@ check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
         _Successors ->
           {[Ins|Code], VarOffset, LabelOffset}
       end;
-    #icode_enter{} ->
+    #icode_enter{type = local} ->
       case hipe_icode:enter_fun(Ins) of
         Callee ->
           {InlinedCallee, NewVarOffset, NewLabelOffset} =
