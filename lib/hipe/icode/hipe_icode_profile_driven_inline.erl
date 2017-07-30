@@ -288,35 +288,46 @@ make_inlines(CallerIcode, _Callee, CalleeIcode) ->
 
   NewCallerIcode.
 
-%% TODO: Make inline for enters
+%%
+%% Conditions
+%%
+
+is_local(#icode_call{type = local}) -> true;
+is_local(#icode_enter{type = local}) -> true;
+is_local(_) -> false.
+
+%% TODO: At some point also inline calls that have successors
+no_successors(Ins = #icode_call{}) ->
+  hipe_icode:successors(Ins) =:= [];
+no_successors(_) -> true.
+
+is_callee(Ins = #icode_call{}, Callee) ->
+  hipe_icode:call_fun(Ins) =:= Callee;
+is_callee(Ins = #icode_enter{}, Callee) ->
+  hipe_icode:enter_fun(Ins) =:= Callee;
+is_callee(_,_) ->
+  false.
+
+%% TODO: Make this the same way I check for conditions above
 check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
   Callee = hipe_icode:icode_fun(CalleeIcode),
-  case Ins of
-    #icode_call{type = local} ->
-      case hipe_icode:successors(Ins) of
-        [] ->
-          case hipe_icode:call_fun(Ins) of
-            Callee ->
-              {InlinedCallee, NewVarOffset, NewLabelOffset} =
-                make_inline_call(Ins, CalleeIcode, VarOffset, LabelOffset),
-              {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
-              % {[Ins|Code], VarOffset, LabelOffset};
-            _ ->
-              {[Ins|Code], VarOffset, LabelOffset}
-          end;
-        _Successors ->
-          {[Ins|Code], VarOffset, LabelOffset}
-      end;
-    #icode_enter{type = local} ->
-      case hipe_icode:enter_fun(Ins) of
-        Callee ->
+  Conds =
+    [is_local(Ins),
+     no_successors(Ins),
+     is_callee(Ins, Callee)],
+  case lists:all(fun id/1, Conds) of
+    true ->
+      case Ins of
+        #icode_call{} ->
+          {InlinedCallee, NewVarOffset, NewLabelOffset} =
+            make_inline_call(Ins, CalleeIcode, VarOffset, LabelOffset),
+          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
+        #icode_enter{} ->
           {InlinedCallee, NewVarOffset, NewLabelOffset} =
             make_inline_enter(Ins, CalleeIcode, VarOffset, LabelOffset),
-          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
-        _ ->
-          {[Ins|Code], VarOffset, LabelOffset}
+          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset}
       end;
-    _ ->
+    false ->
       {[Ins|Code], VarOffset, LabelOffset}
   end.
 
