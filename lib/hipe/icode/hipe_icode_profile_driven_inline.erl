@@ -29,12 +29,21 @@
 -define(TIME_STOP(_Flag, _Text), true).
 -endif.
 
+-define(MINIMUM_CALLS_TO_INLINE, 5).
 %%-------------------------------------------------------------------
-%% A pass that inlines functions based on call data that has been 
+%% A pass that inlines functions based on call data that has been
 %% gathered during execution
+%%
+%% Some information on the algorithm used
+%% 1. It chooses which function to inline based on how many times 
+%%    it has been called.
+%% 2. It doesn't allow the size of the module to grow beyond 
+%%    a soft limit. Soft limit means that it might grow a bit more 
+%%    than that.
+%% 3. At the moment it doesn't inline a function to itself in case
+%%    of recursive functions.
 %%-------------------------------------------------------------------
 
-%% IMPORTANT: Atm we don't allow tail recursive functions to be inlined
 
 -spec linear(icode(), #comp_servers{}) -> icode().
 linear(Icode, #comp_servers{inline = ServerPid}) ->
@@ -87,32 +96,6 @@ pre_pass(N, IcodeMap, Pids) ->
 
 
 filter_data(Data, _IcodeMap) ->
-
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  %% IMPORTANT: This existed previously because we didn't allow for
-  %% tail recursive functions to be inlined because it created an infinite loop
-  %% However the problem was probably caused by something else and now it seems
-  %% fixed. We can remove the following filtering for now
-  %%
-  %%
-  %% Find if each function is tail recursive
-  % Leafness = maps:map(
-  %   fun(_MFA, Icode) ->
-  %     IcodeCode = hipe_icode:icode_code(Icode),
-  %     IsClosure = hipe_icode:icode_is_closure(Icode),
-  %     hipe_beam_to_icode:leafness(IcodeCode, IsClosure)
-  %   end, IcodeMap),
-  % io:format("Leafness: ~p~n", [Leafness]),
-  %%
-  % maps:map(
-  %   fun(_Caller, CalleeList) ->
-  %     [{Callee, N} || {Callee,N} <- CalleeList, maps:get(Callee, Leafness) =/= selfrec]
-  %   end,Data),
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-
   Data.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -173,12 +156,31 @@ update_call_map({{Caller, Callee}, NewN}, CallMap) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+maximum_size(InitialSize) ->
+  SmallAverage = 4000.0, % erl_types is 34703 on my metric
+  %% This practically means that smaller modules can grow more and
+  %% bigger modules can grow less (10% - 310%)
+  round((min(SmallAverage / InitialSize , 3.0) + 1.1) * InitialSize) .
+
 total_calls(IcodeMap, CallMap) ->
   MfaMap = maps:map(fun(_MFA,_) -> 0 end, IcodeMap),
   maps:fold(fun sum_calls/3, MfaMap, CallMap).
 
 sum_calls({_Caller, Callee}, Times, TotalCalls) ->
   maps:update_with(Callee, fun(X) -> X + Times end, TotalCalls).
+
+compute_icode_sizes(IcodeMap) ->
+  FullIcodeMap = maps:map(
+    fun(_, Icode) ->
+      Code = hipe_icode:icode_code(Icode),
+      {Icode, length(Code)}
+    end, IcodeMap),
+  InitialSize = maps:fold(
+    fun(_, {_, MfaSize}, Size) ->
+      MfaSize + Size
+    end, 0, FullIcodeMap),
+  % io:format(standard_error, "Size: ~p~n", [InitialSize]),
+  {FullIcodeMap, InitialSize}.
 
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
@@ -193,70 +195,95 @@ process(Data, IcodeMap) ->
 
 
 loop(IcodeMap, CallMap) ->
+  %% This doesn't allow calls to the same function to be inlined
   CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
+  % CurrentInlinesList = [],
   CurrentInlines = sets:from_list(CurrentInlinesList),
 
   TotalCalls = total_calls(IcodeMap, CallMap),
-  loop(IcodeMap, TotalCalls, CurrentInlines, CallMap).
+
+  {FullIcodeMap, InitialModuleSize} = compute_icode_sizes(IcodeMap),
+  MaxModuleSize = maximum_size(InitialModuleSize),
+  % io:format(standard_error, "InitSize: ~p~nMaxModuleSize: ~p~n", [InitialModuleSize, MaxModuleSize]),
+  NewFullIcodeMap = loop(FullIcodeMap, TotalCalls, CurrentInlines,
+                         CallMap, MaxModuleSize),
+
+  maps:map(fun(_,{Icode,_Size}) -> Icode end, NewFullIcodeMap).
 
 
 %% TODO: Fix wrong spec
--spec loop(#{mfa() := icode()},                 % A map from mfas to cfgs
+-spec loop(#{mfa() := {icode(), integer()}},    % A map from mfas to cfgs
            #{mfa() := integer()},               % A map from mfas to number of times called
            sets:set({mfa(), mfa()}),            % A map with the already done inlining for each function. This exists to prevent loops
-           [{mfa(), {mfa(), integer()}}]) ->    % A list with all calls and their numbers
+           [{mfa(), {mfa(), integer()}}],       % A list with all calls and their numbers
+           integer()) ->                        % The maximum module size
               #{mfa() := icode()}.              % A map with the new cfgs
 
-loop(IcodeMap, TotalCalls, CurrentInlines, CallMap) ->
+loop(FullIcodeMap, TotalCalls, CurrentInlines, CallMap, MaxSize) ->
   case pop_call_from_pq(CallMap) of
     none ->
-      IcodeMap;
+      FullIcodeMap;
     {Max, Rest} ->
       % io:format(standard_error, "Next: ~p~nRest: ~p~n", [Max, Rest]),
-      case check_inline_call(Max, IcodeMap, CurrentInlines) of
+      case check_inline_call(Max, FullIcodeMap, CurrentInlines, MaxSize) of
         {ok, NewIcodeMap} ->
           {{Caller, Callee}, _NumCalls} = Max,
           NewCurrentInlines =
             sets:add_element({Caller, Callee}, CurrentInlines),
           NewCallMap = update_call_pq(Max, Rest, TotalCalls),
-          loop(NewIcodeMap, TotalCalls, NewCurrentInlines, NewCallMap);
+          loop(NewIcodeMap, TotalCalls, NewCurrentInlines, NewCallMap, MaxSize);
         false ->
-          loop(IcodeMap, TotalCalls, CurrentInlines, Rest)
+          loop(FullIcodeMap, TotalCalls, CurrentInlines, Rest, MaxSize)
       end
     end.
 
 
-check_inline_call(Call, IcodeMap, CurrInl) ->
+check_inline_call(Call, FullIcodeMap, CurrInl, MaxSize) ->
   Conditions =
-    [fun has_been_inlined_already/3,
-     fun happens_enough_times/3],
-  case lists:all(fun id/1, [F(Call, IcodeMap, CurrInl) || F <- Conditions]) of
+    [has_been_inlined_already(Call, CurrInl),
+     happens_enough_times(Call),
+     wont_outgrow_max_size(Call, FullIcodeMap, MaxSize)],
+  case lists:all(fun id/1, Conditions) of
     true ->
-      inline_call(Call, IcodeMap);
+      % io:format(standard_error, "Cool GROW~n", []),
+      inline_call(Call, FullIcodeMap);
     false ->
       false
   end.
 
-has_been_inlined_already({{Caller, Callee}, _NumberCalls}, _IcodeMap, CurrentInlines) ->
+has_been_inlined_already({{Caller, Callee}, _NumberCalls}, CurrentInlines) ->
   not sets:is_element({Caller, Callee}, CurrentInlines).
 
-happens_enough_times({_, NumberCalls}, _IcodeMap, _CurrentInlines) ->
-  NumberCalls > 10.
+happens_enough_times({_, NumberCalls}) ->
+  NumberCalls > ?MINIMUM_CALLS_TO_INLINE.
 
-inline_call({{Caller, Callee}, _NumberCalls}, IcodeMap) ->
+%% IMPORTANT: This only estimates if its going to outgrow, that's why its a soft limit
+%% The estimate is expects only one call site to be inlined
+wont_outgrow_max_size({{_Caller, Callee}, _}, FullIcodeMap, MaxSize) ->
+  #{Callee := {_,CalleeSize}} = FullIcodeMap,
+  NewCurrSize = maps:fold(
+    fun(_, {_, MfaSize}, Size) ->
+      MfaSize + Size
+    end, CalleeSize, FullIcodeMap),
+  %% This just exists for debug purpose in order to check if it stops inline sometimes
+  % case NewCurrSize < MaxSize of
+  %   false -> io:format(standard_error, "NO OUTGROW~n", []);
+  %   _ -> ok
+  % end,
+  NewCurrSize < MaxSize.
+
+inline_call({{Caller, Callee}, _NumberCalls}, FullIcodeMap) ->
   % io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
-  #{Caller := CallerIcode} = IcodeMap,
-  #{Callee := CalleeIcode} = IcodeMap,
-  NewCallerIcode = make_inlines(CallerIcode, Callee, CalleeIcode),
-  NewIcodeMap = IcodeMap#{Caller := NewCallerIcode},
+  #{Caller := {CallerIcode, CallerSize}} = FullIcodeMap,
+  #{Callee := {CalleeIcode, CalleeSize}} = FullIcodeMap,
+  {NewCallerIcode, NumInlines} = make_inlines(CallerIcode, Callee, CalleeIcode),
+  NewIcodeMap = FullIcodeMap#{Caller :=
+        {NewCallerIcode, CallerSize + NumInlines * CalleeSize}},
   {ok, NewIcodeMap}.
 
 
-%% TODO: Make inline should become a fold function so that if more than
-%%       one inline of the same callee in the same caller happens,
-%%       it will have correct variables and labels
+
 %% TODO: Handle call continuations and fail labels
-%% TODO: Fill this stub by making the inline
 %% 1. Get the caller variable range
 %% 2. Map all the callee variables to caller variables with different names
 %% 3. Map all the callee labels to caller labels with new names
@@ -279,14 +306,15 @@ make_inlines(CallerIcode, _Callee, CalleeIcode) ->
   LabelOffset = MaxLabel + 1,
 
   CallerIcodeCode = hipe_icode:icode_code(CallerIcode),
-  {NewCallerIcodeCode, _FinalVarOffset, _FinalLabelOffset} = lists:foldr(fun(Ins, Acc) ->
+  {NewCallerIcodeCode, _FinalVarOffset, _FinalLabelOffset, NumInlines} =
+        lists:foldr(fun(Ins, Acc) ->
             check_make_inline(Ins, CalleeIcode, Acc) end,
-            {[], VarOffset, LabelOffset}, CallerIcodeCode),
+            {[], VarOffset, LabelOffset, 0}, CallerIcodeCode),
 
   NewCallerIcode = hipe_icode:icode_code_update(CallerIcode, NewCallerIcodeCode),
 
 
-  NewCallerIcode.
+  {NewCallerIcode, NumInlines}.
 
 %%
 %% Conditions
@@ -308,8 +336,7 @@ is_callee(Ins = #icode_enter{}, Callee) ->
 is_callee(_,_) ->
   false.
 
-%% TODO: Make this the same way I check for conditions above
-check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
+check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset, NumInl}) ->
   Callee = hipe_icode:icode_fun(CalleeIcode),
   Conds =
     [is_local(Ins),
@@ -321,14 +348,14 @@ check_make_inline(Ins, CalleeIcode, {Code, VarOffset, LabelOffset}) ->
         #icode_call{} ->
           {InlinedCallee, NewVarOffset, NewLabelOffset} =
             make_inline_call(Ins, CalleeIcode, VarOffset, LabelOffset),
-          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset};
+          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset, NumInl + 1};
         #icode_enter{} ->
           {InlinedCallee, NewVarOffset, NewLabelOffset} =
             make_inline_enter(Ins, CalleeIcode, VarOffset, LabelOffset),
-          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset}
+          {InlinedCallee ++ Code, NewVarOffset, NewLabelOffset, NumInl + 1}
       end;
     false ->
-      {[Ins|Code], VarOffset, LabelOffset}
+      {[Ins|Code], VarOffset, LabelOffset, NumInl}
   end.
 
 make_inline_call(IcodeCall, CalleeIcode, VarOffset, LabelOffset) ->
