@@ -104,6 +104,13 @@ filter_data(Data, _IcodeMap) ->
 %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%% This priority queue implementation is naive and 
+%% finds the maximum call by searching through all the calls everytime.
+
+%% It is a implemented with a map so that updates 
+%% when knowing the key are fast.
+
+%% However finding the maximum is slow.
 
 prepare_call_pq(Data) ->
   CallsList0 = [[{{Caller, Callee}, N} || {Callee, N} <- CalleeList]
@@ -184,31 +191,29 @@ compute_icode_sizes(IcodeMap) ->
 
 %% TODO: Implement the naive algorithm here
 process(Data, IcodeMap) ->
-
-  %% Create a list with all the call info
+  %% Create a priority queue with all the call info
   CallMap = prepare_call_pq(Data),
   % io:format(standard_error, "Initial Call Map: ~p~n", [CallMap]),
-  NewIcodeMap = loop(IcodeMap, CallMap),
-
+  NewIcodeMap = pre_loop(IcodeMap, CallMap),
   NewIcodeMap.
 
 
 
-loop(IcodeMap, CallMap) ->
-  %% This doesn't allow calls to the same function to be inlined
-  CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
-  % CurrentInlinesList = [],
-  CurrentInlines = sets:from_list(CurrentInlinesList),
+pre_loop(IcodeMap, CallMap) ->
+    %% This doesn't allow calls to the same function to be inlined
+    CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
+    %% CurrentInlinesList = [],
+    CurrentInlines = sets:from_list(CurrentInlinesList),
 
-  TotalCalls = total_calls(IcodeMap, CallMap),
+    TotalCalls = total_calls(IcodeMap, CallMap),
 
-  {FullIcodeMap, InitialModuleSize} = compute_icode_sizes(IcodeMap),
-  MaxModuleSize = maximum_size(InitialModuleSize),
-  % io:format(standard_error, "InitSize: ~p~nMaxModuleSize: ~p~n", [InitialModuleSize, MaxModuleSize]),
-  NewFullIcodeMap = loop(FullIcodeMap, TotalCalls, CurrentInlines,
-                         CallMap, MaxModuleSize),
+    {FullIcodeMap, InitialModuleSize} = compute_icode_sizes(IcodeMap),
+    MaxModuleSize = maximum_size(InitialModuleSize),
+    %% io:format(standard_error, "InitSize: ~p~nMaxModuleSize: ~p~n", [InitialModuleSize, MaxModuleSize]),
+    NewFullIcodeMap = loop(FullIcodeMap, TotalCalls, CurrentInlines,
+                           CallMap, MaxModuleSize),
 
-  maps:map(fun(_,{Icode,_Size}) -> Icode end, NewFullIcodeMap).
+    maps:map(fun(_,{Icode,_Size}) -> Icode end, NewFullIcodeMap).
 
 
 %% TODO: Fix wrong spec
@@ -223,14 +228,14 @@ loop(FullIcodeMap, TotalCalls, CurrentInlines, CallMap, MaxSize) ->
   case pop_call_from_pq(CallMap) of
     none ->
       FullIcodeMap;
-    {Max, Rest} ->
+    {PriorityCall, Rest} ->
       % io:format(standard_error, "Next: ~p~nRest: ~p~n", [Max, Rest]),
-      case check_inline_call(Max, FullIcodeMap, CurrentInlines, MaxSize) of
+      case check_inline_call(PriorityCall, FullIcodeMap, CurrentInlines, MaxSize) of
         {ok, NewIcodeMap} ->
-          {{Caller, Callee}, _NumCalls} = Max,
+          {{Caller, Callee}, _NumCalls} = PriorityCall,
           NewCurrentInlines =
             sets:add_element({Caller, Callee}, CurrentInlines),
-          NewCallMap = update_call_pq(Max, Rest, TotalCalls),
+          NewCallMap = update_call_pq(PriorityCall, Rest, TotalCalls),
           loop(NewIcodeMap, TotalCalls, NewCurrentInlines, NewCallMap, MaxSize);
         false ->
           loop(FullIcodeMap, TotalCalls, CurrentInlines, Rest, MaxSize)
@@ -273,7 +278,7 @@ wont_outgrow_max_size({{_Caller, Callee}, _}, FullIcodeMap, MaxSize) ->
   NewCurrSize < MaxSize.
 
 inline_call({{Caller, Callee}, _NumberCalls}, FullIcodeMap) ->
-  % io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
+  %% io:format("Caller: ~p~nCallee: ~p~n", [Caller, Callee]),
   #{Caller := {CallerIcode, CallerSize}} = FullIcodeMap,
   #{Callee := {CalleeIcode, CalleeSize}} = FullIcodeMap,
   {NewCallerIcode, NumInlines} = make_inlines(CallerIcode, Callee, CalleeIcode),
@@ -508,11 +513,24 @@ subst_vars(Instr, VarOffset) ->
   Substitutions = lists:zip(OldVars, NewVars),
   hipe_icode:subst(Substitutions, Instr).
 
-subst_var(OldVar, VarOffset) ->
-  OldName = hipe_icode:var_name(OldVar),
-  NewName = OldName + VarOffset,
-  hipe_icode:mk_var(NewName).
-
+subst_var(OldVar, VarOffset)->
+  case hipe_icode:is_var(OldVar) of
+      true-> 
+          OldName = hipe_icode:var_name(OldVar),
+          NewName = OldName + VarOffset,
+          hipe_icode:mk_var(NewName);
+      false ->
+          case hipe_icode:is_fvar(OldVar) of
+              true ->
+                  OldName = hipe_icode:fvar_name(OldVar),
+                  NewName = OldName + VarOffset,
+                  hipe_icode:mk_fvar(NewName);
+              false ->
+                  OldName = hipe_icode:reg_name(OldVar),
+                  NewName = OldName + VarOffset,
+                  hipe_icode:mk_reg(NewName)
+          end
+  end.
 
 
 
