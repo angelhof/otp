@@ -276,6 +276,8 @@ evaluate_call_or_enter([Argument], Fun) ->
       hipe_icode:mk_const(list_to_tuple([Argument]));
     unsafe_untag_float ->
       hipe_icode:mk_const(float(Argument));
+    unsafe_tag_float ->
+      hipe_icode:mk_const(float(Argument));
     conv_to_float ->
       hipe_icode:mk_const(float(Argument));
     fnegate ->
