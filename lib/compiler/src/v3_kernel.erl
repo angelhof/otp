@@ -1477,6 +1477,7 @@ match_pre(Cs, Sub0, St) ->
 match([_U|_Us] = L, Cs, Def, St0) ->
     %%ok = io:format("match ~p~n", [Cs]),
     Pcss = partition(Cs),
+    %% ok = io:format("match: ~p~npartitioned: ~p~n", [Cs, Pcss]),
     foldr(fun (Pcs, {D,St}) -> match_varcon(L, Pcs, D, St) end,
 	  {Def,St0}, Pcss);
 match([], Cs, Def, St) ->
@@ -1601,7 +1602,7 @@ match_con_1([U|_Us] = L, Cs, Def, St0) ->
     %% Extract clauses for different constructors (types).
     %%ok = io:format("match_con ~p~n", [Cs]),
     Ttcs = select_types([k_binary], Cs) ++ select_bin_con(Cs) ++
-	select_types([k_cons,k_tuple,k_map,k_atom,k_float,k_int,
+	select_types([k_tuple,k_map,k_atom,k_cons,k_float,k_int,
 		      k_nil,k_literal], Cs),
     %%ok = io:format("ttcs = ~p~n", [Ttcs]),
     {Scs,St1} =

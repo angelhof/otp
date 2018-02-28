@@ -695,6 +695,7 @@ core_passes() ->
         {core_fold_after_inlining,fun test_any_inliner/1,
          fun core_fold_module_after_inlining/2},
 	?pass(core_transforms)]},
+       {pass,case_clause_reorder},
        {iff,dcopt,{listing,"copt"}},
        {iff,'to_core',{done,"core"}}]}
      | kernel_passes()].
@@ -1453,7 +1454,8 @@ native_compile_1(Code, St) ->
 		     Code,
 		     Opts) of
 	{ok,{_Type,Bin}=T} when is_binary(Bin) ->
-	    {ok,embed_native_code(Code, T),St};
+            binary_size_collector ! {St#compile.module, size(Bin)},
+            {ok,embed_native_code(Code, T),St};
 	{error,R} ->
 	    case IgnoreErrors of
 		true ->

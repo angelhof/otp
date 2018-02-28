@@ -47,12 +47,14 @@
 		 name,			% name :: Tree,
 		 args}).		% args :: [Tree]
 
--record(c_case, {anno=[], arg,		% arg :: Tree,
+-record(c_case, {anno=[], id,           % id :: non_neg_integer(),
+                 arg,		        % arg :: Tree,
 		 clauses}).		% clauses :: [Tree]
 
 -record(c_catch, {anno=[], body}).	% body :: Tree
 
--record(c_clause, {anno=[], pats,	% pats :: [Tree],
+-record(c_clause, {anno=[], id,         % id :: {non_neg_integer(), non_neg_integer()}  
+                   pats,	        % pats :: [Tree],
 		   guard,		% guard :: Tree,
 		   body}).		% body :: Tree
 

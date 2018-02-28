@@ -70,12 +70,14 @@ MODULES =  \
 	beam_utils \
 	beam_validator \
         beam_z \
+	case_clause_reorder \
 	cerl \
 	cerl_clauses \
 	cerl_inline \
 	cerl_sets \
 	cerl_trees \
 	compile \
+	core_case_analysis \
 	core_lib \
 	core_lint \
 	core_parse \

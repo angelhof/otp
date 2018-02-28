@@ -177,7 +177,7 @@ process_chunks(F) ->
 	{ok,{Module,
 	     [{atoms,AtomsList},{"Code",CodeBin},{"StrT",StrBin},
 	      {indexed_imports,ImportsList},{labeled_exports,Exports}]}} ->
-	    Atoms = mk_atoms(AtomsList),
+            Atoms = mk_atoms(AtomsList),
 	    LambdaBin = optional_chunk(F, "FunT"),
 	    Lambdas = beam_disasm_lambdas(LambdaBin, Atoms),
 	    LiteralBin = optional_chunk(F, "LitT"),

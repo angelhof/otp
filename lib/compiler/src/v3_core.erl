@@ -135,14 +135,16 @@
 
 -type warning() :: {file:filename(), [{integer(), module(), term()}]}.
 
--record(core, {vcount=0 :: non_neg_integer(),	%Variable counter
-	       fcount=0 :: non_neg_integer(),	%Function counter
-	       function={none,0} :: fa(),	%Current function.
-	       in_guard=false :: boolean(),	%In guard or not.
-	       wanted=true :: boolean(),	%Result wanted or not.
-	       opts     :: [compile:option()],	%Options.
-	       ws=[]    :: [warning()],		%Warnings.
-               file=[{file,""}]			%File.
+-record(core, {vcount=0 :: non_neg_integer(),	 %Variable counter
+	       fcount=0 :: non_neg_integer(),	  %Function counter
+               clause_count={0,0} :: {non_neg_integer(),
+                                      non_neg_integer()}, %Clause counter
+	       function={none,0} :: fa(),	 %Current function.
+	       in_guard=false :: boolean(),	 %In guard or not.
+	       wanted=true :: boolean(),	 %Result wanted or not.
+	       opts     :: [compile:option()],	 %Options.
+	       ws=[]    :: [warning()],		 %Warnings.
+               file=[{file,""}]			 %File.
 	      }).
 
 %% XXX: The following type declarations do not belong in this module
@@ -2009,6 +2011,22 @@ new_vars_1(N, Anno, St0, Vs) when N > 0 ->
     new_vars_1(N-1, Anno, St1, [V|Vs]);
 new_vars_1(0, _, St, Vs) -> {Vs,St}.
 
+%% new_case(State) -> {Id, State}.
+%% Makes new case ids
+
+new_case(#core{clause_count={Case, _Clause}} = St0) ->
+    NewCount = {Case + 1, 0},
+    St1 = St0#core{clause_count=NewCount},
+    {cerl:abstract(Case + 1), St1}.
+
+%% new_clause(State) -> {Id, State}.
+%% Makes new clause ids
+
+new_clause(#core{clause_count={Case, Clause}} = St0) ->
+    NewCount = {Case, Clause + 1},
+    St1 = St0#core{clause_count=NewCount},
+    {cerl:abstract(Clause + 1), St1}.
+
 function_clause(Ps, LineAnno, Name) ->
     FcAnno = [{function_name,Name}|LineAnno],
     fail_clause(Ps, FcAnno,
@@ -2390,7 +2408,8 @@ cbody(B0, St0) ->
 cclause(#iclause{anno=#a{anno=Anno},pats=Ps,guard=G0,body=B0}, Exp, St0) ->
     {B1,_Us1,St1} = cexprs(B0, Exp, St0),
     {G1,St2} = cguard(G0, St1),
-    {#c_clause{anno=Anno,pats=Ps,guard=G1,body=B1},St2}.
+    {ClauseId, St3} = new_clause(St2),
+    {#c_clause{anno=Anno,id=ClauseId,pats=Ps,guard=G1,body=B1},St3}.
 
 cclauses(Lcs, Es, St0) ->
     mapfoldl(fun (Lc, St) -> cclause(Lc, Es, St) end, St0, Lcs).
@@ -2456,9 +2475,11 @@ cexpr(#icase{anno=A,args=Largs,clauses=Lcs,fc=Lfc}, As, St0) ->
 			end, {[],St0}, Largs),
     {Ccs,St2} = cclauses(Lcs, Exp, St1),
     {Cfc,St3} = cclause(Lfc, [], St2),		%Never exports
+    {CaseId, St4} = new_case(St3),
     {#c_case{anno=A#a.anno,
+             id=CaseId,
 	     arg=core_lib:make_values(Cargs),clauses=Ccs ++ [Cfc]},
-     Exp,A#a.us,St3};
+     Exp,A#a.us,St4};
 cexpr(#ireceive1{anno=A,clauses=Lcs}, As, St0) ->
     Exp = intersection(A#a.ns, As),		%Exports
     {Ccs,St1} = cclauses(Lcs, Exp, St0),
@@ -2529,12 +2550,13 @@ cexpr(#isimple{anno=#a{us=Vs},term=Simple}, _As, St) ->
 cfun(#ifun{anno=A,id=Id,vars=Args,clauses=Lcs,fc=Lfc}, _As, St0) ->
     {Ccs,St1} = cclauses(Lcs, [], St0),     %NEVER export!
     {Cfc,St2} = cclause(Lfc, [], St1),
+    {CaseId,St3} = new_case(St2),
     Anno = A#a.anno,
     {#c_fun{anno=Id++Anno,vars=Args,
-            body=#c_case{anno=Anno,
+            body=#c_case{anno=Anno,id=CaseId,
                          arg=set_anno(core_lib:make_values(Args), Anno),
                          clauses=Ccs ++ [Cfc]}},
-     [],A#a.us,St2}.
+     [],A#a.us,St3}.
 
 %% lit_vars(Literal) -> [Var].
 

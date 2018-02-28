@@ -58,9 +58,9 @@
 
 -export([abstract/1, add_ann/2, alias_pat/1, alias_var/1,
 	 ann_abstract/2, ann_c_alias/3, ann_c_apply/3, ann_c_atom/2,
-	 ann_c_call/4, ann_c_case/3, ann_c_catch/2, ann_c_char/2,
-	 ann_c_clause/3, ann_c_clause/4, ann_c_cons/3, ann_c_float/2,
-	 ann_c_fname/3, ann_c_fun/3, ann_c_int/2, ann_c_let/4,
+	 ann_c_call/4, ann_c_case/3, ann_c_case/4, ann_c_catch/2, ann_c_char/2,
+	 ann_c_clause/3, ann_c_clause/4, ann_c_clause/5, ann_c_cons/3, 
+         ann_c_float/2, ann_c_fname/3, ann_c_fun/3, ann_c_int/2, ann_c_let/4,
 	 ann_c_letrec/3, ann_c_module/4, ann_c_module/5, ann_c_nil/1,
 	 ann_c_cons_skel/3, ann_c_tuple_skel/2, ann_c_primop/3,
 	 ann_c_receive/2, ann_c_receive/4, ann_c_seq/3, ann_c_string/2,
@@ -68,9 +68,9 @@
 	 ann_make_data/3, ann_make_list/2, ann_make_list/3,
 	 ann_make_data_skel/3, ann_make_tree/3, apply_args/1,
 	 apply_arity/1, apply_op/1, atom_lit/1, atom_name/1, atom_val/1,
-	 c_alias/2, c_apply/2, c_atom/1, c_call/3, c_case/2, c_catch/1,
-	 c_char/1, c_clause/2, c_clause/3, c_cons/2, c_float/1,
-	 c_fname/2, c_fun/2, c_int/1, c_let/3, c_letrec/2, c_module/3,
+	 c_alias/2, c_apply/2, c_atom/1, c_call/3, c_case/2, c_case/3, 
+         c_catch/1, c_char/1, c_clause/2, c_clause/3, c_clause/4, c_cons/2, 
+         c_float/1, c_fname/2, c_fun/2, c_int/1, c_let/3, c_letrec/2, c_module/3,
 	 c_module/4, c_nil/0, c_cons_skel/2, c_tuple_skel/1, c_primop/2,
 	 c_receive/1, c_receive/3, c_seq/2, c_string/1, c_try/5,
 	 c_tuple/1, c_values/1, c_var/1, call_args/1, call_arity/1,
@@ -2844,6 +2844,10 @@ letrec_vars(Node) ->
 c_case(Expr, Clauses) ->
     #c_case{arg = Expr, clauses = Clauses}.
 
+-spec c_case(non_neg_integer(), cerl(), [cerl()]) -> c_case().
+
+c_case(Id, Expr, Clauses) ->
+    #c_case{id = Id, arg = Expr, clauses = Clauses}.
 
 %% @spec ann_c_case(As::[term()], Argument::cerl(),
 %%                  Clauses::[cerl()]) -> cerl()
@@ -2854,6 +2858,10 @@ c_case(Expr, Clauses) ->
 ann_c_case(As, Expr, Clauses) ->
     #c_case{arg = Expr, clauses = Clauses, anno = As}.
 
+-spec ann_c_case(non_neg_integer(), [term()], cerl(), [cerl()]) -> c_case().
+
+ann_c_case(Id, As, Expr, Clauses) ->
+    #c_case{id = Id, arg = Expr, clauses = Clauses, anno = As}.
 
 %% @spec update_c_case(Old::cerl(), Argument::cerl(),
 %%                     Clauses::[cerl()]) -> cerl()
@@ -2862,7 +2870,7 @@ ann_c_case(As, Expr, Clauses) ->
 -spec update_c_case(c_case(), cerl(), [cerl()]) -> c_case().
 
 update_c_case(Node, Expr, Clauses) ->
-    #c_case{arg = Expr, clauses = Clauses, anno = get_ann(Node)}.
+    Node#c_case{arg = Expr, clauses = Clauses}.
 
 
 %% is_c_case(Node) -> boolean()
@@ -2923,6 +2931,11 @@ case_clauses(Node) ->
 case_arity(Node) ->
     clause_arity(hd(case_clauses(Node))).
 
+-spec case_id(c_case()) -> [non_neg_integer()].
+
+case_id(Node) ->
+    Node#c_case.id.
+
 
 %% ---------------------------------------------------------------------
 
@@ -2961,6 +2974,11 @@ c_clause(Patterns, Body) ->
 c_clause(Patterns, Guard, Body) ->
     #c_clause{pats = Patterns, guard = Guard, body = Body}.
 
+-spec c_clause(non_neg_integer(), [cerl()], cerl(), cerl()) -> c_clause().
+
+c_clause(Id, Patterns, Guard, Body) ->
+    #c_clause{id = Id, pats = Patterns, guard = Guard, body = Body}.
+
 
 %% @spec ann_c_clause(As::[term()], Patterns::[cerl()],
 %%                    Body::cerl()) -> cerl()
@@ -2983,6 +3001,10 @@ ann_c_clause(As, Patterns, Body) ->
 ann_c_clause(As, Patterns, Guard, Body) ->
     #c_clause{pats = Patterns, guard = Guard, body = Body, anno = As}.
 
+-spec ann_c_clause(non_neg_integer(), [term()], [cerl()], cerl(), cerl()) -> c_clause().
+
+ann_c_clause(Id, As, Patterns, Guard, Body) ->
+    #c_clause{id = Id, pats = Patterns, guard = Guard, body = Body, anno = As}.
 
 %% @spec update_c_clause(Old::cerl(), Patterns::[cerl()],
 %%                       Guard::cerl(), Body::cerl()) -> cerl()
@@ -2991,8 +3013,7 @@ ann_c_clause(As, Patterns, Guard, Body) ->
 -spec update_c_clause(c_clause(), [cerl()], cerl(), cerl()) -> c_clause().
 
 update_c_clause(Node, Patterns, Guard, Body) ->
-    #c_clause{pats = Patterns, guard = Guard, body = Body,
-	      anno = get_ann(Node)}.
+    Node#c_clause{pats = Patterns, guard = Guard, body = Body}.
 
 
 %% @spec is_c_clause(Node::cerl()) -> boolean()
@@ -3077,6 +3098,10 @@ clause_arity(Node) ->
 clause_vars(Clause) ->
     pat_list_vars(clause_pats(Clause)).
 
+-spec clause_id(c_case()) -> [non_neg_integer()].
+
+clause_id(Node) ->
+    Node#c_clause.id.
 
 %% @spec pat_vars(Pattern::cerl()) -> [cerl()]
 %%
@@ -4199,10 +4224,10 @@ subtrees(T) ->
 		primop ->
 		    [[primop_name(T)], primop_args(T)];
 		'case' ->
-		    [[case_arg(T)], case_clauses(T)];
+		    [[case_arg(T)], case_clauses(T), [case_id(T)]];
 		clause ->
 		    [clause_pats(T), [clause_guard(T)],
-		     [clause_body(T)]];
+		     [clause_body(T)], [clause_id(T)]];
 		alias ->
 		    [[alias_var(T)], [alias_pat(T)]];
 		'fun' ->
@@ -4316,8 +4341,8 @@ ann_make_tree(As, seq, [[A], [B]]) -> ann_c_seq(As, A, B);
 ann_make_tree(As, apply, [[Op], Es]) -> ann_c_apply(As, Op, Es);
 ann_make_tree(As, call, [[M], [N], Es]) -> ann_c_call(As, M, N, Es);
 ann_make_tree(As, primop, [[N], Es]) -> ann_c_primop(As, N, Es);
-ann_make_tree(As, 'case', [[A], Cs]) -> ann_c_case(As, A, Cs);
-ann_make_tree(As, clause, [Ps, [G], [B]]) -> ann_c_clause(As, Ps, G, B);
+ann_make_tree(As, 'case', [[A], Cs, [Id]]) -> ann_c_case(Id, As, A, Cs);
+ann_make_tree(As, clause, [Ps, [G], [B], [Id]]) -> ann_c_clause(Id, As, Ps, G, B);
 ann_make_tree(As, alias, [[V], [P]]) -> ann_c_alias(As, V, P);
 ann_make_tree(As, 'fun', [Vs, [B]]) -> ann_c_fun(As, Vs, B);
 ann_make_tree(As, 'receive', [Cs, [T], [A]]) ->
