@@ -1,6 +1,8 @@
 -module(core_case_analysis).
 
--export([extract_core_cases/1]).
+-export([clear_tree_annos/1,
+         extract_core_cases/1,
+         match_arg_clause/2]).
 
 -include("core_parse.hrl").
 
@@ -10,7 +12,7 @@
 %%% times each clause is satisfied during execution.
 %%%
 
--spec extract_core_cases(#c_module{}) -> any().
+-spec extract_core_cases(#c_module{}) -> [{mfa(), [{non_neg_integer(), [fun()]}]}].
 extract_core_cases(Tree) ->
     CleanTree = clear_tree_annos(Tree), 
     extract_core_cases0(CleanTree).
@@ -58,26 +60,27 @@ extract_fun_case(#c_fun{vars = Vars, body = Body}) ->
 get_case_conditions(no_case) ->
     [];
 get_case_conditions(#c_case{arg = Arg, clauses = Clauses}) ->
-    [match_arg_clause(Arg, Clause) || Clause <- Clauses].
+    [match_arg_clause(Arg, Clause) ++ 
+         guard_matches(Clause) || Clause <- Clauses].
 
 
+-spec match_arg_clause(cerl:cerl(), #c_clause{}) -> [{'match', cerl:cerl(), cerl:cerl()}].
 %% WARNING: I still don't care about all guards
-match_arg_clause(#c_values{es = Args}, #c_clause{pats = Patterns, guard = Guard}) ->
-    Constraints = guard_to_constraint_tree(Guard),
-    FlatConstraints = flatten_constrain_tree(Constraints),
-    %% io:format("Guard: ~p~n", [FlatConstraints]),
-    FlatConstraints ++
-	lists:zipwith(
-	  fun(X, Y) ->
-		  {match, X, Y}
-	  end, Args, Patterns);
-match_arg_clause(#c_var{} = Arg, #c_clause{pats = [Pattern], guard = Guard}) ->
-    Constraints = guard_to_constraint_tree(Guard),
-    FlatConstraints = flatten_constrain_tree(Constraints),
-    %% io:format("Guard: ~p~n", [FlatConstraints]),
-    FlatConstraints ++ [{match, Arg, Pattern}];
+match_arg_clause(#c_values{es = Args}, #c_clause{pats = Patterns}) ->
+    lists:zipwith(
+      fun(X, Y) ->
+              {match, X, Y}
+      end, Args, Patterns);
+match_arg_clause(#c_var{} = Arg, #c_clause{pats = [Pattern]}) ->
+    [{match, Arg, Pattern}];
 match_arg_clause(_Arg, _Clause) ->
     [].
+
+guard_matches(#c_clause{guard = Guard}) ->
+    Constraints = guard_to_constraint_tree(Guard),
+    FlatConstraints = flatten_constrain_tree(Constraints),
+    %% io:format("Guard: ~p~n", [FlatConstraints]),
+    FlatConstraints.
 
 %%
 %% The following functions perform a 'unification' type algorithm.
@@ -371,6 +374,7 @@ flatten_constrain_tree(_) ->
 %% This is just used to remove all annotations from a cerl tree for debugging purposes
 %%
 
+-spec clear_tree_annos(cerl:cerl()) -> cerl:cerl().
 clear_tree_annos(Tree) ->
     postorder(
       fun(Node) ->

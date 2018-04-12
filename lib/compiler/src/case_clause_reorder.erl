@@ -29,7 +29,7 @@ reorder_function_cases({FName, Fun}, MLit, ReorderMap) ->
                 Fun;
             ReorderList ->
                 %% io:format("MFA: ~p~n", [{M, F, A}]),
-                %% io:format("Fun: ~p~n", [Fun]),
+                io:format("Fun: ~p~n", [core_case_analysis:clear_tree_annos(Fun)]),
                 reorder_cases(Fun, ReorderList)
         end,
     {FName, NewFun}.
@@ -40,8 +40,9 @@ reorder_cases(Fun, ReorderList) ->
 	      reorder_case(Node, ReorderList) 
       end, Fun).
 
-reorder_case(#c_case{id=Id, clauses=Cs} = Case, ReorderList) ->
+reorder_case(#c_case{id=Id, arg=Arg, clauses=Cs} = Case, ReorderList) ->
     CId = cerl:concrete(Id),
+    _Matches = clauses_matches(Arg, Cs),
     case lists:keyfind(CId, 1, ReorderList) of
         {CId, ClauseList} ->
             NewClauses = reorder_clauses(Cs, CId, ClauseList),
@@ -64,8 +65,23 @@ reorder_clauses(Cs, _Id, CsList) ->
     NewCs.
     
 
-%% negate_guard(
+clauses_matches(Arg, Clauses) ->
+    Matches = [core_case_analysis:match_arg_clause(Arg,C) || C <- Clauses], 
+    io:format("Matches: ~p~n", [Matches]),
 
+    {Lets, TempVars} = lists:foldl(fun match_codegen/2, {cerl:abstract(true), []}, Matches),
+    io:format("Lets: ~p~nTempVars: ~p~n", [Lets, TempVars]).
+    
+match_codegen({match, _V1, _V2}, {_Lets, _TempVars}) ->
+    undefined.
+    %% NewTemp = make_new_var(TempVars),
+    %% TODO: Create a let with an equality in the arg and the previous lets in the body
+
+%% %% WARNING: VERY BAD WAY OF GENERATING VARIABLES
+%% %% -- VERY INEFFICIENT
+%% %% -- IT MIGHT CREATE NAME CLASHES
+%% make_new_var(TempVars) ->
+    
 
 postorder(F, Tree) ->
     F(case cerl:subtrees(Tree) of
