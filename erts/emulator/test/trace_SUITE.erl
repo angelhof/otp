@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,7 +24,8 @@
 %%% Tests the trace BIF.
 %%%
 
--export([all/0, suite/0, link_receive_call_correlation/0,
+-export([all/0, suite/0, init_per_testcase/2, end_per_testcase/2,
+         link_receive_call_correlation/0,
          receive_trace/1, link_receive_call_correlation/1, self_send/1,
 	 timeout_trace/1, send_trace/1,
 	 procs_trace/1, dist_procs_trace/1, procs_new_trace/1,
@@ -37,7 +38,7 @@
 	 system_monitor_long_gc_1/1, system_monitor_long_gc_2/1, 
 	 system_monitor_large_heap_1/1, system_monitor_large_heap_2/1,
 	 system_monitor_long_schedule/1,
-	 bad_flag/1, trace_delivered/1]).
+	 bad_flag/1, trace_delivered/1, trap_exit_self_receive/1]).
 
 -include_lib("common_test/include/ct.hrl").
 
@@ -46,7 +47,7 @@
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
-     {timetrap, {seconds, 5}}].
+     {timetrap, {minutes, 1}}].
 
 all() -> 
     [cpu_timestamp, receive_trace, link_receive_call_correlation,
@@ -60,8 +61,17 @@ all() ->
      more_system_monitor_args, system_monitor_long_gc_1,
      system_monitor_long_gc_2, system_monitor_large_heap_1,
      system_monitor_long_schedule,
-     system_monitor_large_heap_2, bad_flag, trace_delivered].
+     system_monitor_large_heap_2, bad_flag, trace_delivered,
+     trap_exit_self_receive].
 
+init_per_testcase(_Case, Config) ->
+    [{receiver,spawn(fun receiver/0)}|Config].
+
+end_per_testcase(_Case, Config) ->
+    Receiver = proplists:get_value(receiver, Config),
+    unlink(Receiver),
+    exit(Receiver, die),
+    ok.
 
 %% No longer testing anything, just reporting whether cpu_timestamp
 %% is enabled or not.
@@ -83,7 +93,7 @@ cpu_timestamp(Config) when is_list(Config) ->
 %% Tests that trace(Pid, How, ['receive']) works.
 
 receive_trace(Config) when is_list(Config) ->
-    Receiver = fun_spawn(fun receiver/0),
+    Receiver = proplists:get_value(receiver, Config),
 
     %% Trace the process; make sure that we receive the trace messages.
     1 = erlang:trace(Receiver, true, ['receive']),
@@ -184,10 +194,10 @@ receive_trace(Config) when is_list(Config) ->
     {'EXIT', Intruder, {badarg, _}} = receive_first(),
 
     %% Untrace the process; we should not receive anything.
-    ?line 1 = erlang:trace(Receiver, false, ['receive']),
-    ?line Receiver ! {hello, there},
-    ?line Receiver ! any_garbage,
-    ?line receive_nothing(),
+    1 = erlang:trace(Receiver, false, ['receive']),
+    Receiver ! {hello, there},
+    Receiver ! any_garbage,
+    receive_nothing(),
 
     %% Verify restrictions in matchspec for 'receive'
     F3 = fun (Pat) -> {'EXIT', {badarg,_}} = (catch erlang:trace_pattern('receive', Pat, [])) end,
@@ -225,7 +235,7 @@ link_receive_call_correlation(Config) when is_list(Config) ->
     1 = erlang:trace(Receiver, true, ['receive', procs, call, timestamp, scheduler_id]),
     1 = erlang:trace_pattern({?MODULE, receive_msg, '_'}, [], [local]),
 
-    Num = 100000,
+    Num = 100,
 
     (fun F(0) -> [];
          F(N) ->
@@ -245,7 +255,7 @@ link_receive_call_correlation(Config) when is_list(Config) ->
 
     Msgs = (fun F() -> receive M -> [M | F()] after 1 -> [] end end)(),
 
-    case check_consistent(Receiver, Num, Num, Num, Msgs) of
+    case check_consistent(Receiver, Num, Num, Num, Msgs, false, undefined) of
         ok ->
             ok;
         {error, Reason} ->
@@ -255,20 +265,63 @@ link_receive_call_correlation(Config) when is_list(Config) ->
 
 -define(schedid, , _).
 
-check_consistent(_Pid, Recv, Call, _LU, [Msg | _]) when Recv > Call ->
+check_consistent(_Pid, Recv, Call, _LU, [Msg | _], _Received, _LinkedN) when Recv > Call ->
     {error, Msg};
-check_consistent(Pid, Recv, Call, LU, [Msg | Msgs]) ->
+check_consistent(Pid, Recv, Call, LU, [Msg | Msgs], false, undefined) ->
 
     case Msg of
         {trace, Pid, 'receive', Recv ?schedid} ->
-            check_consistent(Pid,Recv - 1, Call, LU, Msgs);
+            check_consistent(Pid,Recv - 1, Call, LU, Msgs, true, undefined);
         {trace_ts, Pid, 'receive', Recv ?schedid, _} ->
-            check_consistent(Pid,Recv - 1, Call, LU, Msgs);
+            check_consistent(Pid,Recv - 1, Call, LU, Msgs, true, undefined);
 
         {trace, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid} ->
-            check_consistent(Pid,Recv, Call - 1, LU, Msgs);
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, false, undefined);
         {trace_ts, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid, _} ->
-            check_consistent(Pid,Recv, Call - 1, LU, Msgs);
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, false, undefined);
+
+        {trace, Pid, _, _Self ?schedid} ->
+            check_consistent(Pid, Recv, Call, LU, Msgs, false, undefined);
+        {trace_ts, Pid, _, _Self ?schedid, _} ->
+            check_consistent(Pid, Recv, Call, LU, Msgs, false, undefined);
+
+        Msg ->
+            {error, Msg}
+    end;
+check_consistent(Pid, Recv, Call, LU, [Msg | Msgs], true, undefined) ->
+
+    case Msg of
+        {trace, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid} ->
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, true, undefined);
+        {trace_ts, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid, _} ->
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, true, undefined);
+
+        {trace, Pid, getting_linked, _Self ?schedid} ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, Recv rem 2);
+        {trace_ts, Pid, getting_linked, _Self ?schedid, _} ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, Recv rem 2);
+
+        {trace, Pid, getting_unlinked, _Self ?schedid} ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, (Recv+1) rem 2);
+        {trace_ts, Pid, getting_unlinked, _Self ?schedid, _} ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, (Recv+1) rem 2);
+
+        Msg ->
+            {error, Msg}
+    end;
+check_consistent(Pid, Recv, Call, LU, [Msg | Msgs], true, LinkedN) ->
+    UnlinkedN = (LinkedN + 1) rem 2,
+
+    case Msg of
+        {trace, Pid, 'receive', Recv ?schedid} when Recv == LU ->
+            check_consistent(Pid,Recv - 1, Call, LU, Msgs, true, LinkedN);
+        {trace_ts, Pid, 'receive', Recv ?schedid, _} when Recv == LU ->
+            check_consistent(Pid,Recv - 1, Call, LU, Msgs, true, LinkedN);
+
+        {trace, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid} ->
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, true, LinkedN);
+        {trace_ts, Pid, call, {?MODULE, receive_msg, [Call]} ?schedid, _} ->
+            check_consistent(Pid,Recv, Call - 1, LU, Msgs, true, LinkedN);
 
         %% We check that for each receive we have gotten a
         %% getting_linked or getting_unlinked message. Also
@@ -276,38 +329,38 @@ check_consistent(Pid, Recv, Call, LU, [Msg | Msgs]) ->
         %% message we expect to receive is an even number
         %% and odd number for getting_unlinked.
         {trace, Pid, getting_linked, _Self ?schedid}
-          when Recv rem 2 == 0, Recv == LU ->
-            check_consistent(Pid, Recv, Call, LU - 1, Msgs);
+          when Recv rem 2 == LinkedN ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, LinkedN);
         {trace_ts, Pid, getting_linked, _Self ?schedid, _}
-          when Recv rem 2 == 0, Recv == LU ->
-            check_consistent(Pid, Recv, Call, LU - 1, Msgs);
+          when Recv rem 2 == LinkedN ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, LinkedN);
 
         {trace, Pid, getting_unlinked, _Self ?schedid}
-          when Recv rem 2 == 1, Recv == LU ->
-            check_consistent(Pid, Recv, Call, LU - 1, Msgs);
+          when Recv rem 2 == UnlinkedN ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, LinkedN);
         {trace_ts, Pid, getting_unlinked, _Self ?schedid, _}
-          when Recv rem 2 == 1, Recv == LU ->
-            check_consistent(Pid, Recv, Call, LU - 1, Msgs);
+          when Recv rem 2 == UnlinkedN ->
+            check_consistent(Pid, Recv, Call, LU - 1, Msgs, true, LinkedN);
 
         {trace,Pid,'receive',Ignore ?schedid}
           when Ignore == stop; Ignore == timeout ->
-            check_consistent(Pid, Recv, Call, LU, Msgs);
+            check_consistent(Pid, Recv, Call, LU, Msgs, true, LinkedN);
         {trace_ts,Pid,'receive',Ignore ?schedid,_}
           when Ignore == stop; Ignore == timeout ->
-            check_consistent(Pid, Recv, Call, LU, Msgs);
+            check_consistent(Pid, Recv, Call, LU, Msgs, true, LinkedN);
 
         {trace, Pid, exit, normal ?schedid} ->
-            check_consistent(Pid, Recv, Call, LU, Msgs);
+            check_consistent(Pid, Recv, Call, LU, Msgs, true, LinkedN);
         {trace_ts, Pid, exit, normal  ?schedid, _} ->
-            check_consistent(Pid, Recv, Call, LU, Msgs);
+            check_consistent(Pid, Recv, Call, LU, Msgs, true, LinkedN);
         {'EXIT', Pid, normal} ->
-            check_consistent(Pid, Recv, Call, LU, Msgs);
+            check_consistent(Pid, Recv, Call, LU, Msgs, true, LinkedN);
         Msg ->
             {error, Msg}
     end;
-check_consistent(_, 0, 0, 0, []) ->
+check_consistent(_, 0, 0, 1, [], true, _) ->
     ok;
-check_consistent(_, Recv, Call, LU, []) ->
+check_consistent(_, Recv, Call, LU, [], _, _) ->
     {error,{Recv, Call, LU}}.
 
 receive_msg(M) ->
@@ -353,7 +406,7 @@ timeout_trace(Config) when is_list(Config) ->
 send_trace(Config) when is_list(Config) ->
     process_flag(trap_exit, true),
     Sender = fun_spawn(fun sender/0),
-    Receiver = fun_spawn(fun receiver/0),
+    Receiver = proplists:get_value(receiver, Config),
 
     %% Check that a message sent to another process is traced.
     1 = erlang:trace(Sender, true, [send]),
@@ -733,7 +786,7 @@ set_on_first_spawn(Config) when is_list(Config) ->
 
 %% Tests trace(Pid, How, [set_on_link]).
 
-set_on_link(Config) ->
+set_on_link(_Config) ->
     Listener = fun_spawn(fun process/0),
 
     %% Create and trace a process with the set_on_link flag.
@@ -756,7 +809,7 @@ set_on_link(Config) ->
 
 %% Tests trace(Pid, How, [set_on_first_spawn]).
 
-set_on_first_link(Config) ->
+set_on_first_link(_Config) ->
     ct:timetrap({seconds, 10}),
     Listener = fun_spawn(fun process/0),
 
@@ -1604,7 +1657,8 @@ suspend_waiting(Config) when is_list(Config) ->
 
 %% Test that erlang:trace(new, true, ...) is cleared when tracer dies.
 new_clear(Config) when is_list(Config) ->
-    Tracer = spawn(fun receiver/0),
+    Tracer = proplists:get_value(receiver, Config),
+
     0 = erlang:trace(new, true, [send, {tracer, Tracer}]),
     {flags, [send]} = erlang:trace_info(new, flags),
     {tracer, Tracer} = erlang:trace_info(new, tracer),
@@ -1623,7 +1677,7 @@ new_clear(Config) when is_list(Config) ->
 existing_clear(Config) when is_list(Config) ->
     Self = self(),
 
-    Tracer = fun_spawn(fun receiver/0),
+    Tracer = proplists:get_value(receiver, Config),
     N = erlang:trace(existing, true, [send, {tracer, Tracer}]),
     {flags, [send]} = erlang:trace_info(Self, flags),
     {tracer, Tracer} = erlang:trace_info(Self, tracer),
@@ -1639,27 +1693,30 @@ existing_clear(Config) when is_list(Config) ->
 %% Test that erlang:trace/3 can be called on processes where the
 %% tracer has died. OTP-13928
 tracer_die(Config) when is_list(Config) ->
-    Proc = spawn(fun receiver/0),
+    Proc = spawn_link(fun receiver/0),
 
-    Tracer = spawn(fun receiver/0),
+    Tracer = spawn_link(fun receiver/0),
     timer:sleep(1),
     N = erlang:trace(existing, true, [send, {tracer, Tracer}]),
     {flags, [send]} = erlang:trace_info(Proc, flags),
     {tracer, Tracer} = erlang:trace_info(Proc, tracer),
+    unlink(Tracer),
     exit(Tracer, die),
 
-    Tracer2 = spawn(fun receiver/0),
+    Tracer2 = spawn_link(fun receiver/0),
     timer:sleep(1),
     N = erlang:trace(existing, true, [send, {tracer, Tracer2}]),
     {flags, [send]} = erlang:trace_info(Proc, flags),
     {tracer, Tracer2} = erlang:trace_info(Proc, tracer),
+    unlink(Tracer2),
     exit(Tracer2, die),
 
-    Tracer3 = spawn(fun receiver/0),
+    Tracer3 = spawn_link(fun receiver/0),
     timer:sleep(1),
     1 = erlang:trace(Proc, true, [send, {tracer, Tracer3}]),
     {flags, [send]} = erlang:trace_info(Proc, flags),
     {tracer, Tracer3} = erlang:trace_info(Proc, tracer),
+    unlink(Tracer3),
     exit(Tracer3, die),
 
     ok.
@@ -1695,6 +1752,31 @@ trace_delivered(Config) when is_list(Config) ->
     after 1000 ->
               ok
     end.
+
+%% This testcase checks that receive trace works on exit signal messages
+%% when the sender of the exit signal is the process itself.
+trap_exit_self_receive(Config) ->
+    Parent = self(),
+    Proc = spawn_link(fun() -> process(Parent) end),
+
+    1 = erlang:trace(Proc, true, ['receive']),
+    Proc ! {trap_exit_please, true},
+    {trace, Proc, 'receive', {trap_exit_please, true}} = receive_first_trace(),
+
+    %% Make the process call exit(self(), signal)
+    Reason1 = make_ref(),
+    Proc ! {exit_signal_please, Reason1},
+    {trace, Proc, 'receive', {exit_signal_please, Reason1}} = receive_first_trace(),
+    {trace, Proc, 'receive', {'EXIT', Proc, Reason1}} = receive_first_trace(),
+    receive {Proc, {'EXIT', Proc, Reason1}} -> ok end,
+    receive_nothing(),
+
+    unlink(Proc),
+    Reason2 = make_ref(),
+    Proc ! {exit_please, Reason2},
+    {trace, Proc, 'receive', {exit_please, Reason2}} = receive_first_trace(),
+    receive_nothing(),
+    ok.
 
 drop_trace_until_down(Proc, Mon) ->
     drop_trace_until_down(Proc, Mon, false, 0, 0).
@@ -1778,6 +1860,9 @@ process(Dest) ->
             process(Dest);
         {exit_please, Reason} ->
             exit(Reason);
+        {exit_signal_please, Reason} ->
+            exit(self(), Reason),
+            process(Dest);
         {trap_exit_please, State} ->
             process_flag(trap_exit, State),
             process(Dest);

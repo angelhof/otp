@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -145,7 +145,7 @@ format_1(#k_local{name=N,arity=A}, Ctxt) ->
     "local " ++ format_fa_pair({N,A}, Ctxt);
 format_1(#k_remote{mod=M,name=N,arity=A}, _Ctxt) ->
     %% This is for our internal translator.
-    io_lib:format("remote ~s:~s/~w", [format(M),format(N),A]);
+    io_lib:format("remote ~ts:~ts/~w", [format(M),format(N),A]);
 format_1(#k_internal{name=N,arity=A}, Ctxt) ->
     "internal " ++ format_fa_pair({N,A}, Ctxt);
 format_1(#k_seq{arg=A,body=B}, Ctxt) ->
@@ -248,7 +248,7 @@ format_1(#k_put{arg=A,ret=Rs}, Ctxt) ->
     [format(A, Ctxt),
      format_ret(Rs, ctxt_bump_indent(Ctxt, 1))
     ];
-format_1(#k_try{arg=A,vars=Vs,body=B,evars=Evs,handler=H}, Ctxt) ->
+format_1(#k_try{arg=A,vars=Vs,body=B,evars=Evs,handler=H,ret=Rs}, Ctxt) ->
     Ctxt1 = ctxt_bump_indent(Ctxt, Ctxt#ctxt.body_indent),
     ["try",
      nl_indent(Ctxt1),
@@ -264,7 +264,8 @@ format_1(#k_try{arg=A,vars=Vs,body=B,evars=Evs,handler=H}, Ctxt) ->
      nl_indent(Ctxt1),
      format(H, Ctxt1),
      nl_indent(Ctxt),
-     "end"
+     "end",
+     format_ret(Rs, Ctxt)
     ];
 format_1(#k_try_enter{arg=A,vars=Vs,body=B,evars=Evs,handler=H}, Ctxt) ->
     Ctxt1 = ctxt_bump_indent(Ctxt, Ctxt#ctxt.body_indent),
@@ -491,7 +492,7 @@ indent(Ctxt) -> indent(Ctxt#ctxt.indent, Ctxt).
 indent(N, _Ctxt) when N =< 0 -> "";
 indent(N, Ctxt) ->
     T = Ctxt#ctxt.tab_width,
-    string:chars($\t, N div T, string:chars($\s, N rem T)).
+    lists:duplicate(N div T, $\t) ++ lists:duplicate(N rem T, $\s).
 
 nl_indent(Ctxt) -> [$\n|indent(Ctxt)].
 
@@ -508,7 +509,7 @@ unindent([$\t|T], N, Ctxt, C) ->
     if N >= Tab ->
 	    unindent(T, N - Tab, Ctxt, C);
        true ->
-	    unindent([string:chars($\s, Tab - N)|T], 0, Ctxt, C)
+            unindent([lists:duplicate(Tab - N, $\s)|T], 0, Ctxt, C)
     end;
 unindent([L|T], N, Ctxt, C) when is_list(L) ->
     unindent(L, N, Ctxt, [T|C]);

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2001-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2001-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -377,7 +377,8 @@ corrupt_reason(Head, Reason0) ->
                  no_disk_map -> 
                      Reason0;
                  DM ->
-                    ST = erlang:get_stacktrace(),
+                    {current_stacktrace, ST} =
+                         erlang:process_info(self(), current_stacktrace),
                     PD = get(),
                     {Reason0, ST, PD, DM}
              end,
@@ -387,7 +388,7 @@ corrupt_reason(Head, Reason0) ->
 corrupt(Head, Error) ->
     case get(verbose) of
 	yes -> 
-	    error_logger:format("** dets: Corrupt table ~p: ~tp\n", 
+	    error_logger:format("** dets: Corrupt table ~tp: ~tp\n",
 				[Head#head.name, Error]);
 	_ -> ok
     end,

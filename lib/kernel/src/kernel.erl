@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -111,6 +111,13 @@ init([]) ->
                type => worker,
                modules => [kernel_config]},
 
+    RefC = #{id => kernel_refc,
+             start => {kernel_refc, start_link, []},
+             restart => permanent,
+             shutdown => 2000,
+             type => worker,
+             modules => [kernel_refc]},
+
     Code = #{id => code_server,
              start => {code, start_link, []},
              restart => permanent,
@@ -123,7 +130,7 @@ init([]) ->
              restart => permanent,
              shutdown => 2000,
              type => worker,
-             modeules => [file, file_server, file_io_server, prim_file]},
+             modules => [file, file_server, file_io_server, prim_file]},
 
     StdError = #{id => standard_error,
                  start => {standard_error, start_link, []},
@@ -148,7 +155,7 @@ init([]) ->
 
     case init:get_argument(mode) of
         {ok, [["minimal"]]} ->
-            {ok, {SupFlags, [Code, File, StdError, User, Config, SafeSup]}};
+            {ok, {SupFlags, [Code, File, StdError, User, Config, RefC, SafeSup]}};
         _ ->
             Rpc = #{id => rex,
                     start => {rpc, start_link, []},
@@ -199,7 +206,7 @@ init([]) ->
             {ok, {SupFlags,
                   [Code, Rpc, Global, InetDb | DistAC] ++
                   [NetSup, GlGroup, File, SigSrv,
-                   StdError, User, Config, SafeSup] ++ Timer}}
+                   StdError, User, Config, RefC, SafeSup] ++ Timer}}
     end;
 init(safe) ->
     SupFlags = #{strategy => one_for_one,

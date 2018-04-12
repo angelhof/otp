@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2009-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2009-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,9 +50,14 @@
 ** 2.9: 18.2 enif_getenv
 ** 2.10: Time API
 ** 2.11: 19.0 enif_snprintf 
+** 2.12: 20.0 add enif_select, enif_open_resource_type_x
+** 2.13: 20.1 add enif_ioq
+** 2.14: 21.0 add enif_ioq_peek_head, enif_(mutex|cond|rwlock|thread)_name
+**                enif_vfprintf, enif_vsnprintf, enif_make_map_from_arrays
 */
 #define ERL_NIF_MAJOR_VERSION 2
-#define ERL_NIF_MINOR_VERSION 12
+#define ERL_NIF_MINOR_VERSION 14
+#define ERL_NIF_MIN_ERTS_VERSION "erts-10.0 (OTP-21)"
 
 /*
  * The emulator will refuse to load a nif-lib with a major version
@@ -67,6 +72,8 @@
 #define ERL_NIF_MIN_REQUIRED_MAJOR_VERSION_ON_LOAD 2
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +132,9 @@ typedef struct enif_entry_t
 
     /* Added in 2.12 */
     size_t sizeof_ErlNifResourceTypeInit;
+
+    /* Added in 2.14 */
+    const char* min_erts;
 }ErlNifEntry;
 
 
@@ -134,8 +144,9 @@ typedef struct
     unsigned char* data;
 
     /* Internals (avert your eyes) */
-    ERL_NIF_TERM bin_term;
     void* ref_bin;
+    /* for future additions to be ABI compatible (same struct size) */
+    void* __spare__[2];
 }ErlNifBinary;
 
 #if (defined(__WIN32__) || defined(_WIN32) || defined(_WIN32_))
@@ -241,6 +252,28 @@ typedef enum {
     ERL_NIF_PHASH2 = 2
 } ErlNifHash;
 
+#define ERL_NIF_IOVEC_SIZE 16
+
+typedef struct erl_nif_io_vec {
+    int iovcnt;  /* length of vectors */
+    size_t size; /* total size in bytes */
+    SysIOVec *iov;
+
+    /* internals (avert your eyes) */
+    void **ref_bins; /* Binary[] */
+    int flags;
+
+    /* Used when stack allocating the io vec */
+    SysIOVec small_iov[ERL_NIF_IOVEC_SIZE];
+    void *small_ref_bin[ERL_NIF_IOVEC_SIZE];
+} ErlNifIOVec;
+
+typedef struct erts_io_queue ErlNifIOQueue;
+
+typedef enum {
+    ERL_NIF_IOQ_NORMAL = 1
+} ErlNifIOQueueOpts;
+
 /*
  * Return values from enif_thread_type(). Negative values
  * reserved for specific types of non-scheduler threads.
@@ -324,7 +357,8 @@ ERL_NIF_INIT_DECL(NAME)			\
 	LOAD, RELOAD, UPGRADE, UNLOAD,	\
 	ERL_NIF_VM_VARIANT,		\
         1,                              \
-        sizeof(ErlNifResourceTypeInit)  \
+        sizeof(ErlNifResourceTypeInit), \
+        ERL_NIF_MIN_ERTS_VERSION        \
     };                                  \
     ERL_NIF_INIT_BODY;                  \
     return &entry;			\

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -48,19 +48,17 @@
           queue_timer         :: reference() | 'undefined'
          }).
 
--type session_failed() :: {'connect_failed',term()} | {'send_failed',term()}.
-
 -record(state, 
         {
           request                   :: request() | 'undefined',
-          session                   :: session() | session_failed() | 'undefined',
+          session                   :: session() | 'undefined',
           status_line,               % {Version, StatusCode, ReasonPharse}
           headers                   :: http_response_h() | 'undefined',
           body                      :: binary() | 'undefined',
           mfa,                       % {Module, Function, Args}
           pipeline = queue:new()    :: queue:queue(),
           keep_alive = queue:new()  :: queue:queue(),
-          status,   % undefined | new | pipeline | keep_alive | close | {ssl_tunnel, Request}
+          status                    :: undefined | new | pipeline | keep_alive | close | {ssl_tunnel, request()},
           canceled = [],             % [RequestId]
           max_header_size = nolimit :: nolimit | integer(),
           max_body_size = nolimit   :: nolimit | integer(),
@@ -109,7 +107,7 @@ start_link(Parent, Request, Options, ProfileName) ->
 %% to be called by the httpc manager process.
 %%--------------------------------------------------------------------
 send(Request, Pid) ->
-    call(Request, Pid, 5000).
+    call(Request, Pid).
 
 
 %%--------------------------------------------------------------------
@@ -255,8 +253,8 @@ handle_call(Request, From, State) ->
 	Result ->
 	    Result
     catch
-	_:Reason ->
-	    {stop, {shutdown, Reason} , State}
+	Class:Reason:ST ->
+	    {stop, {shutdown, {{Class, Reason}, ST}}, State}
     end.		
 
 
@@ -271,8 +269,8 @@ handle_cast(Msg, State) ->
 	Result ->
 	    Result
     catch
-	_:Reason ->
-	    {stop, {shutdown, Reason} , State}
+	Class:Reason:ST ->
+	    {stop, {shutdown, {{Class, Reason}, ST}}, State}
     end.		
 
 %%--------------------------------------------------------------------
@@ -286,31 +284,14 @@ handle_info(Info, State) ->
 	Result ->
 	    Result
     catch
-	_:Reason ->
-	    {stop, {shutdown, Reason} , State}
+	Class:Reason:ST ->
+	    {stop, {shutdown, {{Class, Reason}, ST}}, State}
     end.		
 
 %%--------------------------------------------------------------------
 %% Function: terminate(Reason, State) -> _  (ignored by gen_server)
 %% Description: Shutdown the httpc_handler
 %%--------------------------------------------------------------------
-
-%% Init error there is no socket to be closed.
-terminate(normal, 
-          #state{request = Request, 
-                 session = {send_failed, _} = Reason} = State) ->
-    maybe_send_answer(Request, 
-                      httpc_response:error(Request, Reason), 
-                      State),
-    ok; 
-
-terminate(normal, 
-          #state{request = Request, 
-                 session = {connect_failed, _} = Reason} = State) ->
-    maybe_send_answer(Request, 
-                      httpc_response:error(Request, Reason), 
-                      State),
-    ok; 
 
 terminate(normal, #state{session = undefined}) ->
     ok;  
@@ -588,11 +569,11 @@ do_handle_info({Proto, _Socket, Data},
 	    activate_once(Session),
 	    {noreply, State#state{mfa = NewMFA}}
     catch
-	_:Reason ->
+	Class:Reason:ST ->
 	    ClientReason = {could_not_parse_as_http, Data}, 
 	    ClientErrMsg = httpc_response:error(Request, ClientReason),
 	    NewState     = answer_request(Request, ClientErrMsg, State),
-	    {stop, {shutdown, Reason}, NewState}
+	    {stop, {shutdown, {{Class, Reason}, ST}}, NewState}
     end;
 
 do_handle_info({Proto, Socket, Data}, 
@@ -711,13 +692,17 @@ do_handle_info({'EXIT', _, _}, State = #state{request = undefined}) ->
 %% can retry requests in the pipeline.
 do_handle_info({'EXIT', _, _}, State) ->
     {noreply, State#state{status = close}}.
-    
 
 call(Msg, Pid) ->
-    call(Msg, Pid, infinity).
-
-call(Msg, Pid, Timeout) ->
-    gen_server:call(Pid, Msg, Timeout).
+    try gen_server:call(Pid, Msg, infinity)
+    catch
+ 	exit:{noproc, _} ->
+ 	    {error, closed};
+	exit:{normal, _} ->
+	    {error, closed};
+	exit:{{shutdown, _},_} ->
+	    {error, closed}
+    end.
 
 cast(Msg, Pid) ->
     gen_server:cast(Pid, Msg).
@@ -736,7 +721,7 @@ maybe_send_answer(Request, Answer, State) ->
     answer_request(Request, Answer, State).
 
 deliver_answer(#request{from = From} = Request) 
-  when is_pid(From) ->
+  when From =/= answer_sent ->
     Response = httpc_response:error(Request, socket_closed_remotely),
     httpc_response:send(From, Response);
 deliver_answer(_Request) ->
@@ -750,6 +735,7 @@ connect(SocketType, ToAddress,
         #options{ipfamily    = IpFamily,
                  ip          = FromAddress,
                  port        = FromPort,
+                 unix_socket = UnixSocket,
                  socket_opts = Opts0}, Timeout) ->
     Opts1 = 
         case FromPort of
@@ -785,6 +771,16 @@ connect(SocketType, ToAddress,
                 OK ->
                     OK
             end;
+        local ->
+            Opts3 = [IpFamily | Opts2],
+            SocketAddr = {local, UnixSocket},
+            case http_transport:connect(SocketType, {SocketAddr, 0}, Opts3, Timeout) of
+                {error, Reason} ->
+                    {error, {failed_connect, [{to_address, SocketAddr},
+                                              {IpFamily, Opts3, Reason}]}};
+                Else ->
+                    Else
+            end;
         _ ->
             Opts3 = [IpFamily | Opts2], 
             case http_transport:connect(SocketType, ToAddress, Opts3, Timeout) of
@@ -796,9 +792,23 @@ connect(SocketType, ToAddress,
             end
     end.
 
-connect_and_send_first_request(Address, Request, #state{options = Options} = State) ->
+handle_unix_socket_options(#request{unix_socket = UnixSocket}, Options)
+  when UnixSocket =:= undefined ->
+    Options;
+
+handle_unix_socket_options(#request{unix_socket = UnixSocket},
+                           Options = #options{ipfamily = IpFamily}) ->
+    case IpFamily of
+        local ->
+            Options#options{unix_socket = UnixSocket};
+        Else ->
+            error({badarg, [{ipfamily, Else}, {unix_socket, UnixSocket}]})
+    end.
+
+connect_and_send_first_request(Address, Request, #state{options = Options0} = State) ->
     SocketType  = socket_type(Request),
     ConnTimeout = (Request#request.settings)#http_options.connect_timeout,
+    Options = handle_unix_socket_options(Request, Options0),
     case connect(SocketType, Address, Options, ConnTimeout) of
         {ok, Socket} ->
             ClientClose =
@@ -837,9 +847,10 @@ connect_and_send_first_request(Address, Request, #state{options = Options} = Sta
             {ok, State#state{request = Request}}
     end.
 
-connect_and_send_upgrade_request(Address, Request, #state{options = Options} = State) ->
+connect_and_send_upgrade_request(Address, Request, #state{options = Options0} = State) ->
     ConnTimeout = (Request#request.settings)#http_options.connect_timeout,
     SocketType = ip_comm,
+    Options = handle_unix_socket_options(Request, Options0),
     case connect(SocketType, Address, Options, ConnTimeout) of
         {ok, Socket} ->
 	    SessionType = httpc_manager:session_type(Options),
@@ -1028,15 +1039,15 @@ handle_response(#state{status = new} = State) ->
     ?hcrd("handle response - status = new", []),
     handle_response(try_to_enable_pipeline_or_keep_alive(State));
 
-handle_response(#state{request      = Request,
-		       status       = Status,
-		       session      = Session, 
-		       status_line  = StatusLine,
-		       headers      = Headers, 
-		       body         = Body,
-		       options      = Options,
-		       profile_name = ProfileName} = State) 
-  when Status =/= new ->
+handle_response(#state{status = Status0} = State0) when Status0 =/= new ->
+    State = handle_server_closing(State0),
+    #state{request      = Request,
+           session      = Session,
+           status_line  = StatusLine,
+           headers      = Headers,
+           body         = Body,
+           options      = Options,
+           profile_name = ProfileName} = State,
     handle_cookies(Headers, Request, Options, ProfileName), 
     case httpc_response:result({StatusLine, Headers, Body}, Request) of
 	%% 100-continue
@@ -1175,17 +1186,20 @@ handle_empty_queue(Session, ProfileName, TimeOut, State) ->
     %% If a pipline | keep_alive session has been idle for some time is not
     %% closed by the server, the client may want to close it.
     NewState = activate_queue_timeout(TimeOut, State),
-    update_session(ProfileName, Session, #session.queue_length, 0),
-    %% Note mfa will be initialized when a new request
-    %% arrives.
-    {noreply,
-     NewState#state{request     = undefined,
-		    mfa         = undefined,
-		    status_line = undefined,
-		    headers     = undefined,
-		    body        = undefined
-			   }
-    }.
+    case update_session(ProfileName, Session, #session.queue_length, 0) of
+        {stop, Reason} ->
+            {stop, {shutdown, Reason}, State};  
+        _ ->
+            %% Note mfa will be initialized when a new request
+            %% arrives.
+            {noreply,
+             NewState#state{request     = undefined,
+                            mfa         = undefined,
+                            status_line = undefined,
+                            headers     = undefined,
+                            body        = undefined
+			   }}
+    end.
 
 receive_response(Request, Session, Data, State) ->
     NewState = init_wait_for_response_state(Request, State),
@@ -1224,7 +1238,7 @@ close_socket(#session{socket = Socket, socket_type = SocketType}) ->
     http_transport:close(SocketType, Socket).
 
 activate_request_timeout(
-  #state{request = #request{timer = undefined} = Request} = State) ->
+  #state{request = #request{timer = OldRef} = Request} = State) ->
     Timeout = (Request#request.settings)#http_options.timeout,
     case Timeout of
 	infinity ->
@@ -1232,17 +1246,21 @@ activate_request_timeout(
 	_ ->
 	    ReqId = Request#request.id, 
 	    Msg       = {timeout, ReqId}, 
+	    case OldRef of
+		undefined ->
+		    ok;
+		_ ->
+		    %% Timer is already running! This is the case for a redirect or retry
+		    %% We need to restart the timer because the handler pid has changed
+		    cancel_timer(OldRef, Msg)
+	    end,
 	    Ref       = erlang:send_after(Timeout, self(), Msg), 
 	    Request2  = Request#request{timer = Ref}, 
 	    ReqTimers = [{Request#request.id, Ref} |
 			 (State#state.timers)#timers.request_timers],
 	    Timers    = #timers{request_timers = ReqTimers}, 
 	    State#state{request = Request2, timers = Timers}
-    end;
-
-%% Timer is already running! This is the case for a redirect or retry
-activate_request_timeout(State) ->
-    State.
+    end.
 
 activate_queue_timeout(infinity, State) ->
     State;
@@ -1291,6 +1309,14 @@ try_to_enable_pipeline_or_keep_alive(
 	    end;
 	false ->
 	    State#state{status = close}
+    end.
+
+handle_server_closing(State = #state{status = close}) -> State;
+handle_server_closing(State = #state{headers = undefined}) -> State;
+handle_server_closing(State = #state{headers = Headers}) ->
+    case httpc_response:is_server_closing(Headers) of
+        true -> State#state{status = close};
+        false -> State
     end.
 
 answer_request(#request{id = RequestId, from = From} = Request, Msg, 
@@ -1673,10 +1699,9 @@ update_session(ProfileName, #session{id = SessionId} = Session, Pos, Value) ->
 	    Session2 = erlang:setelement(Pos, Session, Value),
 	    insert_session(Session2, ProfileName);
 	error:badarg ->
-	    exit(normal); %% Manager has been shutdown
-	T:E -> 
+	    {stop, normal};
+	T:E:Stacktrace -> 
 	    %% Unexpected this must be an error!  
-            Stacktrace = erlang:get_stacktrace(),
             error_logger:error_msg("Failed updating session: "
                                    "~n   ProfileName: ~p"
                                    "~n   SessionId:   ~p"
@@ -1693,14 +1718,14 @@ update_session(ProfileName, #session{id = SessionId} = Session, Pos, Value) ->
                                     Session, 
                                     (catch httpc_manager:lookup_session(SessionId, ProfileName)),
                                     T, E]),
-            exit({failed_updating_session, 
-                  [{profile,    ProfileName}, 
-                   {session_id, SessionId}, 
-                   {pos,        Pos}, 
-                   {value,      Value}, 
-                   {etype,      T}, 
-                   {error,      E}, 
-                   {stacktrace, Stacktrace}]})
+            {stop, {failed_updating_session, 
+                    [{profile,    ProfileName}, 
+                     {session_id, SessionId}, 
+                     {pos,        Pos}, 
+                     {value,      Value}, 
+                     {etype,      T}, 
+                     {error,      E}, 
+                     {stacktrace, Stacktrace}]}}
     end.
 
 

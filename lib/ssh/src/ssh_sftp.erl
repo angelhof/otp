@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2005-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -51,6 +51,8 @@
 -export([init/1, handle_call/3, handle_cast/2, code_change/3, handle_msg/2, handle_ssh_msg/2, terminate/2]).
 %% TODO: Should be placed elsewhere ssh_sftpd should not call functions in ssh_sftp!
 -export([info_to_attr/1, attr_to_info/1]).
+
+-export([dbg_trace/3]).
 
 -record(state,
 	{
@@ -1050,7 +1052,7 @@ attr_to_info(A) when is_record(A, ssh_xfer_attr) ->
     #file_info{
       size   = A#ssh_xfer_attr.size,
       type   = A#ssh_xfer_attr.type,
-      access = read_write, %% FIXME: read/write/read_write/none
+      access = file_mode_to_owner_access(A#ssh_xfer_attr.permissions),
       atime  = unix_to_datetime(A#ssh_xfer_attr.atime),
       mtime  = unix_to_datetime(A#ssh_xfer_attr.mtime),
       ctime  = unix_to_datetime(A#ssh_xfer_attr.createtime),
@@ -1062,6 +1064,28 @@ attr_to_info(A) when is_record(A, ssh_xfer_attr) ->
       uid    = A#ssh_xfer_attr.owner,
       gid    = A#ssh_xfer_attr.group}.
 
+file_mode_to_owner_access(FileMode)
+  when is_integer(FileMode) ->
+    %% The file mode contains the access permissions.
+    %% The read and write access permission of file owner
+    %% are located in 8th and 7th bit of file mode respectively.
+
+    ReadPermission = ((FileMode bsr 8) band 1),
+    WritePermission =  ((FileMode bsr 7) band 1),
+    case {ReadPermission, WritePermission} of
+        {1, 1} ->
+            read_write;
+        {1, 0} ->
+            read;
+        {0, 1} ->
+            write;
+        {0, 0} ->
+            none;
+        _ ->
+            undefined
+    end;
+file_mode_to_owner_access(_) ->
+    undefined.
 
 unix_to_datetime(undefined) ->
     undefined;
@@ -1438,3 +1462,21 @@ format_channel_start_error({shutdown, Reason}) ->
     Reason;
 format_channel_start_error(Reason) ->
     Reason.
+
+%%%################################################################
+%%%#
+%%%# Tracing
+%%%#
+
+dbg_trace(points,         _,  _) -> [terminate];
+
+dbg_trace(flags,  terminate,  _) -> [c];
+dbg_trace(on,     terminate,  _) -> dbg:tp(?MODULE,  terminate, 2, x);
+dbg_trace(off,    terminate,  _) -> dbg:ctpg(?MODULE, terminate, 2);
+dbg_trace(format, terminate, {call, {?MODULE,terminate, [Reason, State]}}) ->
+    ["Sftp Terminating:\n",
+     io_lib:format("Reason: ~p,~nState:~n~s", [Reason, wr_record(State)])
+    ].
+
+?wr_record(state).
+

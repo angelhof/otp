@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,7 +34,8 @@
 	 ip/1, stats/0, options/0, 
 	 pushf/3, popf/1, close/1, gethostname/0, gethostname/1, 
 	 parse_ipv4_address/1, parse_ipv6_address/1, parse_ipv4strict_address/1,
-	 parse_ipv6strict_address/1, parse_address/1, parse_strict_address/1, ntoa/1]).
+	 parse_ipv6strict_address/1, parse_address/1, parse_strict_address/1,
+         ntoa/1, ipv4_mapped_ipv6_address/1]).
 
 -export([connect_options/2, listen_options/2, udp_options/2, sctp_options/2]).
 -export([udp_module/1, tcp_module/1, tcp_module/2, sctp_module/1]).
@@ -72,7 +73,7 @@
 %% timer interface
 -export([start_timer/1, timeout/1, timeout/2, stop_timer/1]).
 
--export_type([address_family/0, hostent/0, hostname/0, ip4_address/0,
+-export_type([address_family/0, socket_protocol/0, hostent/0, hostname/0, ip4_address/0,
               ip6_address/0, ip_address/0, port_number/0,
 	      local_address/0, socket_address/0, returned_non_ip_address/0,
 	      socket_setopt/0, socket_getopt/0,
@@ -104,7 +105,20 @@
 	{local, binary()} |
 	{unspec, <<>>} |
 	{undefined, any()}.
--type posix() :: exbadport | exbadseq | file:posix().
+-type posix() ::
+        'eaddrinuse' | 'eaddrnotavail' | 'eafnosupport' | 'ealready' |
+        'econnaborted' | 'econnrefused' | 'econnreset' |
+        'edestaddrreq' |
+        'ehostdown' | 'ehostunreach' |
+        'einprogress' | 'eisconn' |
+        'emsgsize' |
+        'enetdown' | 'enetunreach' |
+        'enopkg' | 'enoprotoopt' | 'enotconn' | 'enotty' | 'enotsock' |
+        'eproto' | 'eprotonosupport' | 'eprototype' |
+        'esocktnosupport' |
+        'etimedout' |
+        'ewouldblock' |
+        'exbadport' | 'exbadseq' | file:posix().
 -type socket() :: port().
 
 -type socket_setopt() ::
@@ -151,7 +165,8 @@
 
 %%% ---------------------------------
 
--spec get_rc() -> [{Par :: any(), Val :: any()}].
+-spec get_rc() -> [{Par :: atom(), Val :: any()} |
+                   {Par :: atom(), Val1 :: any(), Val2 :: any()}].
 
 get_rc() ->
     inet_db:get_rc().
@@ -673,6 +688,14 @@ parse_address(Addr) ->
       IPAddress :: ip_address().
 parse_strict_address(Addr) ->
     inet_parse:strict_address(Addr).
+
+-spec ipv4_mapped_ipv6_address(ip_address()) -> ip_address().
+ipv4_mapped_ipv6_address({D1,D2,D3,D4})
+  when (D1 bor D2 bor D3 bor D4) < 256 ->
+    {0,0,0,0,0,16#ffff,(D1 bsl 8) bor D2,(D3 bsl 8) bor D4};
+ipv4_mapped_ipv6_address({D1,D2,D3,D4,D5,D6,D7,D8})
+  when (D1 bor D2 bor D3 bor D4 bor D5 bor D6 bor D7 bor D8) < 65536 ->
+    {D7 bsr 8,D7 band 255,D8 bsr 8,D8 band 255}.
 
 %% Return a list of available options
 options() ->
@@ -1243,9 +1266,7 @@ gethostbyname_string(Name, Type)
 	    inet ->
 		inet_parse:ipv4_address(Name);
 	    inet6 ->
-		%% XXX should we really translate IPv4 addresses here
-		%% even if we do not know if this host can do IPv6?
-		inet_parse:ipv6_address(Name)
+		inet_parse:ipv6strict_address(Name)
 	end of
 	{ok,IP} ->
 	    {ok,make_hostent(Name, [IP], [], Type)};
@@ -1451,11 +1472,14 @@ fdopen(Fd, Addr, Port, Opts, Protocol, Family, Type, Module) ->
 %%  socket stat
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+-spec i() -> ok.
 i() -> i(tcp), i(udp), i(sctp).
 
+-spec i(socket_protocol()) -> ok.
 i(Proto) -> i(Proto, [port, module, recv, sent, owner,
 		      local_address, foreign_address, state, type]).
 
+-spec i(socket_protocol(), [atom()]) -> ok.
 i(tcp, Fs) ->
     ii(tcp_sockets(), Fs, tcp);
 i(udp, Fs) ->

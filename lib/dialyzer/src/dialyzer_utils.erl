@@ -39,6 +39,8 @@
          sets_filter/2,
 	 src_compiler_opts/0,
 	 refold_pattern/1,
+         ets_tab2list/1,
+         ets_move/2,
 	 parallelism/0,
          family/1
 	]).
@@ -56,15 +58,15 @@ print_types1([], _) ->
   ok;
 print_types1([{type, _Name, _NArgs} = Key|T], RecDict) ->
   {ok, {{_Mod, _FileLine, _Form, _Args}, Type}} = dict:find(Key, RecDict),
-  io:format("\n~w: ~w\n", [Key, Type]),
+  io:format("\n~tw: ~tw\n", [Key, Type]),
   print_types1(T, RecDict);
 print_types1([{opaque, _Name, _NArgs} = Key|T], RecDict) ->
   {ok, {{_Mod, _FileLine, _Form, _Args}, Type}} = dict:find(Key, RecDict),
-  io:format("\n~w: ~w\n", [Key, Type]),
+  io:format("\n~tw: ~tw\n", [Key, Type]),
   print_types1(T, RecDict);
 print_types1([{record, _Name} = Key|T], RecDict) ->
   {ok, {_FileLine, [{_Arity, _Fields} = AF]}} = dict:find(Key, RecDict),
-  io:format("~w: ~w\n\n", [Key, AF]),
+  io:format("~tw: ~tw\n\n", [Key, AF]),
   print_types1(T, RecDict).
 -define(debug(D_), print_types(D_)).
 -else.
@@ -118,91 +120,9 @@ get_core_from_beam(File, Opts) ->
 	  {error, "  Could not get Core Erlang code for: " ++ File ++ "\n"}
       end;
     _ ->
-      deprecated_get_core_from_beam(File, Opts)
+      {error, "  Could not get Core Erlang code for: " ++ File ++ "\n" ++
+        "  Recompile with +debug_info or analyze starting from source code"}
   end.
-
-deprecated_get_core_from_beam(File, Opts) ->
-  case get_abstract_code_from_beam(File) of
-    error ->
-      {error, "  Could not get abstract code for: " ++ File ++ "\n" ++
-       "  Recompile with +debug_info or analyze starting from source code"};
-    {ok, AbstrCode} ->
-      case get_compile_options_from_beam(File) of
-        error ->
-          {error, "  Could not get compile options for: " ++ File ++ "\n" ++
-            "  Recompile or analyze starting from source code"};
-        {ok, CompOpts} ->
-          case get_core_from_abstract_code(AbstrCode, Opts ++ CompOpts) of
-            error ->
-              {error, "  Could not get core Erlang code for: " ++ File};
-            {ok, _} = Core ->
-              Core
-          end
-      end
-  end.
-
-get_abstract_code_from_beam(File) ->
-  case beam_lib:chunks(File, [abstract_code]) of
-    {ok, {_, List}} ->
-      case lists:keyfind(abstract_code, 1, List) of
-        {abstract_code, {raw_abstract_v1, Abstr}} -> {ok, Abstr};
-        _ -> error
-      end;
-    _ ->
-      %% No or unsuitable abstract code.
-      error
-  end.
-
-get_compile_options_from_beam(File) ->
-  case beam_lib:chunks(File, [compile_info]) of
-    {ok, {_, List}} ->
-      case lists:keyfind(compile_info, 1, List) of
-        {compile_info, CompInfo} -> compile_info_to_options(CompInfo);
-        _ -> error
-      end;
-    _ ->
-      %% No or unsuitable compile info.
-      error
-  end.
-
-compile_info_to_options(CompInfo) ->
-  case lists:keyfind(options, 1, CompInfo) of
-    {options, CompOpts} -> {ok, CompOpts};
-    _ -> error
-  end.
-
-get_core_from_abstract_code(AbstrCode, Opts) ->
-  %% We do not want the parse_transforms around since we already
-  %% performed them. In some cases we end up in trouble when
-  %% performing them again.
-  AbstrCode1 = cleanup_parse_transforms(AbstrCode),
-  %% Remove parse_transforms (and other options) from compile options.
-  Opts2 = cleanup_compile_options(Opts),
-  try compile:noenv_forms(AbstrCode1, Opts2 ++ src_compiler_opts()) of
-    {ok, _, Core} -> {ok, Core};
-    _What -> error
-  catch
-    error:_ -> error
-  end.
-
-cleanup_parse_transforms([{attribute, _, compile, {parse_transform, _}}|Left]) ->
-  cleanup_parse_transforms(Left);
-cleanup_parse_transforms([Other|Left]) ->
-  [Other|cleanup_parse_transforms(Left)];
-cleanup_parse_transforms([]) ->
-  [].
-
-cleanup_compile_options(Opts) ->
-  lists:filter(fun keep_compile_option/1, Opts).
-
-%% Using abstract, not asm or core.
-keep_compile_option(from_asm) -> false;
-keep_compile_option(from_core) -> false;
-%% The parse transform will already have been applied, may cause
-%% problems if it is re-applied.
-keep_compile_option({parse_transform, _}) -> false;
-keep_compile_option(warnings_as_errors) -> false;
-keep_compile_option(_) -> true.
 
 %% ============================================================================
 %%
@@ -268,7 +188,7 @@ add_new_type(TypeOrOpaque, Name, TypeForm, ArgForms, Module, FN,
   Arity = length(ArgForms),
   case erl_types:type_is_defined(TypeOrOpaque, Name, Arity, RecDict) of
     true ->
-      Msg = flat_format("Type ~s/~w already defined\n", [Name, Arity]),
+      Msg = flat_format("Type ~ts/~w already defined\n", [Name, Arity]),
       throw({error, Msg});
     false ->
       % io:format("ArgForms: ~p~n", [ArgForms]),
@@ -279,7 +199,7 @@ add_new_type(TypeOrOpaque, Name, TypeForm, ArgForms, Module, FN,
                     erl_types:t_any()}, RecDict)
       catch
         _:_ ->
-	  throw({error, flat_format("Type declaration for ~w does not "
+	  throw({error, flat_format("Type declaration for ~tw does not "
 				    "have variables as parameters", [Name])})
       end
   end.
@@ -325,9 +245,12 @@ process_record_remote_types(CServer) ->
                 {record, Name} ->
                   FieldFun =
                     fun({Arity, Fields}, C4) ->
-                        Site = {record, {Module, Name, Arity}},
+                        MRA = {Module, Name, Arity},
+                        Site = {record, MRA},
                         {Fields1, C7} =
                           lists:mapfoldl(fun({FieldName, Field, _}, C5) ->
+                                             check_remote(Field, ExpTypes,
+                                                          MRA, RecordTable),
                                              {FieldT, C6} =
                                                erl_types:t_from_form
                                                  (Field, ExpTypes, Site,
@@ -341,7 +264,13 @@ process_record_remote_types(CServer) ->
                   {FieldsList, C3} =
                     lists:mapfoldl(FieldFun, C2, orddict:to_list(Fields)),
                   {{Key, {FileLine, orddict:from_list(FieldsList)}}, C3};
-                _Other -> {{Key, Value}, C2}
+                {_TypeOrOpaque, Name, NArgs} ->
+                  %% Make sure warnings about unknown types are output
+                  %% also for types unused by specs.
+                  MTA = {Module, Name, NArgs},
+                  {{_Module, _FileLine, Form, _ArgNames}, _Type} = Value,
+                  check_remote(Form, ExpTypes, MTA, RecordTable),
+                  {{Key, Value}, C2}
               end
           end,
         Cache = erl_types:cache__new(),
@@ -379,7 +308,10 @@ process_opaque_types(AllModules, CServer, TempExpTypes) ->
                     erl_types:t_from_form(Form, TempExpTypes, Site,
                                           RecordTable, VarTable, C2),
                   {{Key, {F, Type}}, C3};
-                _Other -> {{Key, Value}, C2}
+                {type, _Name, _NArgs} ->
+                  {{Key, Value}, C2};
+                {record, _RecName} ->
+                  {{Key, Value}, C2}
               end
           end,
         C0 = erl_types:cache__new(),
@@ -434,9 +366,12 @@ msg_with_position(Fun, FileLine) ->
     throw:{error, Msg} ->
       {File, Line} = FileLine,
       BaseName = filename:basename(File),
-      NewMsg = io_lib:format("~s:~p: ~s", [BaseName, Line, Msg]),
+      NewMsg = io_lib:format("~ts:~p: ~ts", [BaseName, Line, Msg]),
       throw({error, NewMsg})
   end.
+
+check_remote(Form, ExpTypes, What, RecordTable) ->
+  erl_types:t_from_form_check_remote(Form, ExpTypes, What, RecordTable).
 
 -spec merge_types(codeserver(), dialyzer_plt:plt()) -> codeserver().
 
@@ -527,13 +462,13 @@ get_spec_info([{Contract, Ln, [{Id, TypeSpec}]}|Left],
 		    RecordsMap, ModName, OptCb, File);
     {ok, {{OtherFile, L}, _D}} ->
       {Mod, Fun, Arity} = MFA,
-      Msg = flat_format("  Contract/callback for function ~w:~w/~w "
-			"already defined in ~s:~w\n",
+      Msg = flat_format("  Contract/callback for function ~w:~tw/~w "
+			"already defined in ~ts:~w\n",
 			[Mod, Fun, Arity, OtherFile, L]),
       throw({error, Msg})
   catch
     throw:{error, Error} ->
-      {error, flat_format("  Error while parsing contract in line ~w: ~s\n",
+      {error, flat_format("  Error while parsing contract in line ~w: ~ts\n",
 			  [Ln, Error])}
   end;
 get_spec_info([{file, _, [{IncludeFile, _}]}|Left],
@@ -636,7 +571,7 @@ get_options1([{Args, L, File}|Left], Warnings) ->
       get_options1(Left, NewWarnings)
   catch
     throw:{dialyzer_options_error, Msg} ->
-      Msg1 = flat_format("  ~s:~w: ~s", [File, L, Msg]),
+      Msg1 = flat_format("  ~ts:~w: ~ts", [File, L, Msg]),
       throw({error, Msg1})
   end;
 get_options1([], Warnings) ->
@@ -715,7 +650,7 @@ src_compiler_opts() ->
 
 format_errors([{Mod, Errors}|Left]) ->
   FormatedError =
-    [io_lib:format("~s:~w: ~s\n", [Mod, Line, M:format_error(Desc)])
+    [io_lib:format("~ts:~w: ~ts\n", [Mod, Line, M:format_error(Desc)])
      || {Line, M, Desc} <- Errors],
   [lists:flatten(FormatedError) | format_errors(Left)];
 format_errors([]) ->
@@ -760,14 +695,14 @@ check_fa_list1([{Args, L, File}|Left], Tag, Funcs) ->
   case lists:dropwhile(fun({_, T}) -> is_fa(T) end, TermsL) of
     [] -> ok;
     [{_, Bad}|_] ->
-      Msg1 = flat_format("  Bad function ~w in line ~s:~w",
+      Msg1 = flat_format("  Bad function ~tw in line ~ts:~w",
                          [Bad, File, L]),
       throw({error, Msg1})
   end,
   case lists:dropwhile(fun({_, FA}) -> is_known(FA, Funcs) end, TermsL) of
     [] -> ok;
     [{_, {F, A}}|_] ->
-      Msg2 = flat_format("  Unknown function ~w/~w in line ~s:~w",
+      Msg2 = flat_format("  Unknown function ~tw/~w in line ~ts:~w",
                          [F, A, File, L]),
       throw({error, Msg2})
   end,
@@ -974,6 +909,35 @@ label(Tree) ->
       cerl:set_ann(Tree, [{label, Label}]).
 
 %%------------------------------------------------------------------------------
+
+-spec ets_tab2list(ets:tid()) -> list().
+
+%% Deletes the contents of the table. Use:
+%%  ets_tab2list(T), ets:delete(T)
+%% instead of:
+%%  ets:tab2list(T), ets:delete(T)
+%% to save some memory at the expense of somewhat longer execution time.
+ets_tab2list(T) ->
+  F = fun(Vs, A) -> Vs ++ A end,
+  ets_take(ets:first(T), T, F, []).
+
+-spec ets_move(From :: ets:tid(), To :: ets:tid()) -> 'ok'.
+
+ets_move(T1, T2) ->
+  F = fun(Es, A) -> true = ets:insert(T2, Es), A end,
+  [] = ets_take(ets:first(T1), T1, F, []),
+  ok.
+
+ets_take('$end_of_table', T, F, A) ->
+  case ets:first(T) of % no safe_fixtable()...
+    '$end_of_table' -> A;
+    Key -> ets_take(Key, T, F, A)
+  end;
+ets_take(Key, T, F, A) ->
+  Vs = ets:lookup(T, Key),
+  Key1 = ets:next(T, Key),
+  true = ets:delete(T, Key),
+  ets_take(Key1, T, F, F(Vs, A)).
 
 -spec parallelism() -> integer().
 

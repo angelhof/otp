@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1998-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2018. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@
 #include "erl_binary.h"
 #include "erl_map.h"
 #include "erl_thr_progress.h"
+#include "erl_proc_sig_queue.h"
 
 #include "erl_db_util.h"
 
@@ -74,12 +75,35 @@ DBIF_TABLE_GUARD | DBIF_TABLE_BODY | DBIF_TRACE_GUARD | DBIF_TRACE_BODY
 typedef struct DMC_STACK_TYPE(Type) {		\
     int pos;					\
     int siz;					\
-    Type def[DMC_DEFAULT_SIZE];		        \
+    int bytes;                                  \
     Type *data;					\
+    Type def[DMC_DEFAULT_SIZE];		        \
 } DMC_STACK_TYPE(Type)
+
+
+typedef int Dummy;
+DMC_DECLARE_STACK_TYPE(Dummy);
+
+static void dmc_stack_grow(DMC_Dummy_stack* s)
+{
+    int was_bytes = s->bytes;
+    s->siz *= 2;
+    s->bytes *= 2;
+    if (s->data == s->def) {
+        s->data = erts_alloc(ERTS_ALC_T_DB_MC_STK, s->bytes);
+        sys_memcpy(s->data, s->def, was_bytes);
+    }
+    else {
+        s->data = erts_realloc(ERTS_ALC_T_DB_MC_STK, s->data, s->bytes);
+    }
+}
     
-#define DMC_INIT_STACK(Name) \
-     (Name).pos = 0; (Name).siz = DMC_DEFAULT_SIZE; (Name).data = (Name).def
+#define DMC_INIT_STACK(Name) do {       \
+    (Name).pos = 0;                     \
+    (Name).siz = DMC_DEFAULT_SIZE;      \
+    (Name).bytes = sizeof((Name).def);  \
+    (Name).data = (Name).def;           \
+} while (0)
 
 #define DMC_STACK_DATA(Name) (Name).data
 
@@ -87,19 +111,17 @@ typedef struct DMC_STACK_TYPE(Type) {		\
 
 #define DMC_PUSH(On, What)						\
 do {									\
-    if ((On).pos >= (On).siz) {						\
-	(On).siz *= 2;							\
-	(On).data							\
-	    = (((On).def == (On).data)					\
-	       ? memcpy(erts_alloc(ERTS_ALC_T_DB_MC_STK,		\
-				   (On).siz*sizeof(*((On).data))),	\
-			(On).def,					\
-			DMC_DEFAULT_SIZE*sizeof(*((On).data)))		\
-	       : erts_realloc(ERTS_ALC_T_DB_MC_STK,			\
-			      (void *) (On).data,			\
-			      (On).siz*sizeof(*((On).data))));		\
-    }									\
+    if ((On).pos >= (On).siz)  						\
+        dmc_stack_grow((DMC_Dummy_stack*)&(On));                        \
     (On).data[(On).pos++] = What;					\
+} while (0)
+
+#define DMC_PUSH2(On, A, B)						\
+do {									\
+    if ((On).pos+1 >= (On).siz)  					\
+        dmc_stack_grow((DMC_Dummy_stack*)&(On));                        \
+    (On).data[(On).pos++] = A;					        \
+    (On).data[(On).pos++] = B;					        \
 } while (0)
 
 #define DMC_POP(From) (From).data[--(From).pos]
@@ -155,6 +177,7 @@ set_tracee_flags(Process *tracee_p, ErtsTracer tracer,
 	   : am_false);
     erts_tracer_replace(&tracee_p->common, tracer);
     ERTS_TRACE_FLAGS(tracee_p) = flags;
+
     return ret;
 }
 /*
@@ -170,7 +193,7 @@ static Eterm
 set_match_trace(Process *tracee_p, Eterm fail_term, ErtsTracer tracer,
 		Uint d_flags, Uint e_flags) {
 
-    ERTS_SMP_LC_ASSERT(
+    ERTS_LC_ASSERT(
         ERTS_PROC_LOCKS_ALL == erts_proc_lc_my_proc_locks(tracee_p)
         || erts_thr_progress_is_blocking());
 
@@ -361,11 +384,7 @@ typedef struct {
 } ErtsMatchPseudoProcess;
 
 
-#ifdef ERTS_SMP
-static erts_smp_tsd_key_t match_pseudo_process_key;
-#else
-static ErtsMatchPseudoProcess *match_pseudo_process;
-#endif
+static erts_tsd_key_t match_pseudo_process_key;
 
 static ERTS_INLINE void
 cleanup_match_pseudo_process(ErtsMatchPseudoProcess *mpsp, int keep_heap)
@@ -414,32 +433,27 @@ static ERTS_INLINE ErtsMatchPseudoProcess *
 get_match_pseudo_process(Process *c_p, Uint heap_size)
 {
     ErtsMatchPseudoProcess *mpsp;
-#ifdef ERTS_SMP
     ErtsSchedulerData *esdp;
 
     esdp = c_p ? c_p->scheduler_data : erts_get_scheduler_data();
 
     mpsp = esdp ? esdp->match_pseudo_process :
-        (ErtsMatchPseudoProcess*) erts_smp_tsd_get(match_pseudo_process_key);
+        (ErtsMatchPseudoProcess*) erts_tsd_get(match_pseudo_process_key);
 
     if (mpsp) {
-        ASSERT(mpsp == erts_smp_tsd_get(match_pseudo_process_key));
+        ASSERT(mpsp == erts_tsd_get(match_pseudo_process_key));
         ASSERT(mpsp->process.scheduler_data == esdp);
 	cleanup_match_pseudo_process(mpsp, 0);
     }
     else {
-	ASSERT(erts_smp_tsd_get(match_pseudo_process_key) == NULL);
+	ASSERT(erts_tsd_get(match_pseudo_process_key) == NULL);
 	mpsp = create_match_pseudo_process();
         if (esdp) {
             esdp->match_pseudo_process = (void *) mpsp;
         }
         mpsp->process.scheduler_data = esdp;
-	erts_smp_tsd_set(match_pseudo_process_key, (void *) mpsp);
+	erts_tsd_set(match_pseudo_process_key, (void *) mpsp);
     }
-#else
-    mpsp = match_pseudo_process;
-    cleanup_match_pseudo_process(mpsp, 0);
-#endif
     if (heap_size > ERTS_DEFAULT_MS_HEAP_SIZE*sizeof(Eterm)) {
 	mpsp->u.heap = (Eterm*) erts_alloc(ERTS_ALC_T_DB_MS_RUN_HEAP, heap_size);
     }
@@ -449,31 +463,25 @@ get_match_pseudo_process(Process *c_p, Uint heap_size)
     return mpsp;
 }
 
-#ifdef ERTS_SMP
 static void
 destroy_match_pseudo_process(void)
 {
     ErtsMatchPseudoProcess *mpsp;
-    mpsp = (ErtsMatchPseudoProcess *)erts_smp_tsd_get(match_pseudo_process_key);
+    mpsp = (ErtsMatchPseudoProcess *)erts_tsd_get(match_pseudo_process_key);
     if (mpsp) {
 	cleanup_match_pseudo_process(mpsp, 0);
 	erts_free(ERTS_ALC_T_DB_MS_PSDO_PROC, (void *) mpsp);
-	erts_smp_tsd_set(match_pseudo_process_key, (void *) NULL);
+	erts_tsd_set(match_pseudo_process_key, (void *) NULL);
     }
 }
-#endif
 
 static
 void
 match_pseudo_process_init(void)
 {
-#ifdef ERTS_SMP
-    erts_smp_tsd_key_create(&match_pseudo_process_key,
+    erts_tsd_key_create(&match_pseudo_process_key,
 			    "erts_match_pseudo_process_key");
-    erts_smp_install_exit_handler(destroy_match_pseudo_process);
-#else
-    match_pseudo_process = create_match_pseudo_process();
-#endif
+    erts_thr_install_exit_handler(destroy_match_pseudo_process);
 }
 
 void
@@ -484,7 +492,7 @@ erts_match_set_release_result(Process* c_p)
 
 /* The trace control word. */
 
-static erts_smp_atomic32_t trace_control_word;
+static erts_atomic32_t trace_control_word;
 
 /* This needs to be here, before the bif table... */
 
@@ -923,7 +931,7 @@ static void db_free_tmp_uncompressed(DbTerm* obj);
 */
 BIF_RETTYPE db_get_trace_control_word(Process *p)
 {
-    Uint32 tcw = (Uint32) erts_smp_atomic32_read_acqb(&trace_control_word);
+    Uint32 tcw = (Uint32) erts_atomic32_read_acqb(&trace_control_word);
     BIF_RET(erts_make_integer((Uint) tcw, p));
 }
 
@@ -941,7 +949,7 @@ BIF_RETTYPE db_set_trace_control_word(Process *p, Eterm new)
     if (val != ((Uint32)val))
 	BIF_ERROR(p, BADARG);
 
-    old_tcw = (Uint32) erts_smp_atomic32_xchg_relb(&trace_control_word,
+    old_tcw = (Uint32) erts_atomic32_xchg_relb(&trace_control_word,
 						   (erts_aint32_t) val);
     BIF_RET(erts_make_integer((Uint) old_tcw, p));
 }
@@ -1125,12 +1133,11 @@ error:
  * Returns true if 'b' is guaranteed to always construct
  * the same term as 'a' has matched.
  */
-static int db_match_eq_body(Eterm a, Eterm b)
+static int db_match_eq_body(Eterm a, Eterm b, int const_mode)
 {
     DECLARE_ESTACK(s);
     Uint arity;
     Eterm *ap, *bp;
-    int const_mode = 0;
     const Eterm CONST_MODE_OFF = THE_NON_VALUE;
 
     while (1) {
@@ -1224,6 +1231,7 @@ int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body)
     Eterm single_body_subterm;
     Eterm single_body_subterm_key;
     Eterm* single_body_subterm_key_tpl;
+    int const_mode;
 
     if (!is_list(body)) {
         return 0;
@@ -1244,28 +1252,43 @@ int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body)
         return 0;
     }
 
-    single_body_term_tpl = tuple_val(single_body_term);
-    if (arityval(*single_body_term_tpl) != 1) {
-        // not the 1-element tuple we're expecting
-        return 0;
-    }
-
     match_key = db_getkey(keypos, match);
     if (!is_value(match_key)) {
         // can't get key out of match
         return 0;
     }
 
-    single_body_subterm = single_body_term_tpl[1];
+    single_body_term_tpl = tuple_val(single_body_term);
+    if (single_body_term_tpl[0] == make_arityval(2) &&
+        single_body_term_tpl[1] == am_const) {
+        /* {const, {"ets-tuple constant"}} */
+        single_body_subterm = single_body_term_tpl[2];
+        const_mode = 1;
+    }
+    else if (*single_body_term_tpl == make_arityval(1)) {
+        /* {{"ets-tuple construction"}} */
+        single_body_subterm = single_body_term_tpl[1];
+        const_mode = 0;
+    }
+    else {
+        /* not a tuple construction */
+        return 0;
+    }
+
     single_body_subterm_key = db_getkey(keypos, single_body_subterm);
     if (!is_value(single_body_subterm_key)) {
         // can't get key out of single body subterm
         return 0;
     }
 
-    if (db_match_eq_body(match_key, single_body_subterm_key)) {
+    if (db_match_eq_body(match_key, single_body_subterm_key, const_mode)) {
         /* tuple with same key is returned */
         return 1;
+    }
+
+    if (const_mode) {
+        /* constant key did not match */
+        return 0;
     }
 
     if (!is_tuple(single_body_subterm_key)) {
@@ -1274,12 +1297,8 @@ int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body)
     }
 
     single_body_subterm_key_tpl = tuple_val(single_body_subterm_key);
-    if (arityval(*single_body_subterm_key_tpl) != 3) {
-        /* can't possibly be an element instruction */
-        return 0;
-    }
-
-    if (single_body_subterm_key_tpl[1] == am_element &&
+    if (single_body_subterm_key_tpl[0] == make_arityval(3) &&
+        single_body_subterm_key_tpl[1] == am_element &&
         single_body_subterm_key_tpl[3] == am_DollarUnderscore &&
         single_body_subterm_key_tpl[2] == make_small(keypos))
     {
@@ -1288,11 +1307,6 @@ int db_match_keeps_key(int keypos, Eterm match, Eterm guard, Eterm body)
     }
 
     return 0;
-}
-
-/* This is used when tracing */
-Eterm erts_match_set_lint(Process *p, Eterm matchexpr) {
-    return db_match_set_lint(p, matchexpr, DCOMP_TRACE);
 }
 
 Eterm db_match_set_lint(Process *p, Eterm matchexpr, Uint flags) 
@@ -1460,7 +1474,7 @@ void db_initialize_util(void){
 	  sizeof(DMCGuardBif), 
 	  (int (*)(const void *, const void *)) &cmp_guard_bif);
     match_pseudo_process_init();
-    erts_smp_atomic32_init_nob(&trace_control_word, 0);
+    erts_atomic32_init_nob(&trace_control_word, 0);
 }
 
 
@@ -1527,7 +1541,7 @@ restart:
 	 context.current_match < num_progs; 
 	 ++context.current_match) { /* This loop is long, 
 				       too long */
-	memset(heap.vars, 0, heap.size * sizeof(*heap.vars));
+	sys_memset(heap.vars, 0, heap.size * sizeof(*heap.vars));
 	t = context.matchexpr[context.current_match];
 	context.stack_used = 0;
 	structure_checked = 0;
@@ -1546,8 +1560,7 @@ restart:
                 if (is_flatmap(t)) {
                     num_iters = flatmap_get_size(flatmap_val(t));
                     if (!structure_checked) {
-                        DMC_PUSH(text, matchMap);
-                        DMC_PUSH(text, num_iters);
+                        DMC_PUSH2(text, matchMap, num_iters);
                     }
                     structure_checked = 0;
                     for (i = 0; i < num_iters; ++i) {
@@ -1567,8 +1580,7 @@ restart:
                             }
                             goto error;
                         }
-                        DMC_PUSH(text, matchKey);
-                        DMC_PUSH(text, dmc_private_copy(&context, key));
+                        DMC_PUSH2(text, matchKey, dmc_private_copy(&context, key));
                         {
                             int old_stack = ++(context.stack_used);
                             Eterm value = flatmap_get_values(flatmap_val(t))[i];
@@ -1596,8 +1608,7 @@ restart:
                     Eterm *kv;
                     num_iters = hashmap_size(t);
                     if (!structure_checked) {
-                        DMC_PUSH(text, matchMap);
-                        DMC_PUSH(text, num_iters);
+                        DMC_PUSH2(text, matchMap, num_iters);
                     }
                     structure_checked = 0;
 
@@ -1623,8 +1634,7 @@ restart:
                             DESTROY_WSTACK(wstack);
                             goto error;
                         }
-                        DMC_PUSH(text, matchKey);
-                        DMC_PUSH(text, dmc_private_copy(&context, key));
+                        DMC_PUSH2(text, matchKey, dmc_private_copy(&context, key));
                         {
                             int old_stack = ++(context.stack_used);
                             res = dmc_one_term(&context, &heap, &stack, &text,
@@ -1654,8 +1664,7 @@ restart:
 		num_iters = arityval(*tuple_val(t));
 		if (!structure_checked) { /* i.e. we did not 
 					     pop it */
-		    DMC_PUSH(text,matchTuple);
-		    DMC_PUSH(text,num_iters);
+		    DMC_PUSH2(text, matchTuple, num_iters);
 		}
 		structure_checked = 0;
 		for (i = 1; i <= num_iters; ++i) {
@@ -2006,7 +2015,8 @@ restart:
     do_catch = 0;
     fail_label = -1;
     build_proc = psp;
-    esdp->current_process = psp;
+    if (esdp)
+        esdp->current_process = psp;
 
 #ifdef DEBUG
     ASSERT(variables == mpsp->u.variables);
@@ -2148,7 +2158,7 @@ restart:
 	case matchEqFloat:
 	    if (!is_float(*ep))
 		FAIL();
-	    if (memcmp(float_val(*ep) + 1, pc, sizeof(double)))
+	    if (sys_memcmp(float_val(*ep) + 1, pc, sizeof(double)))
 		FAIL();
 	    pc += TermWords(2);
 	    ++ep;
@@ -2498,32 +2508,27 @@ restart:
             if (have_no_seqtrace(SEQ_TRACE_TOKEN(c_p)))
 		*esp++ = NIL;
 	    else {
-		Eterm sender = SEQ_TRACE_TOKEN_SENDER(c_p);
-		Uint sender_sz = is_immed(sender) ? 0 : size_object(sender);
-		ehp = HAllocX(build_proc, 6 + sender_sz, HEAP_XTRA);
-		if (sender_sz) {
-		    sender = copy_struct(sender, sender_sz, &ehp, &MSO(build_proc));
-		}
- 		*esp++ = make_tuple(ehp);
- 		ehp[0] = make_arityval(5);
- 		ehp[1] = SEQ_TRACE_TOKEN_FLAGS(c_p);
- 		ehp[2] = SEQ_TRACE_TOKEN_LABEL(c_p);
- 		ehp[3] = SEQ_TRACE_TOKEN_SERIAL(c_p);
-		ehp[4] = sender;
- 		ehp[5] = SEQ_TRACE_TOKEN_LASTCNT(c_p);
-		ASSERT(SEQ_TRACE_TOKEN_ARITY(c_p) == 5);
-		ASSERT(is_immed(ehp[1]));
-		ASSERT(is_immed(ehp[2]));
-		ASSERT(is_immed(ehp[3]));
-		ASSERT(is_immed(ehp[5]));
-	    } 
+                Eterm token;
+                Uint token_sz;
+
+                ASSERT(SEQ_TRACE_TOKEN_ARITY(c_p) == 5);
+                ASSERT(is_immed(SEQ_TRACE_TOKEN_FLAGS(c_p)));
+                ASSERT(is_immed(SEQ_TRACE_TOKEN_SERIAL(c_p)));
+                ASSERT(is_immed(SEQ_TRACE_TOKEN_LASTCNT(c_p)));
+
+                token = SEQ_TRACE_TOKEN(c_p);
+                token_sz = size_object(token);
+
+                ehp = HAllocX(build_proc, token_sz, HEAP_XTRA);
+                *esp++ = copy_struct(token, token_sz, &ehp, &MSO(build_proc));
+	    }
 	    break;
         case matchEnableTrace:
             ASSERT(c_p == self);
 	    if ( (n = erts_trace_flag2bit(esp[-1]))) {
-                erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+                erts_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		set_tracee_flags(c_p, ERTS_TRACER(c_p), 0, n);
-                erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+                erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		esp[-1] = am_true;
 	    } else {
 		esp[-1] = FAIL_TERM;
@@ -2538,9 +2543,9 @@ restart:
 		    /* Always take over the tracer of the current process */
 		    set_tracee_flags(tmpp, ERTS_TRACER(c_p), 0, n);
                     if (tmpp == c_p)
-                        erts_smp_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL_MINOR);
+                        erts_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL_MINOR);
                     else
-                        erts_smp_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
+                        erts_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
                     esp[-1] = am_true;
 		}
 	    }
@@ -2548,9 +2553,9 @@ restart:
         case matchDisableTrace:
             ASSERT(c_p == self);
 	    if ( (n = erts_trace_flag2bit(esp[-1]))) {
-                erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+                erts_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		set_tracee_flags(c_p, ERTS_TRACER(c_p), n, 0);
-                erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+                erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		esp[-1] = am_true;
 	    } else {
 		esp[-1] = FAIL_TERM;
@@ -2565,9 +2570,9 @@ restart:
 		    /* Always take over the tracer of the current process */
 		    set_tracee_flags(tmpp, ERTS_TRACER(c_p), n, 0);
                     if (tmpp == c_p)
-                        erts_smp_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL_MINOR);
+                        erts_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL_MINOR);
                     else
-                        erts_smp_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
+                        erts_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
                     esp[-1] = am_true;
 		}
 	    }
@@ -2591,14 +2596,14 @@ restart:
 	    if (in_flags & ERTS_PAM_IGNORE_TRACE_SILENT)
 	      break;
 	    if (*esp == am_true) {
-		erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		ERTS_TRACE_FLAGS(c_p) |= F_TRACE_SILENT;
-		erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 	    }
 	    else if (*esp == am_false) {
-		erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		ERTS_TRACE_FLAGS(c_p) &= ~F_TRACE_SILENT;
-		erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 	    }
 	    break;
         case matchTrace2:
@@ -2627,10 +2632,10 @@ restart:
                     ERTS_TRACER_CLEAR(&tracer);
 		    break;
 		}
-		erts_smp_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_lock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		(--esp)[-1] = set_match_trace(c_p, FAIL_TERM, tracer,
 					      d_flags, e_flags);
-		erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
                 ERTS_TRACER_CLEAR(&tracer);
 	    }
 	    break;
@@ -2660,13 +2665,13 @@ restart:
 		if (tmpp == c_p) {
 		    (--esp)[-1] = set_match_trace(c_p, FAIL_TERM, tracer,
 						  d_flags, e_flags);
-		    erts_smp_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
+		    erts_proc_unlock(c_p, ERTS_PROC_LOCKS_ALL_MINOR);
 		} else {
-		    erts_smp_proc_unlock(c_p, ERTS_PROC_LOCK_MAIN);
+		    erts_proc_unlock(c_p, ERTS_PROC_LOCK_MAIN);
 		    (--esp)[-1] = set_match_trace(tmpp, FAIL_TERM, tracer,
 						  d_flags, e_flags);
-		    erts_smp_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
-		    erts_smp_proc_lock(c_p, ERTS_PROC_LOCK_MAIN);
+		    erts_proc_unlock(tmpp, ERTS_PROC_LOCKS_ALL);
+		    erts_proc_lock(c_p, ERTS_PROC_LOCK_MAIN);
 		}
                 ERTS_TRACER_CLEAR(&tracer);
 	    }
@@ -2675,7 +2680,8 @@ restart:
 	    do_catch = 1;
 	    if (in_flags & ERTS_PAM_COPY_RESULT) {
 		build_proc = c_p;
-		esdp->current_process = c_p;
+                if (esdp)
+                    esdp->current_process = c_p;
 	    }
 	    break;
 	case matchHalt:
@@ -2749,8 +2755,8 @@ Eterm db_format_dmc_err_info(Process *p, DMCErrInfo *ei)
 	if (vnum >= 0)
 	    erts_snprintf(buff,sizeof(buff)+20,tmp->error_string, vnum);
 	else
-	    strcpy(buff,tmp->error_string);
-	sl = strlen(buff);
+	    sys_strcpy(buff,tmp->error_string);
+	sl = sys_strlen(buff);
 	shp = HAlloc(p, sl * 2 + 5);
 	sev = (tmp->severity == dmcWarning) ? 
 	    am_atom_put("warning",7) :
@@ -3269,7 +3275,7 @@ void db_cleanup_offheap_comp(DbTerm* obj)
 	    break;
 	case FUN_SUBTAG:
 	    ASSERT(u.pb != &tmp);
-	    if (erts_smp_refc_dectest(&u.fun->fe->refc, 0) == 0) {
+	    if (erts_refc_dectest(&u.fun->fe->refc, 0) == 0) {
 		erts_erase_fun_entry(u.fun->fe);
 	    }
 	    break;
@@ -3542,20 +3548,17 @@ static DMCRet dmc_one_term(DMCContext *context,
 		return retRestart;
 	    }
 	    if (heap->vars[n].is_bound) {
-		DMC_PUSH(*text,matchCmp);
-		DMC_PUSH(*text,n);
+		DMC_PUSH2(*text, matchCmp, n);
 	    } else { /* Not bound, bind! */
 		if (n >= heap->vars_used)
 		    heap->vars_used = n + 1;
-		DMC_PUSH(*text,matchBind);
-		DMC_PUSH(*text,n);
+		DMC_PUSH2(*text, matchBind, n);
 		heap->vars[n].is_bound = 1;
 	    }
 	} else if (c == am_Underscore) {
 	    DMC_PUSH(*text, matchSkip);
 	} else { /* Any immediate value */
-	    DMC_PUSH(*text, matchEq);
-	    DMC_PUSH(*text, (Uint) c);
+	    DMC_PUSH2(*text, matchEq, (Uint) c);
 	}
 	break;
     case TAG_PRIMARY_LIST:
@@ -3568,9 +3571,8 @@ static DMCRet dmc_one_term(DMCContext *context,
 	switch ((hdr & _TAG_HEADER_MASK) >> _TAG_PRIMARY_SIZE) {
 	case (_TAG_HEADER_ARITYVAL >> _TAG_PRIMARY_SIZE):    
 	    n = arityval(*tuple_val(c));
-	    DMC_PUSH(*text, matchPushT);
+	    DMC_PUSH2(*text, matchPushT, n);
 	    ++(context->stack_used);
-	    DMC_PUSH(*text, n);
 	    DMC_PUSH(*stack, c);
 	    break;
         case (_TAG_HEADER_MAP >> _TAG_PRIMARY_SIZE):
@@ -3578,9 +3580,8 @@ static DMCRet dmc_one_term(DMCContext *context,
                 n = flatmap_get_size(flatmap_val(c));
             else
                 n = hashmap_size(c);
-            DMC_PUSH(*text, matchPushM);
+            DMC_PUSH2(*text, matchPushM, n);
             ++(context->stack_used);
-            DMC_PUSH(*text, n);
             DMC_PUSH(*stack, c);
             break;
 	case (_TAG_HEADER_REF >> _TAG_PRIMARY_SIZE):
@@ -3605,8 +3606,7 @@ static DMCRet dmc_one_term(DMCContext *context,
 	    break;
 	}
 	case (_TAG_HEADER_FLOAT >> _TAG_PRIMARY_SIZE):
-	    DMC_PUSH(*text,matchEqFloat);
-	    DMC_PUSH(*text, (Uint) float_val(c)[1]);
+	    DMC_PUSH2(*text, matchEqFloat, (Uint) float_val(c)[1]);
 #ifdef ARCH_64
 	    DMC_PUSH(*text, (Uint) 0);
 #else
@@ -3614,8 +3614,7 @@ static DMCRet dmc_one_term(DMCContext *context,
 #endif
 	    break;
 	default: /* BINARY, FUN, VECTOR, or EXTERNAL */
-	    DMC_PUSH(*text, matchEqBin);
-            DMC_PUSH(*text, dmc_private_copy(context, c));
+	    DMC_PUSH2(*text, matchEqBin, dmc_private_copy(context, c));
 	    break;
 	}
 	break;
@@ -3665,8 +3664,7 @@ static void do_emit_constant(DMCContext *context, DMC_STACK_TYPE(UWord) *text,
 	    emb->next = context->save;
 	    context->save = emb;
 	}
-	DMC_PUSH(*text,matchPushC);
-	DMC_PUSH(*text,(Uint) tmp);
+	DMC_PUSH2(*text, matchPushC, (Uint)tmp);
 	if (++context->stack_used > context->stack_need)
 	    context->stack_need = context->stack_used;
 }
@@ -3804,8 +3802,7 @@ dmc_tuple(DMCContext *context, DMCHeap *heap, DMC_STACK_TYPE(UWord) *text,
         *constant = 1;
         return retOk;
     }
-    DMC_PUSH(*text, matchMkTuple);
-    DMC_PUSH(*text, nelems);
+    DMC_PUSH2(*text, matchMkTuple, nelems);
     context->stack_used -= (nelems - 1);
     *constant = 0;
     return retOk;
@@ -3832,13 +3829,11 @@ dmc_map(DMCContext *context, DMCHeap *heap, DMC_STACK_TYPE(UWord) *text,
             *constant = 1;
             return retOk;
         }
-        DMC_PUSH(*text, matchPushC);
-        DMC_PUSH(*text, dmc_private_copy(context, m->keys));
+        DMC_PUSH2(*text, matchPushC, dmc_private_copy(context, m->keys));
         if (++context->stack_used > context->stack_need) {
             context->stack_need = context->stack_used;
         }
-        DMC_PUSH(*text, matchMkFlatMap);
-        DMC_PUSH(*text, nelems);
+        DMC_PUSH2(*text, matchMkFlatMap, nelems);
         context->stack_used -= nelems;
         *constant = 0;
         return retOk;
@@ -3890,8 +3885,7 @@ dmc_map(DMCContext *context, DMCHeap *heap, DMC_STACK_TYPE(UWord) *text,
                 do_emit_constant(context, text, CDR(kv));
             }
         }
-        DMC_PUSH(*text, matchMkHashMap);
-        DMC_PUSH(*text, nelems);
+        DMC_PUSH2(*text, matchMkHashMap, nelems);
         context->stack_used -= nelems;
         DESTROY_WSTACK(wstack);
         return retOk;
@@ -5051,7 +5045,7 @@ static int match_compact(ErlHeapFragment *expr, DMCErrInfo *err_info)
 	    ASSERT(j < x);
 	    erts_snprintf(buff+1, sizeof(buff) - 1, "%u", (unsigned) j);
 	    /* Yes, writing directly into terms, they ARE off heap */
-	    *p = erts_atom_put((byte *) buff, strlen(buff),
+	    *p = erts_atom_put((byte *) buff, sys_strlen(buff),
 			       ERTS_ATOM_ENC_LATIN1, 1);
 	}
 	++p;
@@ -5512,7 +5506,7 @@ void db_match_dis(Binary *bp)
 	    ++t;
 	    {
 		double num;
-		memcpy(&num,t,sizeof(double));
+		sys_memcpy(&num,t,sizeof(double));
 		t += TermWords(2);
 		erts_printf("EqFloat\t%f\n", num);
 	    }

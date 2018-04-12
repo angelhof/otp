@@ -1,7 +1,7 @@
 % This is an -*- erlang -*- file.
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -58,6 +58,8 @@
 	     core_lib,
 	     erl_bifs,
 	     rec_env,
+	     sys_core_alias,
+	     sys_core_bsm,
 	     sys_core_dsetel,
 	     sys_core_fold,
 	     sys_core_fold_lists,
@@ -66,8 +68,7 @@
 	     v3_codegen,
 	     v3_core,
 	     v3_kernel,
-	     v3_kernel_pp,
-	     v3_life
+	     v3_kernel_pp
 	    ]},
   {registered, []},
   {applications, [kernel, stdlib]},

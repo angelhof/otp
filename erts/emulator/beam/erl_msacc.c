@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2014-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2014-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,11 +48,7 @@ static Eterm erts_msacc_gather_stats(ErtsMsAcc *msacc, ErtsHeapFactory *factory)
 static void erts_msacc_reset(ErtsMsAcc *msacc);
 static ErtsMsAcc* get_msacc(void);
 
-#ifdef USE_THREADS
 erts_tsd_key_t ERTS_WRITE_UNLIKELY(erts_msacc_key);
-#else
-ErtsMsAcc *ERTS_WRITE_UNLIKELY(erts_msacc) = NULL;
-#endif
 #ifndef ERTS_MSACC_ALWAYS_ON
 int ERTS_WRITE_UNLIKELY(erts_msacc_enabled);
 #endif
@@ -60,10 +56,8 @@ int ERTS_WRITE_UNLIKELY(erts_msacc_enabled);
 static Eterm *erts_msacc_state_atoms = NULL;
 static erts_rwmtx_t msacc_mutex;
 static ErtsMsAcc *msacc_managed = NULL;
-#ifdef USE_THREADS
 static ErtsMsAcc *msacc_unmanaged = NULL;
 static Uint msacc_unmanaged_count = 0;
-#endif
 
 #if ERTS_MSACC_STATE_COUNT < MAP_SMALL_MAP_LIMIT
 #define DEFAULT_MSACC_MSG_SIZE (3 + 1 + ERTS_MSACC_STATE_COUNT * 2 + 3 + ERTS_REF_THING_SIZE)
@@ -76,12 +70,9 @@ void erts_msacc_early_init(void) {
 #ifndef ERTS_MSACC_ALWAYS_ON
     erts_msacc_enabled = 0;
 #endif
-    erts_rwmtx_init(&msacc_mutex,"msacc_list_mutex");
-#ifdef USE_THREADS
+    erts_rwmtx_init(&msacc_mutex, "msacc_list_mutex", NIL,
+        ERTS_LOCK_FLAGS_PROPERTY_STATIC | ERTS_LOCK_FLAGS_CATEGORY_DEBUG);
     erts_tsd_key_create(&erts_msacc_key,"erts_msacc_key");
-#else
-    erts_msacc = NULL;
-#endif
 }
 
 void erts_msacc_init(void) {
@@ -90,7 +81,7 @@ void erts_msacc_init(void) {
                                         sizeof(Eterm)*ERTS_MSACC_STATE_COUNT);
     for (i = 0; i < ERTS_MSACC_STATE_COUNT; i++) {
         erts_msacc_state_atoms[i] = am_atom_put(erts_msacc_states[i],
-                                                strlen(erts_msacc_states[i]));
+                                                sys_strlen(erts_msacc_states[i]));
     }
 }
 
@@ -106,10 +97,10 @@ void erts_msacc_init_thread(char *type, int id, int managed) {
     msacc->tid = erts_thr_self();
     msacc->perf_counter = 0;
 
-#ifdef USE_THREADS
     erts_rwmtx_rwlock(&msacc_mutex);
     if (!managed) {
-        erts_mtx_init(&msacc->mtx,"msacc_unmanaged_mutex");
+        erts_mtx_init(&msacc->mtx, "msacc_unmanaged_mutex", NIL,
+            ERTS_LOCK_FLAGS_PROPERTY_STATIC | ERTS_LOCK_FLAGS_CATEGORY_DEBUG);
         msacc->next = msacc_unmanaged;
         msacc_unmanaged = msacc;
         msacc_unmanaged_count++;
@@ -119,9 +110,6 @@ void erts_msacc_init_thread(char *type, int id, int managed) {
         msacc_managed = msacc;
     }
     erts_rwmtx_rwunlock(&msacc_mutex);
-#else
-    msacc_managed = msacc;
-#endif
 
     erts_msacc_reset(msacc);
 
@@ -203,7 +191,7 @@ Eterm erts_msacc_gather_stats(ErtsMsAcc *msacc, ErtsHeapFactory *factory) {
     map->keys = key;
     hp[0] = state_map;
     hp[1] = msacc->id;
-    hp[2] = am_atom_put(msacc->type,strlen(msacc->type));
+    hp[2] = am_atom_put(msacc->type,sys_strlen(msacc->type));
 
     return make_flatmap(map);
 }
@@ -214,7 +202,7 @@ typedef struct {
     Eterm ref;
     Eterm ref_heap[ERTS_REF_THING_SIZE];
     Uint req_sched;
-    erts_smp_atomic32_t refc;
+    erts_atomic32_t refc;
 } ErtsMSAccReq;
 
 static ErtsMsAcc* get_msacc(void) {
@@ -265,7 +253,7 @@ static void send_reply(ErtsMsAcc *msacc, ErtsMSAccReq *msaccrp) {
 	rp_locks &= ~ERTS_PROC_LOCK_MAIN;
 
     if (rp_locks)
-	erts_smp_proc_unlock(rp, rp_locks);
+	erts_proc_unlock(rp, rp_locks);
 
 }
 
@@ -301,7 +289,7 @@ reply_msacc(void *vmsaccrp)
 
     erts_proc_dec_refc(msaccrp->proc);
 
-    if (erts_smp_atomic32_dec_read_nob(&msaccrp->refc) == 0)
+    if (erts_atomic32_dec_read_nob(&msaccrp->refc) == 0)
       erts_free(ERTS_ALC_T_MSACC, vmsaccrp);
 }
 
@@ -368,14 +356,10 @@ erts_msacc_request(Process *c_p, int action, Eterm *threads)
     msaccrp->ref = STORE_NC(&hp, NULL, ref);
     msaccrp->req_sched = esdp->no;
 
-#ifdef ERTS_SMP
     *threads = erts_no_schedulers;
     *threads += 1; /* aux thread */
-#else
-    *threads = 1;
-#endif
 
-    erts_smp_atomic32_init_nob(&msaccrp->refc,(erts_aint32_t)*threads);
+    erts_atomic32_init_nob(&msaccrp->refc,(erts_aint32_t)*threads);
 
     erts_proc_add_refc(c_p, *threads);
 
@@ -384,12 +368,9 @@ erts_msacc_request(Process *c_p, int action, Eterm *threads)
                                           erts_no_schedulers,
                                           reply_msacc,
                                           (void *) msaccrp);
-#ifdef ERTS_SMP
     /* aux thread */
     erts_schedule_misc_aux_work(0, reply_msacc, (void *) msaccrp);
-#endif
 
-#ifdef USE_THREADS
     /* Manage unmanaged threads */
     switch (action) {
     case ERTS_MSACC_GATHER: {
@@ -466,7 +447,6 @@ erts_msacc_request(Process *c_p, int action, Eterm *threads)
     default: { ASSERT(0); }
     }
 
-#endif
 
     *threads = make_small(*threads);
 

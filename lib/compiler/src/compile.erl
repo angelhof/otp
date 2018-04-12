@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -203,7 +203,12 @@ expand_opts(Opts0) ->
 	       {_,_,undefined} -> [debug_info|Opts0];
 	       {_,_,_} -> Opts0
 	   end,
-    foldr(fun expand_opt/2, [], Opts).
+    %% iff,unless processing is to complex...
+    Opts1 = case proplists:is_defined(makedep_side_effect,Opts) of
+                true -> proplists:delete(makedep,Opts);
+                false -> Opts
+            end,
+    foldr(fun expand_opt/2, [], Opts1).
 
 expand_opt(basic_validation, Os) ->
     [no_code_generation,to_pp,binary|Os];
@@ -214,13 +219,15 @@ expand_opt(report, Os) ->
 expand_opt(return, Os) ->
     [return_errors,return_warnings|Os];
 expand_opt(r16, Os) ->
-    [no_record_opt,no_utf8_atoms|Os];
+    [no_get_hd_tl,no_record_opt,no_utf8_atoms|Os];
 expand_opt(r17, Os) ->
-    [no_record_opt,no_utf8_atoms|Os];
+    [no_get_hd_tl,no_record_opt,no_utf8_atoms|Os];
 expand_opt(r18, Os) ->
-    [no_record_opt,no_utf8_atoms|Os];
+    [no_get_hd_tl,no_record_opt,no_utf8_atoms|Os];
 expand_opt(r19, Os) ->
-    [no_record_opt,no_utf8_atoms|Os];
+    [no_get_hd_tl,no_record_opt,no_utf8_atoms|Os];
+expand_opt(r20, Os) ->
+    [no_get_hd_tl,no_record_opt,no_utf8_atoms|Os];
 expand_opt({debug_info_key,_}=O, Os) ->
     [encrypt_debug_info,O|Os];
 expand_opt(no_float_opt, Os) ->
@@ -264,9 +271,9 @@ format_error({delete_temp,File,Error}) ->
     io_lib:format("failed to delete temporary file ~ts: ~ts",
 		  [File,file:format_error(Error)]);
 format_error({parse_transform,M,R}) ->
-    io_lib:format("error in parse transform '~s': ~tp", [M, R]);
+    io_lib:format("error in parse transform '~ts': ~tp", [M, R]);
 format_error({undef_parse_transform,M}) ->
-    io_lib:format("undefined parse transform '~s'", [M]);
+    io_lib:format("undefined parse transform '~ts'", [M]);
 format_error({core_transform,M,R}) ->
     io_lib:format("error in core transform '~s': ~tp", [M, R]);
 format_error({crash,Pass,Reason}) ->
@@ -467,8 +474,10 @@ mpf(Ms) ->
 passes(Type, Opts) ->
     {Ext,Passes0} = passes_1(Opts),
     Passes1 = case Type of
-		  file -> Passes0;
-		  forms -> tl(Passes0)
+		  file ->
+                      Passes0;
+		  forms ->
+                      fix_first_pass(Passes0)
 	      end,
     Passes = select_passes(Passes1, Opts),
 
@@ -504,6 +513,22 @@ pass(from_asm) ->
 pass(from_beam) ->
     {".beam",[?pass(read_beam_file)|binary_passes()]};
 pass(_) -> none.
+
+%% For compilation from forms, replace the first pass with a pass
+%% that retrieves the module name. The module name is needed for
+%% proper diagnostics and for compilation to native code.
+
+fix_first_pass([{parse_core,_}|Passes]) ->
+    [?pass(get_module_name_from_core)|Passes];
+fix_first_pass([{beam_consult_asm,_}|Passes]) ->
+    [?pass(get_module_name_from_asm)|Passes];
+fix_first_pass([{read_beam_file,_}|Passes]) ->
+    [?pass(get_module_name_from_beam)|Passes];
+fix_first_pass([_|Passes]) ->
+    %% When compiling from abstract code, the module name
+    %% will be set after running the v3_core pass.
+    Passes.
+
 
 %% select_passes([Command], Opts) -> [{Name,Function}]
 %%  Interpret the lists of commands to return a pure list of passes.
@@ -656,6 +681,7 @@ select_list_passes_1([], _, Acc) ->
 standard_passes() ->
     [?pass(transform_module),
 
+     {iff,makedep_side_effect,?pass(makedep_and_output)},
      {iff,makedep,[
 	 ?pass(makedep),
 	 {unless,binary,?pass(makedep_output)}
@@ -688,12 +714,15 @@ core_passes() ->
       [{unless,no_copt,
        [{core_old_inliner,fun test_old_inliner/1,fun core_old_inliner/2},
 	{iff,doldinline,{listing,"oldinline"}},
-	{pass,sys_core_fold},
+	{unless,no_fold,{pass,sys_core_fold}},
 	{iff,dcorefold,{listing,"corefold"}},
 	{core_inline_module,fun test_core_inliner/1,fun core_inline_module/2},
 	{iff,dinline,{listing,"inline"}},
         {core_fold_after_inlining,fun test_any_inliner/1,
          fun core_fold_module_after_inlining/2},
+        {iff,dcopt,{listing,"copt"}},
+        {unless,no_alias,{pass,sys_core_alias}},
+        {iff,dalias,{listing,"core_alias"}},
 	?pass(core_transforms)]},
        {pass,case_clause_reorder},
        {iff,dcopt,{listing,"copt"}},
@@ -701,8 +730,10 @@ core_passes() ->
      | kernel_passes()].
 
 kernel_passes() ->
-    %% Destructive setelement/3 optimization and core lint.
-    [{pass,sys_core_dsetel},
+    %% Optimizations that must be done after all other optimizations.
+    [{pass,sys_core_bsm},
+     {iff,dcbsm,{listing,"core_bsm"}},
+     {pass,sys_core_dsetel},
      {iff,dsetel,{listing,"dsetel"}},
 
      {iff,clint,?pass(core_lint_module)},
@@ -712,8 +743,6 @@ kernel_passes() ->
      ?pass(v3_kernel),
      {iff,dkern,{listing,"kernel"}},
      {iff,'to_kernel',{done,"kernel"}},
-     {pass,v3_life},
-     {iff,dlife,{listing,"life"}},
      {pass,v3_codegen},
      {iff,dcg,{listing,"codegen"}}
      | asm_passes()].
@@ -750,6 +779,8 @@ asm_passes() ->
 	 {iff,drecv,{listing,"recv"}},
 	 {unless,no_record_opt,{pass,beam_record}},
 	 {iff,drecord,{listing,"record"}},
+         {unless,no_blk2,?pass(block2)},
+	 {iff,dblk2,{listing,"block2"}},
 	 {unless,no_stack_trimming,{pass,beam_trim}},
 	 {iff,dtrim,{listing,"trim"}},
 	 {pass,beam_flatten}]},
@@ -768,8 +799,10 @@ asm_passes() ->
      | binary_passes()].
 
 binary_passes() ->
-    [{native_compile,fun test_native/1,fun native_compile/2},
-     {unless,binary,?pass(save_binary,not_werror)}].
+    [{iff,'to_dis',?pass(to_dis)},
+     {native_compile,fun test_native/1,fun native_compile/2},
+     {unless,binary,?pass(save_binary,not_werror)}
+    ].
 
 %%%
 %%% Compiler passes.
@@ -837,6 +870,12 @@ beam_consult_asm(_Code, St) ->
 	    {error,St#compile{errors=St#compile.errors ++ Es}}
     end.
 
+get_module_name_from_asm({Mod,_,_,_,_}=Asm, St) ->
+    {ok,Asm,St#compile{module=Mod}};
+get_module_name_from_asm(Asm, St) ->
+    %% Invalid Beam assembly code. Let it crash in a later pass.
+    {ok,Asm,St}.
+
 read_beam_file(_Code, St) ->
     case file:read_file(St#compile.ifile) of
 	{ok,Beam} ->
@@ -852,6 +891,16 @@ read_beam_file(_Code, St) ->
 	{error,E} ->
 	    Es = [{St#compile.ifile,[{none,?MODULE,{open,E}}]}],
 	    {error,St#compile{errors=St#compile.errors ++ Es}}
+    end.
+
+get_module_name_from_beam(Beam, St) ->
+    case beam_lib:info(Beam) of
+        {error,beam_lib,Error} ->
+	    Es = [{"((forms))",[{none,beam_lib,Error}]}],
+            {error,St#compile{errors=St#compile.errors ++ Es}};
+        Info ->
+            {module,Mod} = keyfind(module, 1, Info),
+            {ok,Beam,St#compile{module=Mod}}
     end.
 
 no_native_compilation(BeamFile, #compile{options=Opts0}) ->
@@ -939,6 +988,16 @@ parse_core(_Code, St) ->
 	{error,E} ->
 	    Es = [{St#compile.ifile,[{none,compile,{open,E}}]}],
 	    {error,St#compile{errors=St#compile.errors ++ Es}}
+    end.
+
+get_module_name_from_core(Core, St) ->
+    try
+        Mod = cerl:concrete(cerl:module_name(Core)),
+        {ok,Core,St#compile{module=Mod}}
+    catch
+        _:_ ->
+            %% Invalid Core Erlang code. Let it crash in a later pass.
+            {ok,Core,St}
     end.
 
 compile_options([{attribute,_L,compile,C}|Fs]) when is_list(C) ->
@@ -1079,6 +1138,16 @@ core_lint_module(Code, St) ->
 	{error,Es,Ws} ->
 	    {error,St#compile{warnings=St#compile.warnings ++ Ws,
 			      errors=St#compile.errors ++ Es}}
+    end.
+
+%% makedep + output and continue
+makedep_and_output(Code0, St) ->
+    {ok,DepCode,St1} = makedep(Code0,St),
+    case makedep_output(DepCode, St1) of
+        {ok,_IgnoreCode,St2} ->
+            {ok,Code0,St2};
+        {error,St2} ->
+            {error,St2}
     end.
 
 makedep(Code0, #compile{ifile=Ifile,ofile=Ofile,options=Opts}=St) ->
@@ -1287,6 +1356,10 @@ v3_kernel(Code0, #compile{options=Opts,warnings=Ws0}=St) ->
 	    {ok,Code,St}
     end.
 
+block2(Code0, #compile{options=Opts}=St) ->
+    {ok,Code} = beam_block:module(Code0, [no_blockify|Opts]),
+    {ok,Code,St}.
+
 test_old_inliner(#compile{options=Opts}) ->
     %% The point of this test is to avoid loading the old inliner
     %% if we know that it will not be used.
@@ -1401,14 +1474,32 @@ save_core_code(Code, St) ->
 beam_asm(Code0, #compile{ifile=File,extra_chunks=ExtraChunks,options=CompilerOpts}=St) ->
     case debug_info(St) of
 	{ok,DebugInfo,Opts0} ->
-	    Source = paranoid_absname(File),
 	    Opts1 = [O || O <- Opts0, effects_code_generation(O)],
 	    Chunks = [{<<"Dbgi">>, DebugInfo} | ExtraChunks],
-	    {ok,Code} = beam_asm:module(Code0, Chunks, Source, Opts1, CompilerOpts),
+	    CompileInfo = compile_info(File, CompilerOpts, Opts1),
+	    {ok,Code} = beam_asm:module(Code0, Chunks, CompileInfo, CompilerOpts),
 	    {ok,Code,St#compile{abstract_code=[]}};
 	{error,Es} ->
 	    {error,St#compile{errors=St#compile.errors ++ [{File,Es}]}}
     end.
+
+compile_info(File, CompilerOpts, Opts) ->
+    IsSlim = member(slim, CompilerOpts),
+    IsDeterministic = member(deterministic, CompilerOpts),
+    Info0 = proplists:get_value(compile_info, Opts, []),
+    Info1 =
+	case paranoid_absname(File) of
+	    [_|_] = Source when not IsSlim, not IsDeterministic ->
+		[{source,Source} | Info0];
+	    _ ->
+		Info0
+	end,
+    Info2 =
+	case IsDeterministic of
+	    false -> [{options,proplists:delete(compile_info, Opts)} | Info1];
+	    true -> Info1
+	end,
+    Info2.
 
 paranoid_absname(""=File) ->
     File;
@@ -1466,15 +1557,14 @@ native_compile_1(Code, St) ->
 		    {error,St#compile{errors=St#compile.errors ++ Es}}
 	    end
     catch
-	Class:R ->
-	    Stk = erlang:get_stacktrace(),
+	Class:R:Stack ->
 	    case IgnoreErrors of
 		true ->
 		    Ws = [{St#compile.ifile,
-			   [{none,?MODULE,{native_crash,R,Stk}}]}],
+			   [{none,?MODULE,{native_crash,R,Stack}}]}],
 		    {ok,St#compile{warnings=St#compile.warnings ++ Ws}};
 		false ->
-		    erlang:raise(Class, R, Stk)
+		    erlang:raise(Class, R, Stack)
 	    end
     end.
 
@@ -1702,6 +1792,21 @@ listing(LFun, Ext, Code, St) ->
 	    {error,St#compile{errors=St#compile.errors ++ Es}}
     end.
 
+to_dis(Code, #compile{module=Module,ofile=Outfile}=St) ->
+    Loaded = code:is_loaded(Module),
+    Sticky = code:is_sticky(Module),
+    _ = [code:unstick_mod(Module) || Sticky],
+
+    {module,Module} = code:load_binary(Module, "", Code),
+    DestDir = filename:dirname(Outfile),
+    DisFile = filename:join(DestDir, atom_to_list(Module) ++ ".dis"),
+    ok = erts_debug:dis_to_file(Module, DisFile),
+
+    %% Restore loaded module
+    _ = [{module, Module} = code:load_file(Module) || Loaded =/= false],
+    [code:stick_mod(Module) || Sticky],
+    {ok,Code,St}.
+
 output_encoding(F, #compile{encoding = none}) ->
     ok = io:setopts(F, [{encoding, epp:default_encoding()}]);
 output_encoding(F, #compile{encoding = Encoding}) ->
@@ -1877,11 +1982,12 @@ pre_load() ->
 	 erl_lint,
 	 erl_parse,
 	 erl_scan,
+	 sys_core_alias,
+	 sys_core_bsm,
 	 sys_core_dsetel,
 	 sys_core_fold,
 	 v3_codegen,
 	 v3_core,
-	 v3_kernel,
-	 v3_life],
+	 v3_kernel],
     _ = code:ensure_modules_loaded(L),
     ok.

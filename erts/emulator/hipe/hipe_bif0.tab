@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2001-2016. All Rights Reserved.
+# Copyright Ericsson AB 2001-2017. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -109,6 +109,7 @@ atom suspend_0
 atom gc_1
 atom hipe_apply
 atom rethrow
+atom raw_raise
 atom find_na_or_make_stub
 atom nonclosure_address
 atom atomic_inc
@@ -135,8 +136,8 @@ atom bs_utf16_size
 atom bs_put_utf16be
 atom bs_put_utf16le
 atom bs_get_utf16
-atom bs_validate_unicode
 atom bs_validate_unicode_retract
 atom emulate_fpe
 atom emasculate_binary
 atom is_divisible
+atom is_unicode

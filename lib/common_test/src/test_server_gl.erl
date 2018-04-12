@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2012-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2012-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -132,6 +132,7 @@ set_props(GL, PropList) ->
 %%% Internal functions.
 
 init([TSIO]) ->
+    ct_util:mark_process(group_leader),
     EscChars = case application:get_env(test_server, esc_chars) of
 		   {ok,ECBool} -> ECBool;
 		   _           -> true
@@ -173,8 +174,8 @@ handle_info({'DOWN',Ref,process,_,Reason}=D, #st{minor_monitor=Ref}=St) ->
     case Reason of
 	normal -> ok;
 	_ ->
-	    Data = io_lib:format("=== WARNING === TC: ~w\n"
-				 "Got down from minor Fd ~w: ~w\n\n",
+	    Data = io_lib:format("=== WARNING === TC: ~tw\n"
+				 "Got down from minor Fd ~w: ~tw\n\n",
 				 [St#st.tc,St#st.minor,D]),
 	    test_server_io:print_unexpected(Data)
     end,
@@ -319,7 +320,7 @@ output(Level, Str, Sender, From, St) when is_atom(Level) ->
     output_to_file(Level, dress_output(Str, Sender, St), From, St).
 
 output_to_file(minor, Data0, From, #st{tc={M,F,A},minor=none}) ->
-    Data = [io_lib:format("=== ~w:~w/~w\n", [M,F,A]),Data0],
+    Data = [io_lib:format("=== ~w:~tw/~w\n", [M,F,A]),Data0],
     test_server_io:print(From, unexpected_io, Data),
     ok;
 output_to_file(minor, Data, From, #st{tc=TC,minor=Fd}) ->
@@ -328,10 +329,10 @@ output_to_file(minor, Data, From, #st{tc=TC,minor=Fd}) ->
     catch
 	Type:Reason ->
 	    Data1 =
-		[io_lib:format("=== ERROR === TC: ~w\n"
+		[io_lib:format("=== ERROR === TC: ~tw\n"
 			       "Failed to write to minor Fd: ~w\n"
 			       "Type: ~w\n"
-			       "Reason: ~w\n",
+			       "Reason: ~tw\n",
 			       [TC,Fd,Type,Reason]),
 		 Data,"\n"],
 	    test_server_io:print(From, unexpected_io, Data1)

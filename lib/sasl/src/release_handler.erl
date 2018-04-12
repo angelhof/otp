@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -420,7 +420,7 @@ upgrade_app(App, NewDir) ->
 %%          located in the ebin dir of the _current_ version
 %%-----------------------------------------------------------------
 downgrade_app(App, OldDir) ->
-    case string:tokens(filename:basename(OldDir), "-") of
+    case string:lexemes(filename:basename(OldDir), "-") of
 	[_AppS, OldVsn] ->
 	    downgrade_app(App, OldVsn, OldDir);
 	_ ->
@@ -640,8 +640,8 @@ handle_call({install_release, Vsn, ErrorAction, Opts}, From, S) ->
 	    {noreply, NS};
 	{'EXIT', Reason} ->
 	    io:format("release_handler:"
-		      "install_release(Vsn=~p Opts=~p) failed, "
-		      "Reason=~p~n", [Vsn, Opts, Reason]),
+		      "install_release(Vsn=~tp Opts=~tp) failed, "
+		      "Reason=~tp~n", [Vsn, Opts, Reason]),
 	    gen_server:reply(From, {error, Reason}),
 	    case ErrorAction of
 		restart ->
@@ -1124,7 +1124,7 @@ new_emulator_make_hybrid_config(CurrentVsn,ToVsn,TmpVsn,RelDir,Masters) ->
 	    {ok,[FC]} ->
 		FC;
 	    {error,Error1} ->
-		io:format("Warning: ~w can not read ~p: ~p~n",
+		io:format("Warning: ~w can not read ~tp: ~tp~n",
 			  [?MODULE,FromFile,Error1]),
 		[]
 	end,
@@ -1134,7 +1134,7 @@ new_emulator_make_hybrid_config(CurrentVsn,ToVsn,TmpVsn,RelDir,Masters) ->
 	    {ok,[ToConfig]} ->
 		[lists:keyfind(App,1,ToConfig) || App <- [kernel,stdlib,sasl]];
 	    {error,Error2} ->
-		io:format("Warning: ~w can not read ~p: ~p~n",
+		io:format("Warning: ~w can not read ~tp: ~tp~n",
 			  [?MODULE,ToFile,Error2]),
 		[false,false,false]
 	end,
@@ -1143,8 +1143,9 @@ new_emulator_make_hybrid_config(CurrentVsn,ToVsn,TmpVsn,RelDir,Masters) ->
     Config2 = replace_config(stdlib,Config1,Stdlib),
     Config3 = replace_config(sasl,Config2,Sasl),
 
-    ConfigStr = io_lib:format("~p.~n",[Config3]),
-    write_file(TmpFile,ConfigStr,Masters).
+    ConfigStr = io_lib:format("%% ~s~n~tp.~n",
+                              [epp:encoding_to_string(utf8),Config3]),
+    write_file(TmpFile,unicode:characters_to_binary(ConfigStr),Masters).
 
 %% Take the configuration for application App from the new config and
 %% insert in the old config.
@@ -1173,8 +1174,8 @@ new_emulator_rm_tmp_release(_,_,_,_,Releases,_) ->
 
 %% Rename the tempoarary service (for erts ugprade) to the real ToVsn
 rename_tmp_service(EVsn,TmpVsn,NewVsn) ->
-    FromName = hd(string:tokens(atom_to_list(node()),"@")) ++ "_" ++ TmpVsn,
-    ToName = hd(string:tokens(atom_to_list(node()),"@")) ++ "_" ++ NewVsn,
+    FromName = hd(string:lexemes(atom_to_list(node()),"@")) ++ "_" ++ TmpVsn,
+    ToName = hd(string:lexemes(atom_to_list(node()),"@")) ++ "_" ++ NewVsn,
     case erlsrv:get_service(EVsn,ToName) of
 	{error, _Error} ->
 	    ok;
@@ -1206,9 +1207,9 @@ rename_service(EVsn,FromName,ToName) ->
 %%% in which case we try to rename the old service to the new name and try
 %%% to update heart's view of what service we are really running.
 do_make_services_permanent(PermanentVsn,Vsn, PermanentEVsn, EVsn) ->
-    PermName = hd(string:tokens(atom_to_list(node()),"@")) 
+    PermName = hd(string:lexemes(atom_to_list(node()),"@"))
 	++ "_" ++ PermanentVsn,
-    Name = hd(string:tokens(atom_to_list(node()),"@")) 
+    Name = hd(string:lexemes(atom_to_list(node()),"@"))
 	++ "_" ++ Vsn,
     case erlsrv:get_service(EVsn,Name) of
 	{error, _Error} ->
@@ -1295,7 +1296,7 @@ do_make_permanent(#state{releases = Releases,
 
 
 do_back_service(OldVersion, CurrentVersion,OldEVsn,CurrentEVsn) ->
-    NN = hd(string:tokens(atom_to_list(node()),"@")),
+    NN = hd(string:lexemes(atom_to_list(node()),"@")),
     OldName = NN ++ "_" ++ OldVersion,
     CurrentName = NN ++ "_" ++ CurrentVersion,
     UpdData = case erlsrv:get_service(CurrentEVsn,CurrentName) of
@@ -1384,7 +1385,7 @@ do_remove_service(Vsn) ->
     %% Very unconditionally remove the service.
     %% Note that the service could already have been removed when
     %% making another release permanent.
-    ServiceName = hd(string:tokens(atom_to_list(node()),"@")) 
+    ServiceName = hd(string:lexemes(atom_to_list(node()),"@"))
 	++ "_" ++ Vsn,
     case erlsrv:get_service(ServiceName) of
 	{error, _Error} ->
@@ -1669,9 +1670,9 @@ flush() ->
 prepare_restart_nt(#release{erts_vsn = EVsn, vsn = Vsn},
 		   #release{erts_vsn = PermEVsn, vsn = PermVsn},
 		   DataFileName) ->
-    CurrentServiceName = hd(string:tokens(atom_to_list(node()),"@")) 
+    CurrentServiceName = hd(string:lexemes(atom_to_list(node()),"@"))
 	++ "_" ++ PermVsn,
-    FutureServiceName = hd(string:tokens(atom_to_list(node()),"@")) 
+    FutureServiceName = hd(string:lexemes(atom_to_list(node()),"@"))
 	++ "_" ++ Vsn,
     CurrentService = case erlsrv:get_service(PermEVsn,CurrentServiceName) of
 			 {error, _} = Error1 ->
@@ -1807,7 +1808,7 @@ check_opt_file(FileName, Type, Masters) ->
 	ok ->
 	    true;
 	_Error ->
-	    io:format("Warning: ~p missing (optional)~n", [FileName]),
+	    io:format("Warning: ~tp missing (optional)~n", [FileName]),
 	    false
     end.
 
@@ -1874,9 +1875,10 @@ write_releases_1(Dir, NewReleases, Masters) ->
     write_releases_m(Dir, NewReleases, Masters).
 
 do_write_release(Dir, RELEASES, NewReleases) ->
-    case file:open(filename:join(Dir, RELEASES), [write]) of
+    case file:open(filename:join(Dir, RELEASES), [write,{encoding,utf8}]) of
 	{ok, Fd} ->
-	    ok = io:format(Fd, "~p.~n", [NewReleases]),
+	    ok = io:format(Fd, "%% ~s~n~tp.~n",
+                           [epp:encoding_to_string(utf8),NewReleases]),
 	    ok = file:close(Fd);
 	{error, Reason} ->
 	    {error, Reason}

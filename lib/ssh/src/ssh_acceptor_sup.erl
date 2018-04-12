@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -86,10 +86,7 @@ child_spec(Address, Port, Profile, Options) ->
     Timeout = ?GET_INTERNAL_OPT(timeout, Options, ?DEFAULT_TIMEOUT),
     #{id       => id(Address, Port, Profile),
       start    => {ssh_acceptor, start_link, [Port, Address, Options, Timeout]},
-      restart  => transient,
-      shutdown => 5500, %brutal_kill,
-      type     => worker,
-      modules  => [ssh_acceptor]
+      restart  => transient % because a crashed listener could be replaced by a new one
      }.
 
 id(Address, Port, Profile) ->

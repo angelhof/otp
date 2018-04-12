@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -161,15 +161,17 @@ md5_1(Beam) ->
 %% Cover some code that handles internal errors.
 
 silly_coverage(Config) when is_list(Config) ->
-    %% sys_core_fold, sys_core_setel, v3_kernel
+    %% sys_core_fold, sys_core_alias, sys_core_bsm, sys_core_setel, v3_kernel
     BadCoreErlang = {c_module,[],
 		     name,[],[],
 		     [{{c_var,[],{foo,2}},seriously_bad_body}]},
     expect_error(fun() -> sys_core_fold:module(BadCoreErlang, []) end),
+    expect_error(fun() -> sys_core_alias:module(BadCoreErlang, []) end),
+    expect_error(fun() -> sys_core_bsm:module(BadCoreErlang, []) end),
     expect_error(fun() -> sys_core_dsetel:module(BadCoreErlang, []) end),
     expect_error(fun() -> v3_kernel:module(BadCoreErlang, []) end),
 
-    %% v3_life
+    %% v3_codegen
     BadKernel = {k_mdef,[],?MODULE,
 		 [{foo,0}],
 		 [],
@@ -177,11 +179,7 @@ silly_coverage(Config) when is_list(Config) ->
 		   {k,[],[],[]},
 		   f,0,[],
 		   seriously_bad_body}]},
-    expect_error(fun() -> v3_life:module(BadKernel, []) end),
-
-    %% v3_codegen
-    CodegenInput = {?MODULE,[{foo,0}],[],[{function,foo,0,[a|b],a,b,[]}]},
-    expect_error(fun() -> v3_codegen:module(CodegenInput, []) end),
+    expect_error(fun() -> v3_codegen:module(BadKernel, []) end),
 
     %% beam_a
     BeamAInput = {?MODULE,[{foo,0}],[],
@@ -320,8 +318,7 @@ expect_error(Fun) ->
 	    io:format("~p", [Any]),
 	    ct:fail(call_was_supposed_to_fail)
     catch
-	Class:Reason ->
-	    Stk = erlang:get_stacktrace(),
+	Class:Reason:Stk ->
 	    io:format("~p:~p\n~p\n", [Class,Reason,Stk]),
 	    case {Class,Reason} of
 		{error,undef} ->
@@ -362,9 +359,7 @@ integer_encoding_1(Config) ->
     io:put_chars(Src, "t(Last) ->[\n"),
     io:put_chars(Data, "[\n"),
 
-    do_integer_encoding(-(id(1) bsl 10000), Src, Data),
-    do_integer_encoding(id(1) bsl 10000, Src, Data),
-    do_integer_encoding(1024, 0, Src, Data),
+    do_integer_encoding(137, 0, Src, Data),
     _ = [begin
 	     B = 1 bsl I,
 	     do_integer_encoding(-B-1, Src, Data),
@@ -373,7 +368,7 @@ integer_encoding_1(Config) ->
 	     do_integer_encoding(B-1, Src, Data),
 	     do_integer_encoding(B, Src, Data),
 	     do_integer_encoding(B+1, Src, Data)
-	 end || I <- lists:seq(1, 128)],
+	 end || I <- lists:seq(1, 130)],
     io:put_chars(Src, "Last].\n\n"),
     ok = file:close(Src),
     io:put_chars(Data, "0].\n\n"),
@@ -387,8 +382,6 @@ integer_encoding_1(Config) ->
     %% Compare lists.
     List = Mod:t(0),
     {ok,[List]} = file:consult(DataFile),
-    OneBsl10000 = id(1) bsl 10000,
-    [-(1 bsl 10000),OneBsl10000|_] = List,
 
     %% Cleanup.
     file:delete(SrcFile),
@@ -407,7 +400,3 @@ do_integer_encoding(I, Src, Data) ->
     Str = integer_to_list(I),
     io:put_chars(Src, [Str,",\n"]),
     io:put_chars(Data, [Str,",\n"]).
-
-    
-id(I) -> I.
-    

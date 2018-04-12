@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -89,8 +89,6 @@
 	 dist_terminate/1, dist_accessible/1, dist_deadlock/1,
          dist_open2/1, other_groups/1,
 
-         evil/1,
-
          otp_6278/1, otp_10131/1]).
 
 -export([head_fun/1, hf/0, lserv/1, 
@@ -123,7 +121,7 @@
 	[halt_int, wrap_int, halt_ext, wrap_ext, read_mode, head,
 	 notif, new_idx_vsn, reopen, block, unblock, open, close,
 	 error, chunk, truncate, many_users, info, change_size,
-	 change_attribute, distribution, evil, otp_6278, otp_10131]).
+	 change_attribute, distribution, otp_6278, otp_10131]).
 
 %% These test cases should be skipped if the VxWorks card is 
 %% configured without NFS cache.
@@ -149,7 +147,7 @@ all() ->
      {group, open}, {group, close}, {group, error}, chunk,
      truncate, many_users, {group, info},
      {group, change_size}, change_attribute,
-     {group, distribution}, evil, otp_6278, otp_10131].
+     {group, distribution}, otp_6278, otp_10131].
 
 groups() -> 
     [{halt_int, [], [halt_int_inf, {group, halt_int_sz}]},
@@ -481,7 +479,7 @@ halt_ro_crash(Conf) when is_list(Conf) ->
     %% This is how it was before R6B:
     %% {C1,T1,15} = disk_log:chunk(a,start),
     %% {C2,T2} = disk_log:chunk(a,C1),
-    {C1,_OneItem,7476} = disk_log:chunk(a,start),
+    {C1,_OneItem,7478} = disk_log:chunk(a,start),
     {C2, [], 7} = disk_log:chunk(a,C1),
     eof = disk_log:chunk(a,C2),
     ok = disk_log:close(a),
@@ -2493,6 +2491,7 @@ error_repair(Conf) when is_list(Conf) ->
     del(File, No),
     ok = file:del_dir(Dir),
 
+    error_logger:add_report_handler(?MODULE, self()),
     %% repair a file
     P1 = pps(),
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, wrap},
@@ -2502,13 +2501,15 @@ error_repair(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     BadFile = add_ext(File, 2), % current file
     set_opened(BadFile),
-    crash(BadFile, 26), % the binary is now invalid
-    {repaired,n,{recovered,0},{badbytes,24}} =
+    crash(BadFile, 28), % the binary is now invalid
+    {repaired,n,{recovered,0},{badbytes,26}} =
 	disk_log:open([{name, n}, {file, File}, {type, wrap},
 		       {format, internal}, {size, {40,No}}]),
     ok = disk_log:close(n),
     true = (P1 == pps()),
     del(File, No),
+    receive {info_msg, _, "disk_log: repairing" ++ _, _} -> ok
+    after 1000 -> ct:fail(failed) end,
 
     %% yet another repair
     P2 = pps(),
@@ -2518,13 +2519,15 @@ error_repair(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     BadFile2 = add_ext(File, 1), % current file
     set_opened(BadFile2),
-    crash(BadFile2, 47), % the second binary is now invalid
-    {repaired,n,{recovered,1},{badbytes,24}} =
+    crash(BadFile2, 51), % the second binary is now invalid
+    {repaired,n,{recovered,1},{badbytes,26}} =
 	disk_log:open([{name, n}, {file, File}, {type, wrap},
 		       {format, internal}, {size, {4000,No}}]),
     ok = disk_log:close(n),
     true = (P2 == pps()),
     del(File, No),
+    receive {info_msg, _, "disk_log: repairing" ++ _, _} -> ok
+    after 1000 -> ct:fail(failed) end,
 
     %% Repair, large term
     Big = term_to_binary(lists:duplicate(66000,$a)),
@@ -2540,6 +2543,8 @@ error_repair(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     Got = Big,
     del(File, No),
+    receive {info_msg, _, "disk_log: repairing" ++ _, _} -> ok
+    after 1000 -> ct:fail(failed) end,
 
     %% A term a little smaller than a chunk, then big terms.
     BigSmall = mk_bytes(1024*64-8-12),
@@ -2560,6 +2565,8 @@ error_repair(Conf) when is_list(Conf) ->
                        {type, halt}, {format, internal}]),
     ok = disk_log:close(n),
     file:delete(File),
+    receive {info_msg, _, "disk_log: repairing" ++ _, _} -> ok
+    after 1000 -> ct:fail(failed) end,
 
     %% The header is recovered.
     {ok,n} =
@@ -2571,14 +2578,15 @@ error_repair(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     set_opened(File),
     crash(File, 30),
-    {repaired,n,{recovered,3},{badbytes,15}} =
+    {repaired,n,{recovered,3},{badbytes,16}} =
         disk_log:open([{name, n}, {file, File}, {type, halt},
-		       {format, internal},{repair,true},
+		       {format, internal},{repair,true}, {quiet, true},
 		       {head_func, {?MODULE, head_fun, [{ok,"head"}]}}]),
     ["head",'of',terms] = get_all_terms(n),
     ok = disk_log:close(n),
-
+    error_logger:delete_report_handler(?MODULE),
     file:delete(File),
+    {messages, []} = process_info(self(), messages),
 
     ok.
 
@@ -2797,7 +2805,7 @@ chunk(Conf) when is_list(Conf) ->
     ok = disk_log:log_terms(n, [{some,terms}]), % second file full
     2 = curf(n),
     BadFile = add_ext(File, 1),
-    crash(BadFile, 26), % the _binary_ is now invalid
+    crash(BadFile, 28), % the _binary_ is now invalid
     {error, {corrupt_log_file, BFile}} = disk_log:chunk(n, start, 1),
     BadFile = BFile,
     ok = disk_log:close(n),
@@ -2807,7 +2815,7 @@ chunk(Conf) when is_list(Conf) ->
 			     {format, internal}]),
     ok = disk_log:log_terms(n, [{this,is}]),
     ok = disk_log:sync(n),
-    crash(File, 26), % the _binary_ is now invalid
+    crash(File, 28), % the _binary_ is now invalid
     {error, {corrupt_log_file, File2}} = disk_log:chunk(n, start, 1),
     crash(File, 10),
     {error,{corrupt_log_file,_}} = disk_log:bchunk(n, start, 1),
@@ -2901,8 +2909,8 @@ chunk(Conf) when is_list(Conf) ->
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, wrap},
 			     {format, internal}, {mode, read_only}]),
     CrashFile = add_ext(File, 1),
-    crash(CrashFile, 46), % the binary term {some,terms} is now bad
-    {H1, [{this,is}], 16} = disk_log:chunk(n, start, 10),
+    crash(CrashFile, 51), % the binary term {some,terms} is now bad
+    {H1, [{this,is}], 18} = disk_log:chunk(n, start, 10),
     {H2, [{on,a},{wrap,file}]} = disk_log:chunk(n, H1),
     eof = disk_log:chunk(n, H2),
     ok = disk_log:close(n),
@@ -2916,8 +2924,8 @@ chunk(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, halt},
 			     {format, internal}, {mode, read_only}]),
-    crash(File, 46), % the binary term {some,terms} is now bad
-    {J1, [{this,is}], 16} = disk_log:chunk(n, start, 10),
+    crash(File, 51), % the binary term {some,terms} is now bad
+    {J1, [{this,is}], 18} = disk_log:chunk(n, start, 10),
     {J2, [{on,a},{halt,file}]} = disk_log:chunk(n, J1),
     eof = disk_log:chunk(n, J2),
     ok = disk_log:close(n),
@@ -2932,8 +2940,8 @@ chunk(Conf) when is_list(Conf) ->
     ok = disk_log:close(n),
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, halt},
 			     {format, internal}, {mode, read_only}]),
-    crash(File, 40), % the binary term {s} is now bad
-    {J11, [{this,is}], 6} = disk_log:chunk(n, start, 10),
+    crash(File, 44), % the binary term {s} is now bad
+    {J11, [{this,is}], 7} = disk_log:chunk(n, start, 10),
     {J21, [{on,a},{halt,file}]} = disk_log:chunk(n, J11),
     eof = disk_log:chunk(n, J21),
     ok = disk_log:close(n),
@@ -3052,7 +3060,7 @@ truncate(Conf) when is_list(Conf) ->
     ok = disk_log:truncate(n, apa),
     rec(1, {disk_log, node(), n, {truncated, 6}}),
     {0, 0} = no_overflows(n),
-    22 = curb(n),
+    23 = curb(n),
     1 = curf(n),
     1 = cur_cnt(n),
     true = (Size == sz(n)),
@@ -3072,7 +3080,7 @@ truncate(Conf) when is_list(Conf) ->
     ok = disk_log:truncate(n, apa),
     rec(1, {disk_log, node(), n, {truncated, 3}}),
     {0, 0} = no_overflows(n),
-    22 = curb(n),
+    23 = curb(n),
     1 = curf(n),
     1 = cur_cnt(n),
     true = (Size == sz(n)),
@@ -3181,45 +3189,45 @@ info_current(Conf) when is_list(Conf) ->
     %% Internal with header.
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, wrap},
 			     {head, header}, {size, {100,No}}]),
-    {25, 1} = {curb(n), cur_cnt(n)},
+    {26, 1} = {curb(n), cur_cnt(n)},
     {1, 1}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log(n, B),
-    {93, 2} = {curb(n), cur_cnt(n)},
+    {94, 2} = {curb(n), cur_cnt(n)},
     {2, 2}  = {no_written_items(n), no_items(n)},
     ok = disk_log:close(n),
     {ok, n} = disk_log:open([{name, n}, {file, File}, {type, wrap},
 			     {notify, true},
 			     {head, header}, {size, {100,No}}]),
-    {93, 2} = {curb(n), cur_cnt(n)},
+    {94, 2} = {curb(n), cur_cnt(n)},
     {0, 2}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log(n, B),
     rec(1, {disk_log, node(), n, {wrap, 0}}),
-    {93, 2} = {curb(n), cur_cnt(n)},
+    {94, 2} = {curb(n), cur_cnt(n)},
     {2, 4}  = {no_written_items(n), no_items(n)},
     disk_log:inc_wrap_file(n),
     rec(1, {disk_log, node(), n, {wrap, 0}}),
-    {25, 1} = {curb(n), cur_cnt(n)},
+    {26, 1} = {curb(n), cur_cnt(n)},
     {3, 4}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log_terms(n, [B,B,B]),
     %% Used to be one message, but now one per wrapped file.
     rec(1, {disk_log, node(), n, {wrap, 0}}),
     rec(1, {disk_log, node(), n, {wrap, 2}}),
-    {93, 2} = {curb(n), cur_cnt(n)},
+    {94, 2} = {curb(n), cur_cnt(n)},
     {8, 7}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log_terms(n, [B]),
     rec(1, {disk_log, node(), n, {wrap, 2}}),
     ok = disk_log:log_terms(n, [B]),
     rec(1, {disk_log, node(), n, {wrap, 2}}),
-    {93, 2} = {curb(n), cur_cnt(n)},
+    {94, 2} = {curb(n), cur_cnt(n)},
     {12, 7}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log_terms(n, [BB,BB]),
     %% Used to be one message, but now one per wrapped file.
     rec(2, {disk_log, node(), n, {wrap, 2}}),
-    {193, 2} = {curb(n), cur_cnt(n)},
+    {194, 2} = {curb(n), cur_cnt(n)},
     {16, 7}  = {no_written_items(n), no_items(n)},
     ok = disk_log:log_terms(n, [SB,SB,SB]),
     rec(1, {disk_log, node(), n, {wrap, 2}}),
-    {79, 4} = {curb(n), cur_cnt(n)},
+    {80, 4} = {curb(n), cur_cnt(n)},
     {20, 9}  = {no_written_items(n), no_items(n)},
     ok = disk_log:close(n),
     del(File, No),
@@ -4666,119 +4674,6 @@ other_groups(Conf) when is_list(Conf) ->
 
     ok.
 
--define(MAX, ?MAX_FWRITE_CACHE). % as in disk_log_1.erl
-%% Evil cases such as closed file descriptor port.
-evil(Conf) when is_list(Conf) ->
-    Dir = ?privdir(Conf),
-    File = filename:join(Dir, "n.LOG"),
-    Log = n,
-
-    %% Not a very thorough test.
-
-    ok = setup_evil_filled_cache_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:log(Log, apa),
-    ok = disk_log:close(Log),
-
-    ok = setup_evil_filled_cache_halt(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:truncate(Log, apa),
-    ok = stop_evil(Log),
-
-    %% White box test. 
-    file:delete(File),
-    Ports0 = erlang:ports(),
-    {ok, Log} = disk_log:open([{name,Log},{file,File},{type,halt},
-                                     {size,?MAX+50},{format,external}]),
-    [Fd] = erlang:ports() -- Ports0,
-    {B,_} = x_mk_bytes(30),
-    ok = disk_log:blog(Log, <<0:(?MAX-1)/unit:8>>),
-    exit(Fd, kill),
-    {error, {file_error,_,einval}} = disk_log:blog_terms(Log, [B,B]),
-    ok= disk_log:close(Log),
-    file:delete(File),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:close(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:log(Log, apa),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_halt(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:log(Log, apa),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:reopen(Log, apa),
-    {error, {file_error,_,einval}} = disk_log:reopen(Log, apa),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:reopen(Log, apa),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:inc_wrap_file(Log),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:chunk(Log, start),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:truncate(Log),
-    ok = stop_evil(Log),
-
-    ok = setup_evil_wrap(Log, Dir),
-    {error, {file_error,_,einval}} = disk_log:chunk_step(Log, start, 1),
-    ok = stop_evil(Log),
-
-    io:format("messages: ~p~n", [erlang:process_info(self(), messages)]),
-    del(File, 2),
-    file:delete(File),
-    ok.
-
-setup_evil_wrap(Log, Dir) ->
-    setup_evil(Log, [{type,wrap},{size,{100,2}}], Dir).
-
-setup_evil_halt(Log, Dir) ->
-    setup_evil(Log, [{type,halt},{size,10000}], Dir).
-
-setup_evil(Log, Args, Dir) ->
-    File = filename:join(Dir, lists:concat([Log, ".LOG"])),
-    file:delete(File),
-    del(File, 2),
-    ok = disk_log:start(),
-    Ports0 = erlang:ports(),
-    {ok, Log} = disk_log:open([{name,Log},{file,File} | Args]),
-    [Fd] = erlang:ports() -- Ports0,
-    exit(Fd, kill),
-    ok = disk_log:log_terms(n, [<<0:10/unit:8>>]),
-    timer:sleep(2500), % TIMEOUT in disk_log_1.erl is 2000
-    ok.
-
-stop_evil(Log) ->
-    {error, _} = disk_log:close(Log),
-    ok.
-
-setup_evil_filled_cache_wrap(Log, Dir) ->
-    setup_evil_filled_cache(Log, [{type,wrap},{size,{?MAX,2}}], Dir).
-
-setup_evil_filled_cache_halt(Log, Dir) ->
-    setup_evil_filled_cache(Log, [{type,halt},{size,infinity}], Dir).
-
-%% The cache is filled, and the file descriptor port gone.
-setup_evil_filled_cache(Log, Args, Dir) ->
-    File = filename:join(Dir, lists:concat([Log, ".LOG"])),
-    file:delete(File),
-    del(File, 2),
-    ok = disk_log:start(),
-    Ports0 = erlang:ports(),
-    {ok, Log} = disk_log:open([{name,Log},{file,File} | Args]),
-    [Fd] = erlang:ports() -- Ports0,
-    ok = disk_log:log_terms(n, [<<0:?MAX/unit:8>>]),
-    exit(Fd, kill),
-    ok.
-
 %% OTP-6278. open/1 creates no status or crash report.
 otp_6278(Conf) when is_list(Conf) ->
     Dir = ?privdir(Conf),
@@ -5006,6 +4901,9 @@ init(Tester) ->
     
 handle_event({error_report, _GL, {Pid, crash_report, Report}}, Tester) ->
     Tester ! {crash_report, Pid, Report},
+    {ok, Tester};
+handle_event({info_msg, _GL, {Pid, F,A}}, Tester) ->
+    Tester ! {info_msg, Pid, F, A},
     {ok, Tester};
 handle_event(_Event, State) ->
     {ok, State}.

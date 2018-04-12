@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2013-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2013-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 
 -include("ssl_cipher.hrl").
 
--export([suites/1, all_suites/1, hmac_hash/3, ecc_curves/1, 
+-export([suites/1, all_suites/1, anonymous_suites/1,hmac_hash/3, ecc_curves/1, 
          corresponding_tls_version/1, corresponding_dtls_version/1,
          cookie_secret/0, cookie_timeout/0]).
 
@@ -40,6 +40,12 @@ all_suites(Version) ->
                  end,
                  ssl_cipher:all_suites(corresponding_tls_version(Version))).
 
+anonymous_suites(Version) ->
+    lists:filter(fun(Cipher) -> 
+                         is_acceptable_cipher(ssl_cipher:suite_definition(Cipher)) 
+                 end, 
+                 ssl_cipher:anonymous_suites(corresponding_tls_version(Version))).
+                 
 hmac_hash(MacAlg, MacSecret, Value) ->
     tls_v1:hmac_hash(MacAlg, MacSecret, Value).
 

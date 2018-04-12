@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -94,7 +94,7 @@
 	 cast/2, reply/2,
 	 abcast/2, abcast/3,
 	 multi_call/2, multi_call/3, multi_call/4,
-	 enter_loop/3, enter_loop/4, enter_loop/5, wake_hib/5]).
+	 enter_loop/3, enter_loop/4, enter_loop/5, wake_hib/6]).
 
 %% System exports
 -export([system_continue/3,
@@ -107,30 +107,36 @@
 %% Internal exports
 -export([init_it/6]).
 
--import(error_logger, [format/2]).
+-define(
+   STACKTRACE(),
+   element(2, erlang:process_info(self(), current_stacktrace))).
 
 %%%=========================================================================
 %%%  API
 %%%=========================================================================
 
 -callback init(Args :: term()) ->
-    {ok, State :: term()} | {ok, State :: term(), timeout() | hibernate} |
+    {ok, State :: term()} | {ok, State :: term(), timeout() | hibernate | {continue, term()}} |
     {stop, Reason :: term()} | ignore.
 -callback handle_call(Request :: term(), From :: {pid(), Tag :: term()},
                       State :: term()) ->
     {reply, Reply :: term(), NewState :: term()} |
-    {reply, Reply :: term(), NewState :: term(), timeout() | hibernate} |
+    {reply, Reply :: term(), NewState :: term(), timeout() | hibernate | {continue, term()}} |
     {noreply, NewState :: term()} |
-    {noreply, NewState :: term(), timeout() | hibernate} |
+    {noreply, NewState :: term(), timeout() | hibernate | {continue, term()}} |
     {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
     {stop, Reason :: term(), NewState :: term()}.
 -callback handle_cast(Request :: term(), State :: term()) ->
     {noreply, NewState :: term()} |
-    {noreply, NewState :: term(), timeout() | hibernate} |
+    {noreply, NewState :: term(), timeout() | hibernate | {continue, term()}} |
     {stop, Reason :: term(), NewState :: term()}.
 -callback handle_info(Info :: timeout | term(), State :: term()) ->
     {noreply, NewState :: term()} |
-    {noreply, NewState :: term(), timeout() | hibernate} |
+    {noreply, NewState :: term(), timeout() | hibernate | {continue, term()}} |
+    {stop, Reason :: term(), NewState :: term()}.
+-callback handle_continue(Info :: term(), State :: term()) ->
+    {noreply, NewState :: term()} |
+    {noreply, NewState :: term(), timeout() | hibernate | {continue, term()}} |
     {stop, Reason :: term(), NewState :: term()}.
 -callback terminate(Reason :: (normal | shutdown | {shutdown, term()} |
                                term()),
@@ -147,7 +153,7 @@
       Status :: term().
 
 -optional_callbacks(
-    [handle_info/2, terminate/2, code_change/3, format_status/2]).
+    [handle_info/2, handle_continue/2, terminate/2, code_change/3, format_status/2]).
 
 %%%  -----------------------------------------------------------------
 %%% Starts a generic server.
@@ -307,7 +313,8 @@ enter_loop(Mod, Options, State, ServerName, Timeout) ->
     Name = gen:get_proc_name(ServerName),
     Parent = gen:get_parent(),
     Debug = gen:debug_options(Name, Options),
-    loop(Parent, Name, State, Mod, Timeout, Debug).
+    HibernateAfterTimeout = gen:hibernate_after(Options),
+    loop(Parent, Name, State, Mod, Timeout, HibernateAfterTimeout, Debug).
 
 %%%========================================================================
 %%% Gen-callback functions
@@ -325,14 +332,16 @@ init_it(Starter, self, Name, Mod, Args, Options) ->
 init_it(Starter, Parent, Name0, Mod, Args, Options) ->
     Name = gen:name(Name0),
     Debug = gen:debug_options(Name, Options),
-    case catch Mod:init(Args) of
-	{ok, State} ->
+    HibernateAfterTimeout = gen:hibernate_after(Options),
+
+    case init_it(Mod, Args) of
+	{ok, {ok, State}} ->
 	    proc_lib:init_ack(Starter, {ok, self()}), 	    
-	    loop(Parent, Name, State, Mod, infinity, Debug);
-	{ok, State, Timeout} ->
+	    loop(Parent, Name, State, Mod, infinity, HibernateAfterTimeout, Debug);
+	{ok, {ok, State, Timeout}} ->
 	    proc_lib:init_ack(Starter, {ok, self()}), 	    
-	    loop(Parent, Name, State, Mod, Timeout, Debug);
-	{stop, Reason} ->
+	    loop(Parent, Name, State, Mod, Timeout, HibernateAfterTimeout, Debug);
+	{ok, {stop, Reason}} ->
 	    %% For consistency, we must make sure that the
 	    %% registered name (if any) is unregistered before
 	    %% the parent process is notified about the failure.
@@ -342,18 +351,25 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
 	    gen:unregister_name(Name0),
 	    proc_lib:init_ack(Starter, {error, Reason}),
 	    exit(Reason);
-	ignore ->
+	{ok, ignore} ->
 	    gen:unregister_name(Name0),
 	    proc_lib:init_ack(Starter, ignore),
 	    exit(normal);
-	{'EXIT', Reason} ->
-	    gen:unregister_name(Name0),
-	    proc_lib:init_ack(Starter, {error, Reason}),
-	    exit(Reason);
-	Else ->
+	{ok, Else} ->
 	    Error = {bad_return_value, Else},
 	    proc_lib:init_ack(Starter, {error, Error}),
-	    exit(Error)
+	    exit(Error);
+	{'EXIT', Class, Reason, Stacktrace} ->
+	    gen:unregister_name(Name0),
+	    proc_lib:init_ack(Starter, {error, terminate_reason(Class, Reason, Stacktrace)}),
+	    erlang:raise(Class, Reason, Stacktrace)
+    end.
+init_it(Mod, Args) ->
+    try
+	{ok, Mod:init(Args)}
+    catch
+	throw:R -> {ok, R};
+	Class:R:S -> {'EXIT', Class, R, S}
     end.
 
 %%%========================================================================
@@ -362,49 +378,70 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
 %%% ---------------------------------------------------
 %%% The MAIN loop.
 %%% ---------------------------------------------------
-loop(Parent, Name, State, Mod, hibernate, Debug) ->
-    proc_lib:hibernate(?MODULE,wake_hib,[Parent, Name, State, Mod, Debug]);
-loop(Parent, Name, State, Mod, Time, Debug) ->
+
+loop(Parent, Name, State, Mod, {continue, Continue} = Msg, HibernateAfterTimeout, Debug) ->
+    Reply = try_dispatch(Mod, handle_continue, Continue, State),
+    case Debug of
+	[] ->
+	    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod,
+				HibernateAfterTimeout, State);
+	_ ->
+	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name, Msg),
+	    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod,
+				HibernateAfterTimeout, State, Debug1)
+    end;
+
+loop(Parent, Name, State, Mod, hibernate, HibernateAfterTimeout, Debug) ->
+    proc_lib:hibernate(?MODULE,wake_hib,[Parent, Name, State, Mod, HibernateAfterTimeout, Debug]);
+
+loop(Parent, Name, State, Mod, infinity, HibernateAfterTimeout, Debug) ->
+	receive
+		Msg ->
+			decode_msg(Msg, Parent, Name, State, Mod, infinity, HibernateAfterTimeout, Debug, false)
+	after HibernateAfterTimeout ->
+		loop(Parent, Name, State, Mod, hibernate, HibernateAfterTimeout, Debug)
+	end;
+
+loop(Parent, Name, State, Mod, Time, HibernateAfterTimeout, Debug) ->
     Msg = receive
 	      Input ->
 		    Input
 	  after Time ->
 		  timeout
 	  end,
-    decode_msg(Msg, Parent, Name, State, Mod, Time, Debug, false).
+    decode_msg(Msg, Parent, Name, State, Mod, Time, HibernateAfterTimeout, Debug, false).
 
-wake_hib(Parent, Name, State, Mod, Debug) ->
+wake_hib(Parent, Name, State, Mod, HibernateAfterTimeout, Debug) ->
     Msg = receive
 	      Input ->
 		  Input
 	  end,
-    decode_msg(Msg, Parent, Name, State, Mod, hibernate, Debug, true).
+    decode_msg(Msg, Parent, Name, State, Mod, hibernate, HibernateAfterTimeout, Debug, true).
 
-decode_msg(Msg, Parent, Name, State, Mod, Time, Debug, Hib) ->
+decode_msg(Msg, Parent, Name, State, Mod, Time, HibernateAfterTimeout, Debug, Hib) ->
     case Msg of
 	{system, From, Req} ->
 	    sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug,
-				  [Name, State, Mod, Time], Hib);
+				  [Name, State, Mod, Time, HibernateAfterTimeout], Hib);
 	{'EXIT', Parent, Reason} ->
-	    terminate(Reason, Name, undefined, Msg, Mod, State, Debug);
+	    terminate(Reason, ?STACKTRACE(), Name, undefined, Msg, Mod, State, Debug);
 	_Msg when Debug =:= [] ->
-	    handle_msg(Msg, Parent, Name, State, Mod);
+	    handle_msg(Msg, Parent, Name, State, Mod, HibernateAfterTimeout);
 	_Msg ->
 	    Debug1 = sys:handle_debug(Debug, fun print_event/3,
 				      Name, {in, Msg}),
-	    handle_msg(Msg, Parent, Name, State, Mod, Debug1)
+	    handle_msg(Msg, Parent, Name, State, Mod, HibernateAfterTimeout, Debug1)
     end.
 
 %%% ---------------------------------------------------
 %%% Send/receive functions
 %%% ---------------------------------------------------
 do_send(Dest, Msg) ->
-    case catch erlang:send(Dest, Msg, [noconnect]) of
-	noconnect ->
-	    spawn(erlang, send, [Dest,Msg]);
-	Other ->
-	    Other
-    end.
+    try erlang:send(Dest, Msg)
+    catch
+        error:_ -> ok
+    end,
+    ok.
 
 do_multi_call(Nodes, Name, Req, infinity) ->
     Tag = make_ref(),
@@ -578,17 +615,11 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
 %% ---------------------------------------------------
 %% Helper functions for try-catch of callbacks.
 %% Returns the return value of the callback, or
-%% {'EXIT', ExitReason, ReportReason} (if an exception occurs)
+%% {'EXIT', Class, Reason, Stack} (if an exception occurs)
 %%
-%% ExitReason is the reason that shall be used when the process
-%% terminates.
-%%
-%% ReportReason is the reason that shall be printed in the error
-%% report.
-%%
-%% These functions are introduced in order to add the stack trace in
-%% the error report produced when a callback is terminated with
-%% erlang:exit/1 (OTP-12263).
+%% The Class, Reason and Stack are given to erlang:raise/3
+%% to make sure proc_lib receives the proper reasons and
+%% stacktraces.
 %% ---------------------------------------------------
 
 try_dispatch({'$gen_cast', Msg}, Mod, State) ->
@@ -602,23 +633,18 @@ try_dispatch(Mod, Func, Msg, State) ->
     catch
 	throw:R ->
 	    {ok, R};
-        error:undef = R when Func == handle_info ->
+        error:undef = R:Stacktrace when Func == handle_info ->
             case erlang:function_exported(Mod, handle_info, 2) of
                 false ->
                     error_logger:warning_msg("** Undefined handle_info in ~p~n"
-                                             "** Unhandled message: ~p~n",
+                                             "** Unhandled message: ~tp~n",
                                              [Mod, Msg]),
                     {ok, {noreply, State}};
                 true ->
-                    Stacktrace = erlang:get_stacktrace(),
-                    {'EXIT', {R, Stacktrace}, {R, Stacktrace}}
+                    {'EXIT', error, R, Stacktrace}
             end;
-	error:R ->
-	    Stacktrace = erlang:get_stacktrace(),
-	    {'EXIT', {R, Stacktrace}, {R, Stacktrace}};
-	exit:R ->
-	    Stacktrace = erlang:get_stacktrace(),
-	    {'EXIT', R, {R, Stacktrace}}
+	Class:R:Stacktrace ->
+	    {'EXIT', Class, R, Stacktrace}
     end.
 
 try_handle_call(Mod, Msg, From, State) ->
@@ -627,12 +653,8 @@ try_handle_call(Mod, Msg, From, State) ->
     catch
 	throw:R ->
 	    {ok, R};
-	error:R ->
-	    Stacktrace = erlang:get_stacktrace(),
-	    {'EXIT', {R, Stacktrace}, {R, Stacktrace}};
-	exit:R ->
-	    Stacktrace = erlang:get_stacktrace(),
-	    {'EXIT', R, {R, Stacktrace}}
+	Class:R:Stacktrace ->
+	    {'EXIT', Class, R, Stacktrace}
     end.
 
 try_terminate(Mod, Reason, State) ->
@@ -643,12 +665,8 @@ try_terminate(Mod, Reason, State) ->
 	    catch
 		throw:R ->
 		    {ok, R};
-		error:R ->
-		    Stacktrace = erlang:get_stacktrace(),
-		    {'EXIT', {R, Stacktrace}, {R, Stacktrace}};
-		exit:R ->
-		    Stacktrace = erlang:get_stacktrace(),
-		    {'EXIT', R, {R, Stacktrace}}
+		Class:R:Stacktrace ->
+		    {'EXIT', Class, R, Stacktrace}
 	   end;
 	false ->
 	    {ok, ok}
@@ -659,89 +677,91 @@ try_terminate(Mod, Reason, State) ->
 %%% Message handling functions
 %%% ---------------------------------------------------
 
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod) ->
+handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod, HibernateAfterTimeout) ->
     Result = try_handle_call(Mod, Msg, From, State),
     case Result of
 	{ok, {reply, Reply, NState}} ->
 	    reply(From, Reply),
-	    loop(Parent, Name, NState, Mod, infinity, []);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, []);
 	{ok, {reply, Reply, NState, Time1}} ->
 	    reply(From, Reply),
-	    loop(Parent, Name, NState, Mod, Time1, []);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, []);
 	{ok, {noreply, NState}} ->
-	    loop(Parent, Name, NState, Mod, infinity, []);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, []);
 	{ok, {noreply, NState, Time1}} ->
-	    loop(Parent, Name, NState, Mod, Time1, []);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, []);
 	{ok, {stop, Reason, Reply, NState}} ->
-	    {'EXIT', R} = 
-		(catch terminate(Reason, Name, From, Msg, Mod, NState, [])),
-	    reply(From, Reply),
-	    exit(R);
-	Other -> handle_common_reply(Other, Parent, Name, From, Msg, Mod, State)
+	    try
+		terminate(Reason, ?STACKTRACE(), Name, From, Msg, Mod, NState, [])
+	    after
+		reply(From, Reply)
+	    end;
+	Other -> handle_common_reply(Other, Parent, Name, From, Msg, Mod, HibernateAfterTimeout, State)
     end;
-handle_msg(Msg, Parent, Name, State, Mod) ->
+handle_msg(Msg, Parent, Name, State, Mod, HibernateAfterTimeout) ->
     Reply = try_dispatch(Msg, Mod, State),
-    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod, State).
+    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod, HibernateAfterTimeout, State).
 
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod, Debug) ->
+handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Mod, HibernateAfterTimeout, Debug) ->
     Result = try_handle_call(Mod, Msg, From, State),
     case Result of
 	{ok, {reply, Reply, NState}} ->
 	    Debug1 = reply(Name, From, Reply, NState, Debug),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, Debug1);
 	{ok, {reply, Reply, NState, Time1}} ->
 	    Debug1 = reply(Name, From, Reply, NState, Debug),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, Debug1);
 	{ok, {noreply, NState}} ->
 	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
 				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, Debug1);
 	{ok, {noreply, NState, Time1}} ->
 	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
 				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, Debug1);
 	{ok, {stop, Reason, Reply, NState}} ->
-	    {'EXIT', R} = 
-		(catch terminate(Reason, Name, From, Msg, Mod, NState, Debug)),
-	    _ = reply(Name, From, Reply, NState, Debug),
-	    exit(R);
+	    try
+		terminate(Reason, ?STACKTRACE(), Name, From, Msg, Mod, NState, Debug)
+	    after
+		_ = reply(Name, From, Reply, NState, Debug)
+	    end;
 	Other ->
-	    handle_common_reply(Other, Parent, Name, From, Msg, Mod, State, Debug)
+	    handle_common_reply(Other, Parent, Name, From, Msg, Mod, HibernateAfterTimeout, State, Debug)
     end;
-handle_msg(Msg, Parent, Name, State, Mod, Debug) ->
+handle_msg(Msg, Parent, Name, State, Mod, HibernateAfterTimeout, Debug) ->
     Reply = try_dispatch(Msg, Mod, State),
-    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod, State, Debug).
+    handle_common_reply(Reply, Parent, Name, undefined, Msg, Mod, HibernateAfterTimeout, State, Debug).
 
-handle_common_reply(Reply, Parent, Name, From, Msg, Mod, State) ->
+handle_common_reply(Reply, Parent, Name, From, Msg, Mod, HibernateAfterTimeout, State) ->
     case Reply of
 	{ok, {noreply, NState}} ->
-	    loop(Parent, Name, NState, Mod, infinity, []);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, []);
 	{ok, {noreply, NState, Time1}} ->
-	    loop(Parent, Name, NState, Mod, Time1, []);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, []);
 	{ok, {stop, Reason, NState}} ->
-	    terminate(Reason, Name, From, Msg, Mod, NState, []);
-	{'EXIT', ExitReason, ReportReason} ->
-	    terminate(ExitReason, ReportReason, Name, From, Msg, Mod, State, []);
+	    terminate(Reason, ?STACKTRACE(), Name, From, Msg, Mod, NState, []);
+	{'EXIT', Class, Reason, Stacktrace} ->
+	    terminate(Class, Reason, Stacktrace, Name, From, Msg, Mod, State, []);
 	{ok, BadReply} ->
-	    terminate({bad_return_value, BadReply}, Name, From, Msg, Mod, State, [])
+	    terminate({bad_return_value, BadReply}, ?STACKTRACE(), Name, From, Msg, Mod, State, [])
     end.
 
-handle_common_reply(Reply, Parent, Name, From, Msg, Mod, State, Debug) ->
+handle_common_reply(Reply, Parent, Name, From, Msg, Mod, HibernateAfterTimeout, State, Debug) ->
     case Reply of
 	{ok, {noreply, NState}} ->
 	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
 				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, infinity, Debug1);
+	    loop(Parent, Name, NState, Mod, infinity, HibernateAfterTimeout, Debug1);
 	{ok, {noreply, NState, Time1}} ->
 	    Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
 				      {noreply, NState}),
-	    loop(Parent, Name, NState, Mod, Time1, Debug1);
+	    loop(Parent, Name, NState, Mod, Time1, HibernateAfterTimeout, Debug1);
 	{ok, {stop, Reason, NState}} ->
-	    terminate(Reason, Name, From, Msg, Mod, NState, Debug);
-	{'EXIT', ExitReason, ReportReason} ->
-	    terminate(ExitReason, ReportReason, Name, From, Msg, Mod, State, Debug);
+	    terminate(Reason, ?STACKTRACE(), Name, From, Msg, Mod, NState, Debug);
+	{'EXIT', Class, Reason, Stacktrace} ->
+	    terminate(Class, Reason, Stacktrace, Name, From, Msg, Mod, State, Debug);
 	{ok, BadReply} ->
-	    terminate({bad_return_value, BadReply}, Name, From, Msg, Mod, State, Debug)
+	    terminate({bad_return_value, BadReply}, ?STACKTRACE(), Name, From, Msg, Mod, State, Debug)
     end.
 
 reply(Name, {To, Tag}, Reply, State, Debug) ->
@@ -753,26 +773,26 @@ reply(Name, {To, Tag}, Reply, State, Debug) ->
 %%-----------------------------------------------------------------
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
-system_continue(Parent, Debug, [Name, State, Mod, Time]) ->
-    loop(Parent, Name, State, Mod, Time, Debug).
+system_continue(Parent, Debug, [Name, State, Mod, Time, HibernateAfterTimeout]) ->
+    loop(Parent, Name, State, Mod, Time, HibernateAfterTimeout, Debug).
 
 -spec system_terminate(_, _, _, [_]) -> no_return().
 
-system_terminate(Reason, _Parent, Debug, [Name, State, Mod, _Time]) ->
-    terminate(Reason, Name, undefined, [], Mod, State, Debug).
+system_terminate(Reason, _Parent, Debug, [Name, State, Mod, _Time, _HibernateAfterTimeout]) ->
+    terminate(Reason, ?STACKTRACE(), Name, undefined, [], Mod, State, Debug).
 
-system_code_change([Name, State, Mod, Time], _Module, OldVsn, Extra) ->
+system_code_change([Name, State, Mod, Time, HibernateAfterTimeout], _Module, OldVsn, Extra) ->
     case catch Mod:code_change(OldVsn, State, Extra) of
-	{ok, NewState} -> {ok, [Name, NewState, Mod, Time]};
+	{ok, NewState} -> {ok, [Name, NewState, Mod, Time, HibernateAfterTimeout]};
 	Else -> Else
     end.
 
-system_get_state([_Name, State, _Mod, _Time]) ->
+system_get_state([_Name, State, _Mod, _Time, _HibernateAfterTimeout]) ->
     {ok, State}.
 
-system_replace_state(StateFun, [Name, State, Mod, Time]) ->
+system_replace_state(StateFun, [Name, State, Mod, Time, HibernateAfterTimeout]) ->
     NState = StateFun(State),
-    {ok, NState, [Name, NState, Mod, Time]}.
+    {ok, NState, [Name, NState, Mod, Time, HibernateAfterTimeout]}.
 
 %%-----------------------------------------------------------------
 %% Format debug messages.  Print them as the call-back module sees
@@ -781,53 +801,76 @@ system_replace_state(StateFun, [Name, State, Mod, Time]) ->
 print_event(Dev, {in, Msg}, Name) ->
     case Msg of
 	{'$gen_call', {From, _Tag}, Call} ->
-	    io:format(Dev, "*DBG* ~p got call ~p from ~w~n",
+	    io:format(Dev, "*DBG* ~tp got call ~tp from ~w~n",
 		      [Name, Call, From]);
 	{'$gen_cast', Cast} ->
-	    io:format(Dev, "*DBG* ~p got cast ~p~n",
+	    io:format(Dev, "*DBG* ~tp got cast ~tp~n",
 		      [Name, Cast]);
 	_ ->
-	    io:format(Dev, "*DBG* ~p got ~p~n", [Name, Msg])
+	    io:format(Dev, "*DBG* ~tp got ~tp~n", [Name, Msg])
     end;
 print_event(Dev, {out, Msg, To, State}, Name) ->
-    io:format(Dev, "*DBG* ~p sent ~p to ~w, new state ~w~n", 
+    io:format(Dev, "*DBG* ~tp sent ~tp to ~w, new state ~tp~n",
 	      [Name, Msg, To, State]);
 print_event(Dev, {noreply, State}, Name) ->
-    io:format(Dev, "*DBG* ~p new state ~w~n", [Name, State]);
+    io:format(Dev, "*DBG* ~tp new state ~tp~n", [Name, State]);
 print_event(Dev, Event, Name) ->
-    io:format(Dev, "*DBG* ~p dbg  ~p~n", [Name, Event]).
+    io:format(Dev, "*DBG* ~tp dbg  ~tp~n", [Name, Event]).
 
 
 %%% ---------------------------------------------------
 %%% Terminate the server.
+%%%
+%%% terminate/8 is triggered by {stop, Reason} or bad
+%%% return values. The stacktrace is generated via the
+%%% ?STACKTRACE() macro and the ReportReason must not
+%%% be wrapped in tuples.
+%%%
+%%% terminate/9 is triggered in case of error/exit in
+%%% the user callback. In this case the report reason
+%%% always includes the user stacktrace.
+%%%
+%%% The reason received in the terminate/2 callbacks
+%%% always includes the stacktrace for errors and never
+%%% for exits.
 %%% ---------------------------------------------------
 
--spec terminate(_, _, _, _, _, _, _) -> no_return().
-terminate(Reason, Name, From, Msg, Mod, State, Debug) ->
-    terminate(Reason, Reason, Name, From, Msg, Mod, State, Debug).
-
 -spec terminate(_, _, _, _, _, _, _, _) -> no_return().
-terminate(ExitReason, ReportReason, Name, From, Msg, Mod, State, Debug) ->
-    Reply = try_terminate(Mod, ExitReason, State),
+terminate(Reason, Stacktrace, Name, From, Msg, Mod, State, Debug) ->
+  terminate(exit, Reason, Stacktrace, Reason, Name, From, Msg, Mod, State, Debug).
+
+-spec terminate(_, _, _, _, _, _, _, _, _) -> no_return().
+terminate(Class, Reason, Stacktrace, Name, From, Msg, Mod, State, Debug) ->
+  ReportReason = {Reason, Stacktrace},
+  terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Mod, State, Debug).
+
+-spec terminate(_, _, _, _, _, _, _, _, _, _) -> no_return().
+terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Mod, State, Debug) ->
+    Reply = try_terminate(Mod, terminate_reason(Class, Reason, Stacktrace), State),
     case Reply of
-	{'EXIT', ExitReason1, ReportReason1} ->
+	{'EXIT', C, R, S} ->
 	    FmtState = format_status(terminate, Mod, get(), State),
-	    error_info(ReportReason1, Name, From, Msg, FmtState, Debug),
-	    exit(ExitReason1);
+	    error_info({R, S}, Name, From, Msg, FmtState, Debug),
+	    erlang:raise(C, R, S);
 	_ ->
-	    case ExitReason of
-		normal ->
-		    exit(normal);
-		shutdown ->
-		    exit(shutdown);
-		{shutdown,_}=Shutdown ->
-		    exit(Shutdown);
+	    case {Class, Reason} of
+		{exit, normal} -> ok;
+		{exit, shutdown} -> ok;
+		{exit, {shutdown,_}} -> ok;
 		_ ->
 		    FmtState = format_status(terminate, Mod, get(), State),
-		    error_info(ReportReason, Name, From, Msg, FmtState, Debug),
-		    exit(ExitReason)
+		    error_info(ReportReason, Name, From, Msg, FmtState, Debug)
 	    end
+    end,
+    case Stacktrace of
+	[] ->
+	    erlang:Class(Reason);
+	_ ->
+	    erlang:raise(Class, Reason, Stacktrace)
     end.
+
+terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
+terminate_reason(exit, Reason, _Stacktrace) -> Reason.
 
 error_info(_Reason, application_controller, _From, _Msg, _State, _Debug) ->
     %% OTP-5811 Don't send an error report if it's the system process
@@ -850,17 +893,17 @@ error_info(Reason, Name, From, Msg, State, Debug) ->
 			end
 		end;
 	    _ ->
-		Reason
-	end,
+		error_logger:limit_term(Reason)
+	end,    
     {ClientFmt, ClientArgs} = client_stacktrace(From),
-    format("** Generic server ~p terminating \n"
-           "** Last message in was ~p~n"
-           "** When Server state == ~p~n"
-           "** Reason for termination == ~n** ~p~n" ++ ClientFmt,
-	   [Name, Msg, State, Reason1] ++ ClientArgs),
+    LimitedState = error_logger:limit_term(State),
+    error_logger:format("** Generic server ~tp terminating \n"
+                        "** Last message in was ~tp~n"
+                        "** When Server state == ~tp~n"
+                        "** Reason for termination == ~n** ~tp~n" ++ ClientFmt,
+                        [Name, Msg, LimitedState, Reason1] ++ ClientArgs),
     sys:print_log(Debug),
     ok.
-
 client_stacktrace(undefined) ->
     {"", []};
 client_stacktrace({From, _Tag}) ->
@@ -871,11 +914,11 @@ client_stacktrace(From) when is_pid(From), node(From) =:= node() ->
             {"** Client ~p is dead~n", [From]};
         [{current_stacktrace, Stacktrace}, {registered_name, []}]  ->
             {"** Client ~p stacktrace~n"
-             "** ~p~n",
+             "** ~tp~n",
              [From, Stacktrace]};
         [{current_stacktrace, Stacktrace}, {registered_name, Name}]  ->
-            {"** Client ~p stacktrace~n"
-             "** ~p~n",
+            {"** Client ~tp stacktrace~n"
+             "** ~tp~n",
              [Name, Stacktrace]}
     end;
 client_stacktrace(From) when is_pid(From) ->
@@ -885,7 +928,7 @@ client_stacktrace(From) when is_pid(From) ->
 %% Status information
 %%-----------------------------------------------------------------
 format_status(Opt, StatusData) ->
-    [PDict, SysState, Parent, Debug, [Name, State, Mod, _Time]] = StatusData,
+    [PDict, SysState, Parent, Debug, [Name, State, Mod, _Time, _HibernateAfterTimeout]] = StatusData,
     Header = gen:format_status_header("Status for generic server", Name),
     Log = sys:get_debug(log, Debug, []),
     Specfic = case format_status(Opt, Mod, PDict, State) of

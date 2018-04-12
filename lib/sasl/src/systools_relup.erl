@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -535,9 +535,9 @@ to_list(X) when is_list(X) -> X.
 write_relup_file(Relup, Opts) ->
     Filename = filename:join(filename:absname(get_opt(outdir,Opts)),
                              "relup"),
-    case file:open(Filename, [write]) of
+    case file:open(Filename, [write,{encoding,utf8}]) of
         {ok, Fd} ->
-            io:format(Fd, "~p.~n", [Relup]),
+            io:format(Fd, "%% ~s~n~tp.~n", [epp:encoding_to_string(utf8),Relup]),
             case file:close(Fd) of
                 ok -> ok;
                 {error,Reason} ->
@@ -589,7 +589,7 @@ print_error({error, Mod, Error}) ->
     S = apply(Mod, format_error, [Error]),
     io:format(S, []);
 print_error(Other) ->
-    io:format("Error: ~p~n", [Other]).
+    io:format("Error: ~tp~n", [Other]).
 
 format_error({file_problem, {File, What}}) ->
     io_lib:format("Could not ~w file ~ts~n", [get_reason(What), File]);
@@ -606,7 +606,7 @@ format_error({warnings_treated_as_errors, Warnings}) ->
     io_lib:format("Warnings being treated as errors:~n~ts",
                   [[format_warning("",W) || W <- Warnings]]);
 format_error(Error) ->
-    io_lib:format("~p~n", [Error]).
+    io_lib:format("~tp~n", [Error]).
 
 
 print_warnings(Ws) when is_list(Ws) ->
@@ -621,12 +621,12 @@ format_warning(W) ->
     format_warning("*WARNING* ", W).
 
 format_warning(Prefix, {erts_vsn_changed, {Rel1, Rel2}}) ->
-    io_lib:format("~tsThe ERTS version changed between ~p and ~p~n",
+    io_lib:format("~tsThe ERTS version changed between ~tp and ~tp~n",
 		  [Prefix, Rel1, Rel2]);
 format_warning(Prefix, pre_R15_emulator_upgrade) ->
     io_lib:format("~tsUpgrade from an OTP version earlier than R15. New code should be compiled with the old emulator.~n",[Prefix]);
 format_warning(Prefix, What) ->
-    io_lib:format("~ts~p~n",[Prefix, What]).
+    io_lib:format("~ts~tp~n",[Prefix, What]).
 
 
 get_reason({error, {open, _, _}}) -> open;

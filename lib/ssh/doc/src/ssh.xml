@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>2004</year><year>2016</year>
+      <year>2004</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -67,24 +67,41 @@
     <taglist>
       <tag><c>boolean() =</c></tag>
       <item><p><c>true | false</c></p></item>
+
       <tag><c>string() =</c></tag>
       <item><p><c>[byte()]</c></p></item>
+
       <tag><c>ssh_daemon_ref() =</c></tag>
       <item><p>opaque() -
       as returned by <c>ssh:daemon/[1,2,3]</c></p></item>
+
+      <tag><c>ok_error(OKtype) = </c></tag>
+      <item><p><c>{ok,OKtype} | {error, term()}</c></p></item>
+
+      <tag><c>ok_error() = </c></tag>
+      <item><p><c>ok_error(term())</c></p></item>
+
       <tag><c>ssh_connection_ref() =</c></tag>
       <item><p>opaque() - as returned by <c>ssh:connect/3</c></p></item>
+
       <tag><c>ip_address() =</c></tag>
-      <item><p><c>inet::ip_address</c></p></item>
+      <item><p><c>inet::ip_address()</c></p></item>
+
+      <tag><c>port_number() =</c></tag>
+      <item><p><c>inet::port_number()</c></p></item>
+
       <tag><c>subsystem_spec() =</c></tag>
       <item><p><c>{subsystem_name(),
       {channel_callback(), channel_init_args()}}</c></p></item>
+
       <tag><c>subsystem_name() =</c></tag>
       <item><p><c>string()</c></p></item>
+
       <tag><c>channel_callback() =</c></tag>
       <item><p><c>atom()</c> - Name of the Erlang module
       implementing the subsystem using the <c>ssh_channel</c> behavior, see
       <seealso marker="ssh_channel">ssh_channel(3)</seealso></p></item>
+
       <tag><c>key_cb() =</c></tag>
       <item>
         <p><c>atom() | {atom(), list()}</c></p>
@@ -94,6 +111,7 @@
         case maybe.</p>
         <p><c>list()</c> - List of options that can be passed to the callback module.</p>
       </item>
+
       <tag><c>channel_init_args() =</c></tag>
       <item><p><c>list()</c></p></item>
 
@@ -108,6 +126,9 @@
       
       <tag><c>double_algs() =</c></tag>
       <item><p><c>[{client2serverlist,simple_algs()},{server2client,simple_algs()}] | simple_algs()</c></p></item>
+
+      <tag><c>modify_algs_list() =</c></tag>
+      <item><p><c>list( {append,algs_list()} | {prepend,algs_list()} | {rm,algs_list()} )</c></p></item>
      </taglist>
 </section>
 
@@ -175,6 +196,12 @@
 	    supplied with this option.
 	    </p>
 	  </item>
+	  <tag><c><![CDATA[{ecdsa_pass_phrase, string()}]]></c></tag>
+	  <item>
+	    <p>If the user ECDSA key is protected by a passphrase, it can be
+	    supplied with this option.
+	    </p>
+	  </item>
           <tag>
             <c><![CDATA[{silently_accept_hosts, boolean()}]]></c> <br/>
             <c><![CDATA[{silently_accept_hosts, CallbackFun}]]></c> <br/>
@@ -218,6 +245,18 @@
               </item>
             </list>
 	  </item>
+
+	  <tag><c><![CDATA[{save_accepted_host, boolean()}]]></c></tag>
+	  <item>
+	    <p>If <c>true</c>, the client saves an accepted host key to avoid the
+	    accept question the next time the same host is connected. If the option
+	    <c>key_cb</c> is not present, the key is saved in the file "known_hosts".
+	    </p>
+	    <p>If <c>false</c>, the key is not saved and the key will still be unknown
+	    at the next access of the same host.
+	    </p>
+	  </item>
+
 	  <tag><c><![CDATA[{user_interaction, boolean()}]]></c></tag>
 	  <item>
 	    <p>If <c>false</c>, disables the client to connect to the server
@@ -246,13 +285,16 @@
 	  <tag><c><![CDATA[{pref_public_key_algs, list()}]]></c></tag>
 	  <item>
             <p>List of user (client) public key algorithms to try to use.</p>
-	    <p>The default value is 
-	    <c><![CDATA[['ssh-rsa','ssh-dss','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521'] ]]></c>
+	    <p>The default value is the <c>public_key</c> entry in 
+	    <seealso marker="#default_algorithms/0">ssh:default_algorithms/0</seealso>.
 	    </p>
-	    <p>If there is no public key of a specified type available, the corresponding entry is ignored.</p>
+	    <p>If there is no public key of a specified type available, the corresponding entry is ignored.
+	    Note that the available set is dependent on the underlying cryptolib and current user's public keys.
+	    </p>
 	  </item>
 
-	  <tag><c><![CDATA[{preferred_algorithms, algs_list()}]]></c></tag>
+	  <tag><marker id="option_preferred_algorithms"></marker>
+	  <c><![CDATA[{preferred_algorithms, algs_list()}]]></c></tag>
 	  <item>
             <p>List of algorithms to use in the algorithm negotiation. The default <c>algs_list()</c> can
 	    be obtained from <seealso marker="#default_algorithms/0">default_algorithms/0</seealso>.
@@ -273,11 +315,69 @@
 	for cipher but specifies the same algorithms for mac and compression in both directions.
 	The kex (key exchange) is implicit but public_key is set explicitly.</p>
 
+	<p>For background and more examples see the <seealso marker="configure_algos#introduction">User's Guide</seealso>.</p>
+
         <warning>
 	  <p>Changing the values can make a connection less secure. Do not change unless you
 	  know exactly what you are doing. If you do not understand the values then you
 	  are not supposed to change them.</p>
 	</warning>
+	  </item>
+
+	  <tag><marker id="option_modify_algorithms"></marker>
+	  <c><![CDATA[{modify_algorithms, modify_algs_list()}]]></c></tag>
+	  <item>
+	    <p>Modifies the list of algorithms to use in the algorithm negotiation. The modifications are
+	    applied after the option <c>preferred_algorithms</c> (if existing) is applied.</p>
+	    <p>The algoritm for modifications works like this:</p>
+	    <list>
+	      <item>
+		<p>Input is the <c>modify_algs_list()</c> and a set of algorithms <c>A</c>
+		obtained from the <c>preferred_algorithms</c> option if existing, or else from the
+		<seealso marker="ssh#default_algorithms-0">ssh:default_algorithms/0</seealso>.
+		</p>
+	      </item>
+	      <item>
+		<p>The head of the <c>modify_algs_list()</c> modifies <c>A</c> giving the result <c>A'</c>.</p>
+		<p>The possible modifications are:</p>
+		<list>
+		  <item>
+		    <p>Append or prepend supported but not enabled algorithm(s) to the list of
+		    algorithms. If the wanted algorithms already are in <c>A</c> they will first
+		    be removed and then appended or prepended,
+		    </p>
+		  </item>
+		  <item>
+		    <p>Remove (rm) one or more algorithms from <c>A</c>.
+		    </p>
+		  </item>
+		</list>
+	      </item>
+	      <item>
+		<p>Repeat the modification step with the tail of <c>modify_algs_list()</c> and the resulting
+		<c>A'</c>.
+		</p>
+	      </item>
+	    </list>
+	    <p>If an unsupported algorithm is in the <c>modify_algs_list()</c>, it will be silently ignored</p>
+	    <p>If there are more than one modify_algorithms options, the result is undefined.</p>
+	    <p>Here is an example of this option:</p>
+	<code>
+{modify_algorithms, 
+ [{prepend, [{kex, ['diffie-hellman-group1-sha1']}],
+  {rm,      [{compression, [none]}]}
+ ]
+}
+</code>
+          <p>The example specifies that:</p>
+	  <list>
+	    <item><p>the old key exchange algorithm 'diffie-hellman-group1-sha1' should be
+	    the main alternative. It will be the main alternative since it is prepened to the list</p>
+	    </item>
+	    <item><p>The compression algorithm none (= no compression) is removed so compression is enforced</p>
+	    </item>
+	  </list>
+	  <p>For background and more examples see the <seealso marker="configure_algos#introduction">User's Guide</seealso>.</p>
 	  </item>
 
 	  <tag><c><![CDATA[{dh_gex_limits,{Min=integer(),I=integer(),Max=integer()}}]]></c></tag>
@@ -293,6 +393,15 @@
 	    connection. For <c>gen_tcp</c> the time is in milli-seconds and the default value is
 	    <c>infinity</c>.</p>
 	  </item>
+
+	  <tag><c><![CDATA[{auth_methods, string()}]]></c></tag>
+	  <item>
+	    <p>Comma-separated string that determines which
+	    authentication methods that the client shall support and
+	    in which order they are tried. Defaults to
+	    <c><![CDATA["publickey,keyboard-interactive,password"]]></c></p>
+          </item>
+
 	  <tag><c><![CDATA[{user, string()}]]></c></tag>
           <item>
 	    <p>Provides a username. If this option is not given, <c>ssh</c>
@@ -300,6 +409,7 @@
 	    <c><![CDATA[USER]]></c> on UNIX,
 	    <c><![CDATA[USERNAME]]></c> on Windows).</p>
           </item>
+
 	  <tag><c><![CDATA[{password, string()}]]></c></tag>
           <item>
 	    <p>Provides a password for password authentication.
@@ -307,6 +417,30 @@
 	    password, if the password authentication method is
 	    attempted.</p>
           </item>
+
+	  <!--tag><c><![CDATA[{send_ext_info, boolean()}]]></c></tag>
+          <item>
+	    <p>Send a list of extensions to the server if the server has asked for it.  See 
+	    <url href="https://tools.ietf.org/html/draft-ietf-curdle-ssh-ext-info">Draft-ietf-curdle-ssh-ext-info (work in progress)</url> for details.
+	    </p>
+	    <p>Currently the client do not react on any extensions.
+	    </p>
+	    <p>Default value is <c>true</c>.
+	    </p>
+          </item-->
+
+	  <tag><c><![CDATA[{recv_ext_info, boolean()}]]></c></tag>
+          <item>
+	    <p>Tell the server that the client accepts extension negotiation.  See 
+	    <url href="https://tools.ietf.org/html/draft-ietf-curdle-ssh-ext-info">Draft-ietf-curdle-ssh-ext-info (work in progress)</url> for details.
+	    </p>
+	    <p>Currently implemented extension is <c>server-sig-algs</c> which is the list of the server's preferred
+	    user's public key algorithms.
+	    </p>
+	    <p>Default value is <c>true</c>.
+	    </p>
+          </item>
+
 	  <tag><c><![CDATA[{key_cb, key_cb()}]]></c></tag>
 	  <item>
 	    <p>Module implementing the behaviour <seealso
@@ -316,6 +450,7 @@
 	    module via the options passed to it under the key 'key_cb_private'.
 	    </p>
 	  </item>
+
 	  <tag><c><![CDATA[{quiet_mode, atom() = boolean()}]]></c></tag>
 	  <item>
 	    <p>If <c>true</c>, the client does not print anything on authorization.</p>
@@ -361,8 +496,8 @@
         <v>Option = client_version | server_version | user | peer | sockname </v>
 	<v>Value = [option_value()] </v>
 	<v>option_value() = {{Major::integer(), Minor::integer()}, VersionString::string()} |
-	User::string() |  Peer::{inet:hostname(), {inet::ip_adress(), inet::port_number()}} |
-	Sockname::{inet::ip_adress(), inet::port_number()}</v>
+	User::string() |  Peer::{inet:hostname(), {ip_address(), port_number()}} |
+	Sockname::{ip_address(), port_number()}</v>
       </type>
       <desc>
         <p>Retrieves information about a connection.</p>
@@ -424,22 +559,83 @@
 	    The option can be set to the empty list if
 	    you do not want the daemon to run any subsystems.</p>
 	  </item>
-	  <tag><c><![CDATA[{shell, {Module, Function, Args} |
+
+	  <tag><marker id="daemon_opt_shell"/>
+	  <c><![CDATA[{shell, {Module, Function, Args} |
 	  fun(string() = User) - > pid() | fun(string() = User,
 	  ip_address() = PeerAddr) -> pid()}]]></c></tag>
 	  <item>
 	    <p>Defines the read-eval-print loop used when a shell is
 	    requested by the client. The default is to use the Erlang shell:
 	    <c><![CDATA[{shell, start, []}]]></c></p>
+	    <p>See the option <seealso marker="#daemon_opt_exec"><c>exec</c></seealso>
+	    for a description of how the daemon execute exec-requests depending on
+	    the shell- and exec-options.</p>
 	  </item>
-	  <tag><c><![CDATA[{ssh_cli, {channel_callback(),
+
+	  <tag><marker id="daemon_opt_exec"/>
+	  <c><![CDATA[{exec, {direct, exec_spec()}}]]></c>
+	  <br/><c>where:</c>
+	  <br/><c>exec_spec() = </c>
+	  <br/><c>  fun(Cmd::string()) -> ok_error()</c>
+	  <br/><c>  | fun(Cmd::string(), User::string()) -> ok_error()</c>
+	  <br/><c>  | fun(Cmd::string(), User::string(), ClientAddr::{ip_address(), port_number()}) -> ok_error()</c>
+	  </tag>
+	  <item>
+	    <p>This option changes how the daemon execute exec-requests from clients. The term in <c>ok_error()</c>
+	    is formatted to a string if it is a non-string type. No trailing newline is added in the ok-case but in the
+	    error case.</p>
+	    <p>Error texts are returned on channel-type 1 which usually are piped to <c>stderr</c> on e.g Linux systems.
+	    Texts from a successful execution will in similar manner be piped to <c>stdout</c>. The exit-status code
+	    is set to 0 for success and -1 for errors. The exact results presented on the client side depends on the
+	    client.
+	    </p>
+	    <p>The option cooperates with the daemon-option <seealso marker="#daemon_opt_shell"><c>shell</c></seealso>
+	    in the following way:</p>
+	    <taglist>
+	      <tag>1. If the exec-option is present (the shell-option may or may not be present):</tag>
+	      <item>
+		<p>The exec-option fun is called with the same number of parameters as the arity of the fun,
+		and the result is returned to the client.
+		</p>
+	      </item>
+	      
+	      <tag>2. If the exec-option is absent, but a shell-option is present with the default Erlang shell:</tag>
+	      <item>
+		<p>The default Erlang evaluator is used and the result is returned to the client.</p>
+	      </item>
+
+	      <tag>3. If the exec-option is absent, but a shell-option is present that is not the default Erlang shell:</tag>
+	      <item>
+		<p>The exec-request is not evaluated and an error message is returned to the client.</p>
+	      </item>
+
+	      <tag>4. If neither the exec-option nor the shell-option is present:</tag>
+	      <item>
+		<p>The default Erlang evaluator is used and the result is returned to the client.</p>
+	      </item>
+	    </taglist>
+	    <p>If a custom CLI is installed (see the option <seealso marker="#daemon_opt_ssh_cli"><c>ssh_cli</c></seealso>)
+	    the rules above are replaced by thoose implied by the custom CLI.
+	    </p>
+	    <note>
+	      <p>The exec-option has existed for a long time but has not previously been documented. The old
+	      definition and behaviour are retained but obey the rules 1-4 above if conflicting.
+	      The old and undocumented style should not be used in new programs.</p>
+	    </note>
+	  </item>
+
+	  <tag><marker id="daemon_opt_ssh_cli"/>
+	  <c><![CDATA[{ssh_cli, {channel_callback(),
 	  channel_init_args()} | no_cli}]]></c></tag>
 	  <item>
 	    <p>Provides your own CLI implementation, that is, a channel callback
 	    module that implements a shell and command execution. The shell
 	    read-eval-print loop can be customized, using the
-	    option <c>shell</c>. This means less work than implementing
-	    an own CLI channel. If set to <c>no_cli</c>, the CLI channels
+	    option <seealso marker="#daemon_opt_shell"><c>shell</c></seealso>. This means less work than implementing
+	    an own CLI channel. If <c>ssh_cli</c> is set to <c>no_cli</c>, the CLI channels
+	    like <seealso marker="#daemon_opt_shell"><c>shell</c></seealso>
+	    and <seealso marker="#daemon_opt_exec"><c>exec</c></seealso>
 	    are disabled and only subsystem channels are allowed.</p>
 	  </item>
 	  <tag><c><![CDATA[{user_dir, string()}]]></c></tag>
@@ -466,6 +662,7 @@
 	    authentication methods that the server is to support and
 	    in what order they are tried. Defaults to
 	    <c><![CDATA["publickey,keyboard-interactive,password"]]></c></p>
+	    <p>Note that the client is free to use any order and to exclude methods.</p>
           </item>
 
 	  <tag><c><![CDATA[{auth_method_kb_interactive_data, PromptTexts}]]></c>
@@ -517,11 +714,48 @@
 	for cipher but specifies the same algorithms for mac and compression in both directions.
 	The kex (key exchange) is implicit but public_key is set explicitly.</p>
 
+	<p>For background and more examples see the <seealso marker="configure_algos#introduction">User's Guide</seealso>.</p>
+
         <warning>
 	  <p>Changing the values can make a connection less secure. Do not change unless you
 	  know exactly what you are doing. If you do not understand the values then you
 	  are not supposed to change them.</p>
 	</warning>
+	  </item>
+
+	  <tag><marker id="option_modify_algorithms"></marker>
+	  <c><![CDATA[{modify_algorithms, modify_algs_list()}]]></c></tag>
+	  <item>
+	    <p>Modifies the list of algorithms to use in the algorithm negotiation. The modifications are
+	    applied after the option <c>preferred_algorithms</c> is applied (if existing)</p>
+	    <p>The possible modifications are to:</p>
+	    <list>
+	      <item><p>Append or prepend supported but not enabled algorithm(s) to the list of
+	      algorithms.</p><p>If the wanted algorithms already are in the list of algorithms, they will first
+	      be removed and then appended or prepended.
+	    </p>
+	      </item>
+	      <item><p>Remove (rm) one or more algorithms from the list of algorithms.</p></item>
+	    </list>
+	    <p>If an unsupported algorithm is in the list, it will be silently ignored</p>
+
+	    <p>Here is an example of this option:</p>
+	<code>
+{modify_algorithms, 
+ [{prepend, [{kex, ['diffie-hellman-group1-sha1']}],
+  {rm,      [{compression, [none]}]}
+ ]
+}
+</code>
+          <p>The example specifies that:</p>
+	  <list>
+	    <item><p>the old key exchange algorithm 'diffie-hellman-group1-sha1' should be
+	    the main alternative. It will be the main alternative since it is prepened to the list</p>
+	    </item>
+	    <item><p>The compression algorithm none (= no compression) is removed so compression is enforced</p>
+	    </item>
+	  </list>
+	  <p>For background and more examples see the <seealso marker="configure_algos#introduction">User's Guide</seealso>.</p>
 	  </item>
 
 	  <tag><c><![CDATA[{dh_gex_groups, [{Size=integer(),G=integer(),P=integer()}] | {file,filename()} {ssh_moduli_file,filename()} }]]></c></tag>
@@ -669,6 +903,27 @@
 	    <p>The value <c>random</c> will cause a random string to be created at each connection attempt.  This is to make it a bit more difficult for a malicious peer to find the ssh software brand and version.
 	    </p>
 	  </item>
+
+	  <tag><c><![CDATA[{send_ext_info, boolean()}]]></c></tag>
+          <item>
+	    <p>Send a list of extensions to the client if the client has asked for it. See 
+	    <url href="https://tools.ietf.org/html/draft-ietf-curdle-ssh-ext-info">Draft-ietf-curdle-ssh-ext-info (work in progress)</url> for details.
+	    </p>
+	    <p>Currently implemented extension is sending <c>server-sig-algs</c> which is the list of the server's preferred
+	    user's public key algorithms.
+	    </p>
+	    <p>Default value is <c>true</c>.
+	    </p>
+          </item>
+
+	  <!--tag><c><![CDATA[{recv_ext_info, boolean()}]]></c></tag>
+          <item>
+	    <p>Tell the client that the server accepts extension negotiation.  See 
+	    <url href="https://tools.ietf.org/html/draft-ietf-curdle-ssh-ext-info">Draft-ietf-curdle-ssh-ext-info (work in progress)</url> for details.
+	    </p>
+	    <p>Default value is <c>true</c>.
+	    </p>
+          </item-->
 
 	  <tag><c><![CDATA[{key_cb, key_cb()}]]></c></tag>
 	  <item>

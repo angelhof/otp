@@ -353,15 +353,15 @@ format_trace(What, Args, P) ->
             {Called, {Le,Li,M,F,As}} = Args,
             case Called of
                 extern ->	
-                    io_lib:format("++ (~w) <~w> ~w:~w~ts~n",
+                    io_lib:format("++ (~w) <~w> ~w:~tw~ts~n",
                                   [Le,Li,M,F,format_args(As, P)]);
                 local ->
-                    io_lib:format("++ (~w) <~w> ~w~ts~n",
+                    io_lib:format("++ (~w) <~w> ~tw~ts~n",
                                   [Le,Li,F,format_args(As, P)])
             end;
         call_fun ->
             {Le,Li,F,As} = Args,
-            io_lib:format("++ (~w) <~w> ~w~ts~n",
+            io_lib:format("++ (~w) <~w> ~tw~ts~n",
                           [Le, Li, F, format_args(As, P)]);
         return ->
             {Le,Val} = Args,
@@ -370,7 +370,7 @@ format_trace(What, Args, P) ->
 
         bif ->
             {Le,Li,M,F,As} = Args,
-            io_lib:format("++ (~w) <~w> ~w:~w~ts~n",
+            io_lib:format("++ (~w) <~w> ~w:~tw~ts~n",
                           [Le, Li, M, F, format_args(As, P)])
     end.
 
@@ -924,8 +924,7 @@ expr({dbg,Line,raise,As0}, Bs0, #ieval{level=Le}=Ieval0) ->
 	trace(return, {Le,Error}),
 	{value,Error,Bs}
     catch
-	_:_ ->
-	    Stk = erlang:get_stacktrace(),	%Possibly truncated.
+	_:_:Stk ->                              %Possibly truncated.
 	    StkFun = fun(_) -> Stk end,
 	    do_exception(Class, Reason, StkFun, Bs, Ieval)
     end;
@@ -1034,7 +1033,7 @@ expr({send,Line,To0,Msg0}, Bs0, Ieval0) ->
 
 %% Binary
 expr({bin,Line,Fs}, Bs0, Ieval0) ->
-    Ieval = Ieval0#ieval{line=Line},
+    Ieval = Ieval0#ieval{line=Line,top=false},
     try
 	eval_bits:expr_grp(Fs, Bs0,
 			   fun (E, B) -> expr(E, B, Ieval) end,

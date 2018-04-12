@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -151,7 +151,8 @@
         {'snmp', SnmpStruct::term()} |
         {'storage_properties', [{Backend::module(), [BackendProp::_]}]} |
         {'type', 'set' | 'ordered_set' | 'bag'} |
-        {'local_content', boolean()}.
+        {'local_content', boolean()} |
+        {'user_properties', proplists:proplist()}.
 
 -type t_result(Res) :: {'atomic', Res} | {'aborted', Reason::term()}.
 -type activity() :: 'ets' | 'async_dirty' | 'sync_dirty' | 'transaction' | 'sync_transaction' |
@@ -166,7 +167,7 @@
 -type select_continuation() :: term().
 -type snmp_struct() :: [{atom(), snmp_type() | tuple_of(snmp_type())}].
 -type snmp_type() :: 'fix_string' | 'string' | 'integer'.
--type tuple_of(_) :: tuple().
+-type tuple_of(_T) :: tuple().
 
 -define(DEFAULT_ACCESS, ?MODULE).
 
@@ -176,8 +177,8 @@
 
 %% Local function in order to avoid external function call
 val(Var) ->
-    case ?catch_val(Var) of
-	{'EXIT', _} -> mnesia_lib:other_val(Var);
+    case ?catch_val_and_stack(Var) of
+	{'EXIT', Stacktrace} -> mnesia_lib:other_val(Var, Stacktrace);
 	Value -> Value
     end.
 
@@ -2283,9 +2284,9 @@ list_index_plugins([{N,M,F} | T] = Ps, Legend) ->
 	  lists:foldl(fun({N1,_,_}, Wa) ->
 			      erlang:max(Wa, length(pp_ix_name(N1)))
 		      end, 0, Ps)),
-    io:fwrite(Legend ++ "~-" ++ W ++ "s - ~s:~s~n",
+    io:fwrite(Legend ++ "~-" ++ W ++ "s - ~s:~ts~n",
 	      [pp_ix_name(N), atom_to_list(M), atom_to_list(F)]),
-    [io:fwrite(Indent ++ "~-" ++ W ++ "s - ~s:~s~n",
+    [io:fwrite(Indent ++ "~-" ++ W ++ "s - ~s:~ts~n",
 	       [pp_ix_name(N1), atom_to_list(M1), atom_to_list(F1)])
      || {N1,M1,F1} <- T].
 
@@ -2681,7 +2682,7 @@ del_table_index(Tab, Ix) ->
 
 -spec transform_table(Tab::table(), Fun, [Attr]) -> t_result(ok) when
       Attr :: atom(),
-      Fun:: fun((Record::tuple()) -> Transformed::tuple()).
+      Fun:: fun((Record::tuple()) -> Transformed::tuple()) | ignore.
 transform_table(Tab, Fun, NewA) ->
     try val({Tab, record_name}) of
 	OldRN -> mnesia_schema:transform_table(Tab, Fun, NewA, OldRN)
@@ -2692,7 +2693,7 @@ transform_table(Tab, Fun, NewA) ->
 -spec transform_table(Tab::table(), Fun, [Attr], RecName) -> t_result(ok) when
       RecName :: atom(),
       Attr :: atom(),
-      Fun:: fun((Record::tuple()) -> Transformed::tuple()).
+      Fun:: fun((Record::tuple()) -> Transformed::tuple()) | ignore.
 transform_table(Tab, Fun, NewA, NewRN) ->
     mnesia_schema:transform_table(Tab, Fun, NewA, NewRN).
 

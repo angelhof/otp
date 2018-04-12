@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -63,9 +63,9 @@ obsolete_1(gen_fsm, start, 4) ->
     {deprecated, {gen_statem, start, 4}};
 
 obsolete_1(gen_fsm, start_link, 3) ->
-    {deprecated, {gen_statem, start, 3}};
+    {deprecated, {gen_statem, start_link, 3}};
 obsolete_1(gen_fsm, start_link, 4) ->
-    {deprecated, {gen_statem, start, 4}};
+    {deprecated, {gen_statem, start_link, 4}};
 
 obsolete_1(gen_fsm, stop, 1) ->
     {deprecated, {gen_statem, stop, 1}};
@@ -83,9 +83,9 @@ obsolete_1(gen_fsm, reply, 2) ->
     {deprecated, {gen_statem, reply, 2}};
 
 obsolete_1(gen_fsm, send_event, 2) ->
-    {deprecated, {gen_statem, cast, 1}};
+    {deprecated, {gen_statem, cast, 2}};
 obsolete_1(gen_fsm, send_all_state_event, 2) ->
-    {deprecated, {gen_statem, cast, 1}};
+    {deprecated, {gen_statem, cast, 2}};
 
 obsolete_1(gen_fsm, sync_send_event, 2) ->
     {deprecated, {gen_statem, call, 2}};
@@ -98,11 +98,11 @@ obsolete_1(gen_fsm, sync_send_all_state_event, 3) ->
     {deprecated, {gen_statem, call, 3}};
 
 obsolete_1(gen_fsm, start_timer, 2) ->
-    {deprecated, {erlang, start_timer, 2}};
+    {deprecated, {erlang, start_timer, 3}};
 obsolete_1(gen_fsm, cancel_timer, 1) ->
     {deprecated, {erlang, cancel_timer, 1}};
 obsolete_1(gen_fsm, send_event_after, 2) ->
-    {deprecated, {erlang, send_after, 2}};
+    {deprecated, {erlang, send_after, 3}};
 
 %% *** CRYPTO added in OTP 20 ***
 
@@ -112,7 +112,7 @@ obsolete_1(crypto, rand_uniform, 2) ->
 %% *** CRYPTO added in OTP 19 ***
 
 obsolete_1(crypto, rand_bytes, 1) ->
-    {deprecated, {crypto, strong_rand_bytes, 1}};
+    {removed, {crypto, strong_rand_bytes, 1}, "20.0"};
 
 %% *** CRYPTO added in R16B01 ***
 
@@ -466,8 +466,6 @@ obsolete_1(inviso, _, _) ->
     {removed,"the inviso application was removed in R16"};
 
 %% Added in R15B01.
-obsolete_1(gs, _, _) ->
-    {removed,"the gs application has been removed; use the wx application instead"};
 obsolete_1(ssh, sign_data, 2) ->
     {removed,"removed in R16A; use public_key:pem_decode/1, public_key:pem_entry_decode/1 "
      "and public_key:sign/3 instead"};
@@ -484,10 +482,6 @@ obsolete_1(wxClientDC, new, 0) ->
 obsolete_1(wxPaintDC, new, 0) ->
     {deprecated,"deprecated function not available in wxWidgets-2.9 and later"};
 obsolete_1(wxWindowDC, new, 0) ->
-    {deprecated,"deprecated function not available in wxWidgets-2.9 and later"};
-obsolete_1(wxGraphicsContext, createLinearGradientBrush, 7) ->
-    {deprecated,"deprecated function not available in wxWidgets-2.9 and later"};
-obsolete_1(wxGraphicsContext, createRadialGradientBrush, 8) ->
     {deprecated,"deprecated function not available in wxWidgets-2.9 and later"};
 obsolete_1(wxGraphicsRenderer, createLinearGradientBrush, 7) ->
     {deprecated,"deprecated function not available in wxWidgets-2.9 and later"};

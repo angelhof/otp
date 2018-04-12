@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2000-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -298,6 +298,7 @@ basic_test() ->
     setup([call]),
     NumMatches = erlang:trace_pattern({?MODULE,'_','_'},[],[local]),
     NumMatches = erlang:trace_pattern({?MODULE,'_','_'},[],[local]),
+    false = code:is_module_native(?MODULE), % got fooled by local trace
     erlang:trace_pattern({?MODULE,slave,'_'},false,[local]),
     [1,1,1,997] = apply_slave(?MODULE,exported_wrap,[1]),
     ?CT(?MODULE,exported_wrap,[1]),

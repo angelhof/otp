@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,17 +50,15 @@
 #include <sys/ioctl.h>
 #endif
 
+#include <sys/types.h>
+#include <sys/socket.h>
+
 #define WANT_NONBLOCKING    /* must define this to pull in defs from sys.h */
 #include "sys.h"
 
-#ifdef USE_THREADS
 #include "erl_threads.h"
-#endif
 
-extern char **environ;
-extern erts_smp_rwmtx_t environ_rwmtx;
-
-extern erts_smp_atomic_t sys_misc_mem_sz;
+extern erts_atomic_t sys_misc_mem_sz;
 
 static Eterm forker_port;
 
@@ -84,12 +82,6 @@ static Eterm forker_port;
 #define MAXIOV UIO_MAXIOV
 #else
 #define MAXIOV 16
-#endif
-
-#ifdef USE_THREADS
-#  define FDBLOCK 1
-#else
-#  define FDBLOCK 0
 #endif
 
 /* Used by the fd driver iff the fd could not be set to non-blocking */
@@ -178,9 +170,7 @@ void
 erl_sys_late_init(void)
 {
     SysDriverOpts opts;
-#ifdef ERTS_SMP
     Port *port;
-#endif
 
     sys_signal(SIGPIPE, SIG_IGN); /* Ignore - we'll handle the write failure */
 
@@ -190,20 +180,16 @@ erl_sys_late_init(void)
     opts.read_write = 0;
     opts.hide_window = 0;
     opts.wd = NULL;
-    opts.envir = NULL;
+    erts_osenv_init(&opts.envir);
     opts.exit_status = 0;
     opts.overlapped_io = 0;
     opts.spawn_type = ERTS_SPAWN_ANY;
     opts.argv = NULL;
     opts.parallelism = erts_port_parallelism;
 
-#ifdef ERTS_SMP
     port =
-#endif
         erts_open_driver(&forker_driver, make_internal_pid(0), "forker", &opts, NULL, NULL);
-#ifdef ERTS_SMP
     erts_mtx_unlock(port->lock);
-#endif
     erts_sys_unix_later_init(); /* Need to be called after forker has been started */
 }
 
@@ -220,10 +206,8 @@ static ErlDrvData vanilla_start(ErlDrvPort, char*, SysDriverOpts*);
 
 /* II.III FD prototypes */
 static ErlDrvData fd_start(ErlDrvPort, char*, SysDriverOpts*);
-#if FDBLOCK
 static void fd_async(void *);
 static void fd_ready_async(ErlDrvData drv_data, ErlDrvThreadData thread_data);
-#endif
 static ErlDrvSSizeT fd_control(ErlDrvData, unsigned int, char *, ErlDrvSizeT,
 			       char **, ErlDrvSizeT);
 static void fd_stop(ErlDrvData);
@@ -287,11 +271,7 @@ struct erl_drv_entry fd_driver_entry = {
     fd_control,
     NULL,
     outputv,
-#if FDBLOCK
     fd_ready_async, /* ready_async */
-#else
-    NULL,
-#endif
     fd_flush, /* flush */
     NULL, /* call */
     NULL, /* event */
@@ -363,7 +343,7 @@ static int set_blocking_data(ErtsSysDriverData *dd) {
 
     dd->blocking = erts_alloc(ERTS_ALC_T_SYS_BLOCKING, sizeof(ErtsSysBlocking));
 
-    erts_smp_atomic_add_nob(&sys_misc_mem_sz, sizeof(ErtsSysBlocking));
+    erts_atomic_add_nob(&sys_misc_mem_sz, sizeof(ErtsSysBlocking));
 
     dd->blocking->pdl = driver_pdl_create(dd->port_num);
     dd->blocking->res = 0;
@@ -406,7 +386,7 @@ create_driver_data(ErlDrvPort port_num,
         size += sizeof(ErtsSysFdData);
 
     data = erts_alloc(ERTS_ALC_T_DRV_TAB,size);
-    erts_smp_atomic_add_nob(&sys_misc_mem_sz, size);
+    erts_atomic_add_nob(&sys_misc_mem_sz, size);
 
     driver_data = (ErtsSysDriverData*)data;
     data += sizeof(*driver_data);
@@ -441,7 +421,7 @@ create_driver_data(ErlDrvPort port_num,
             data += sizeof(*driver_data->ofd);
             init_fd_data(driver_data->ofd, ofd);
         }
-        if (is_blocking && FDBLOCK)
+        if (is_blocking)
             if (!set_blocking_data(driver_data)) {
                 erts_free(ERTS_ALC_T_DRV_TAB, driver_data);
                 return NULL;
@@ -463,85 +443,55 @@ static void close_pipes(int ifd[2], int ofd[2])
     close(ofd[1]);
 }
 
-static char **build_unix_environment(char *block)
+struct __add_spawn_env_state {
+    struct iovec *iov;
+    int *iov_index;
+
+    Sint32 *payload_size;
+    char *env_block;
+};
+
+static void add_spawn_env_block_foreach(void *_state,
+                                        const erts_osenv_data_t *key,
+                                        const erts_osenv_data_t *value)
 {
-    int i;
-    int j;
-    int len;
-    char *cp;
-    char **cpp;
-    char** old_env;
-    
-    ERTS_SMP_LC_ASSERT(erts_smp_lc_rwmtx_is_rlocked(&environ_rwmtx));
+    struct __add_spawn_env_state *state;
+    struct iovec *iov;
 
-    cp = block;
-    len = 0;
-    while (*cp != '\0') {
-	cp += strlen(cp) + 1;
-	len++;
-    }
-    old_env = environ;
-    while (*old_env++ != NULL) {
-	len++;
-    }
-    
-    cpp = (char **) erts_alloc_fnf(ERTS_ALC_T_ENVIRONMENT,
-				   sizeof(char *) * (len+1));
-    if (cpp == NULL) {
-	return NULL;
-    }
+    state = (struct __add_spawn_env_state*)(_state);
+    iov = &state->iov[*state->iov_index];
 
-    cp = block;
-    len = 0;
-    while (*cp != '\0') {
-	cpp[len] = cp;
-	cp += strlen(cp) + 1;
-	len++;
-    }
-    
-    i = len;
-    for (old_env = environ; *old_env; old_env++) {
-	char* old = *old_env;
+    iov->iov_base = state->env_block;
 
-	for (j = 0; j < len; j++) {
-	    char *s, *t;
+    sys_memcpy(state->env_block, key->data, key->length);
+    state->env_block += key->length;
+    *state->env_block++ = '=';
+    sys_memcpy(state->env_block, value->data, value->length);
+    state->env_block += value->length;
+    *state->env_block++ = '\0';
 
-	    /* check if cpp[j] equals old
-	       before the = sign,
-	       i.e.
-	       "TMPDIR=/tmp/" */
-	    s = cpp[j];
-	    t = old;
-	    while (*s == *t && *s != '=') {
-		s++, t++;
-	    }
-	    if (*s == '=' && *t == '=') {
-		break;
-	    }
-	}
+    iov->iov_len = state->env_block - (char*)iov->iov_base;
 
-	if (j == len) {		/* New version not found */
-	    cpp[len++] = old;
-	}
-    }
+    (*state->payload_size) += iov->iov_len;
+    (*state->iov_index)++;
+}
 
-    for (j = 0; j < i; ) {
-        size_t last = strlen(cpp[j])-1;
-	if (cpp[j][last] == '=' && strchr(cpp[j], '=') == cpp[j]+last) {
-	    cpp[j] = cpp[--len];
-	    if (len < i) {
-		i--;
-	    } else {
-		j++;
-	    }
-	}
-	else {
-	    j++;
-	}
-    }
+static void *add_spawn_env_block(const erts_osenv_t *env, struct iovec *iov,
+                                  int *iov_index, Sint32 *payload_size) {
+    struct __add_spawn_env_state add_state;
+    char *env_block;
 
-    cpp[len] = NULL;
-    return cpp;
+    env_block = erts_alloc(ERTS_ALC_T_TMP, env->content_size +
+        env->variable_count * sizeof("=\0"));
+
+    add_state.iov = iov;
+    add_state.iov_index = iov_index;
+    add_state.env_block = env_block;
+    add_state.payload_size = payload_size;
+
+    erts_osenv_foreach_native(env, &add_state, add_spawn_env_block_foreach);
+
+    return env_block;
 }
 
 static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
@@ -551,7 +501,6 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
 #define CMD_LINE_PREFIX_STR_SZ (sizeof(CMD_LINE_PREFIX_STR) - 1)
 
     int len;
-    char **new_environ;
     ErtsSysDriverData *dd;
     char *cmd_line;
     char wd_buff[MAXPATHLEN+1];
@@ -618,19 +567,7 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
 	memcpy((void *) (cmd_line + CMD_LINE_PREFIX_STR_SZ), (void *) name, len);
 	cmd_line[CMD_LINE_PREFIX_STR_SZ + len] = '\0';
 	len = CMD_LINE_PREFIX_STR_SZ + len + 1;
-    }
-
-    erts_smp_rwmtx_rlock(&environ_rwmtx);
-
-    if (opts->envir == NULL) {
-	new_environ = environ;
-    } else if ((new_environ = build_unix_environment(opts->envir)) == NULL) {
-	erts_smp_rwmtx_runlock(&environ_rwmtx);
-        close_pipes(ifd, ofd);
-	erts_free(ERTS_ALC_T_TMP, (void *) cmd_line);
-	errno = ENOMEM;
-	return ERL_DRV_ERROR_ERRNO;
-    }
+}
 
     if ((cwd = getcwd(wd_buff, MAXPATHLEN+1)) == NULL) {
         /* on some OSs this call opens a fd in the
@@ -639,9 +576,6 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
         int err = errno;
         close_pipes(ifd, ofd);
         erts_free(ERTS_ALC_T_TMP, (void *) cmd_line);
-        if (new_environ != environ)
-            erts_free(ERTS_ALC_T_ENVIRONMENT, (void *) new_environ);
-        erts_smp_rwmtx_runlock(&environ_rwmtx);
         errno = err;
         return ERL_DRV_ERROR_ERRNO;
     }
@@ -649,6 +583,7 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
     wd = opts->wd;
 
     {
+        void *environment_block;
         struct iovec *io_vector;
         int iov_len = 5;
         char nullbuff[] = "\0";
@@ -661,10 +596,8 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
 
         if (wd) iov_len++;
 
-        /* count number of elements in environment */
-        while(new_environ[env_len] != NULL)
-            env_len++;
-        iov_len += 1 + env_len; /* num envs including size int */
+        /* num envs including size int */
+        iov_len += 1 + opts->envir.variable_count;
 
         /* count number of element in argument list */
         if (opts->spawn_type == ERTS_SPAWN_EXECUTABLE) {
@@ -681,10 +614,7 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
 
         if (!io_vector) {
             close_pipes(ifd, ofd);
-            erts_smp_rwmtx_runlock(&environ_rwmtx);
             erts_free(ERTS_ALC_T_TMP, (void *) cmd_line);
-            if (new_environ != environ)
-                erts_free(ERTS_ALC_T_ENVIRONMENT, (void *) new_environ);
             errno = ENOMEM;
             return ERL_DRV_ERROR_ERRNO;
         }
@@ -719,16 +649,13 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
         io_vector[i++].iov_len = 1;
         buffsz += io_vector[i-1].iov_len;
 
+        env_len = htonl(opts->envir.variable_count);
         io_vector[i].iov_base = (void*)&env_len;
-        env_len = htonl(env_len);
         io_vector[i++].iov_len = sizeof(env_len);
         buffsz += io_vector[i-1].iov_len;
 
-        for (j = 0; new_environ[j] != NULL; j++) {
-            io_vector[i].iov_base = new_environ[j];
-            io_vector[i++].iov_len = strlen(new_environ[j]) + 1;
-            buffsz += io_vector[i-1].iov_len;
-        }
+        environment_block = add_spawn_env_block(&opts->envir, io_vector, &i,
+            &buffsz);
 
         /* only append arguments if this was a spawn_executable */
         if (opts->spawn_type == ERTS_SPAWN_EXECUTABLE) {
@@ -764,9 +691,6 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
                 int err = errno;
                 close_pipes(ifd, ofd);
                 erts_free(ERTS_ALC_T_TMP, io_vector);
-                if (new_environ != environ)
-                    erts_free(ERTS_ALC_T_ENVIRONMENT, (void *) new_environ);
-                erts_smp_rwmtx_runlock(&environ_rwmtx);
                 erts_free(ERTS_ALC_T_TMP, (void *) cmd_line);
                 errno = err;
                 return ERL_DRV_ERROR_ERRNO;
@@ -787,15 +711,11 @@ static ErlDrvData spawn_start(ErlDrvPort port_num, char* name,
             driver_select(port_num, ofd[1], ERL_DRV_WRITE|ERL_DRV_USE, 1);
         }
 
+        erts_free(ERTS_ALC_T_TMP, environment_block);
         erts_free(ERTS_ALC_T_TMP, io_vector);
     }
 
     erts_free(ERTS_ALC_T_TMP, (void *) cmd_line);
-
-    if (new_environ != environ)
-	erts_free(ERTS_ALC_T_ENVIRONMENT, (void *) new_environ);
-
-    erts_smp_rwmtx_runlock(&environ_rwmtx);
 
     dd = create_driver_data(port_num, ifd[0], ofd[1], opts->packet_bytes,
                              DO_WRITE | DO_READ, opts->exit_status,
@@ -1068,8 +988,8 @@ static void clear_fd_data(ErtsSysFdData *fdd)
 {
     if (fdd->sz > 0) {
 	erts_free(ERTS_ALC_T_FD_ENTRY_BUF, (void *) fdd->buf);
-	ASSERT(erts_smp_atomic_read_nob(&sys_misc_mem_sz) >= fdd->sz);
-	erts_smp_atomic_add_nob(&sys_misc_mem_sz, -1*fdd->sz);
+	ASSERT(erts_atomic_read_nob(&sys_misc_mem_sz) >= fdd->sz);
+	erts_atomic_add_nob(&sys_misc_mem_sz, -1*fdd->sz);
     }
     fdd->buf = NULL;
     fdd->sz = 0;
@@ -1092,13 +1012,11 @@ static void fd_stop(ErlDrvData ev)  /* Does not close the fds */
     ErlDrvPort prt = dd->port_num;
     int sz = sizeof(ErtsSysDriverData);
 
-#if FDBLOCK
     if (dd->blocking) {
         erts_free(ERTS_ALC_T_SYS_BLOCKING, dd->blocking);
         dd->blocking = NULL;
         sz += sizeof(ErtsSysBlocking);
     }
-#endif
 
     if (dd->ifd) {
         sz += sizeof(ErtsSysFdData);
@@ -1110,7 +1028,7 @@ static void fd_stop(ErlDrvData ev)  /* Does not close the fds */
     }
 
      erts_free(ERTS_ALC_T_DRV_TAB, dd);
-     erts_smp_atomic_add_nob(&sys_misc_mem_sz, -sz);
+     erts_atomic_add_nob(&sys_misc_mem_sz, -sz);
 }
 
 static void fd_flush(ErlDrvData ev)
@@ -1191,19 +1109,19 @@ static void outputv(ErlDrvData e, ErlIOVec* ev)
     ev->iov[0].iov_len = pb;
     ev->size += pb;
 
-    if (dd->blocking && FDBLOCK)
+    if (dd->blocking)
         driver_pdl_lock(dd->blocking->pdl);
 
     if ((sz = driver_sizeq(ix)) > 0) {
 	driver_enqv(ix, ev, 0);
 
-        if (dd->blocking && FDBLOCK)
+        if (dd->blocking)
             driver_pdl_unlock(dd->blocking->pdl);
 
 	if (sz + ev->size >= (1 << 13))
 	    set_busy_port(ix, 1);
     }
-    else if (!dd->blocking || !FDBLOCK) {
+    else if (!dd->blocking) {
         /* We try to write directly if the fd in non-blocking */
 	int vsize = ev->vsize > MAX_VSIZE ? MAX_VSIZE : ev->vsize;
 
@@ -1220,7 +1138,6 @@ static void outputv(ErlDrvData e, ErlIOVec* ev)
 	driver_enqv(ix, ev, n);  /* n is the skip value */
 	driver_select(ix, ofd, ERL_DRV_WRITE|ERL_DRV_USE, 1);
     }
-#if FDBLOCK
     else {
         if (ev->size != 0) {
             driver_enqv(ix, ev, 0);
@@ -1231,7 +1148,6 @@ static void outputv(ErlDrvData e, ErlIOVec* ev)
             driver_pdl_unlock(dd->blocking->pdl);
         }
     }
-#endif
     /* return 0;*/
 }
 
@@ -1303,7 +1219,7 @@ static int port_inp_failure(ErtsSysDriverData *dd, int res)
         clear_fd_data(dd->ifd);
     }
 
-    if (dd->blocking && FDBLOCK) {
+    if (dd->blocking) {
         driver_pdl_lock(dd->blocking->pdl);
         if (driver_sizeq(dd->port_num) > 0) {
             driver_pdl_unlock(dd->blocking->pdl);
@@ -1408,7 +1324,7 @@ static void ready_input(ErlDrvData e, ErlDrvEvent ready_fd)
 
             if (dd->ifd->fd < 0) {
                 driver_select(port_num, abs(dd->ifd->fd), ERL_DRV_READ|ERL_DRV_USE, 0);
-                erts_smp_atomic_add_nob(&sys_misc_mem_sz, -sizeof(ErtsSysFdData));
+                erts_atomic_add_nob(&sys_misc_mem_sz, -sizeof(ErtsSysFdData));
                 dd->ifd = NULL;
             }
 
@@ -1514,7 +1430,7 @@ static void ready_input(ErlDrvData e, ErlDrvEvent ready_fd)
 			port_inp_failure(dd, -1);
 		    }
 		    else {
-			erts_smp_atomic_add_nob(&sys_misc_mem_sz, h);
+			erts_atomic_add_nob(&sys_misc_mem_sz, h);
 			sys_memcpy(buf, cpos, bytes_left);
 			dd->ifd->buf = buf;
 			dd->ifd->sz = h;
@@ -1549,7 +1465,7 @@ static void ready_output(ErlDrvData e, ErlDrvEvent ready_fd)
                should close the output fd as soon as the command has
                been sent. */
             driver_select(ix, ready_fd, ERL_DRV_WRITE|ERL_DRV_USE, 0);
-            erts_smp_atomic_add_nob(&sys_misc_mem_sz, -sizeof(ErtsSysFdData));
+            erts_atomic_add_nob(&sys_misc_mem_sz, -sizeof(ErtsSysFdData));
             dd->ofd = NULL;
         }
         if (dd->terminating)
@@ -1579,7 +1495,6 @@ static void stop_select(ErlDrvEvent fd, void* _)
     close((int)fd);
 }
 
-#if FDBLOCK
 
 static void
 fd_async(void *async_data)
@@ -1658,7 +1573,6 @@ void fd_ready_async(ErlDrvData drv_data,
     return; /* 0; */
 }
 
-#endif
 
 /* Forker driver */
 
@@ -1678,15 +1592,13 @@ static ErlDrvData forker_start(ErlDrvPort port_num, char* name,
 
     forker_port = erts_drvport2id(port_num);
 
-    res = erts_sys_getenv_raw("BINDIR", bindir, &bindirsz);
-    if (res != 0) {
-        if (res < 0)
-            erts_exit(1,
-                     "Environment variable BINDIR is not set\n");
-        if (res > 0)
-            erts_exit(1,
-                     "Value of environment variable BINDIR is too large\n");
+    res = erts_sys_explicit_8bit_getenv("BINDIR", bindir, &bindirsz);
+    if (res == 0) {
+        erts_exit(1, "Environment variable BINDIR is not set\n");
+    } else if(res < 0) {
+        erts_exit(1, "Value of environment variable BINDIR is too large\n");
     }
+
     if (bindir[0] != DIR_SEPARATOR_CHAR)
         erts_exit(1,
                  "Environment variable BINDIR does not contain an"
@@ -1748,8 +1660,6 @@ static ErlDrvData forker_start(ErlDrvPort port_num, char* name,
     close(fds[1]);
 
     SET_NONBLOCKING(forker_fd);
-
-    driver_select(port_num, forker_fd, ERL_DRV_READ|ERL_DRV_USE, 1);
 
     return (ErlDrvData)port_num;
 }
@@ -1847,9 +1757,18 @@ static void forker_ready_output(ErlDrvData e, ErlDrvEvent fd)
 static ErlDrvSSizeT forker_control(ErlDrvData e, unsigned int cmd, char *buf,
                                    ErlDrvSizeT len, char **rbuf, ErlDrvSizeT rlen)
 {
+    static int first_call = 1;
     ErtsSysForkerProto *proto = (ErtsSysForkerProto *)buf;
     ErlDrvPort port_num = (ErlDrvPort)e;
     int res;
+
+    if (first_call) {
+        /*
+         * Do driver_select here when schedulers and their pollsets have started.
+         */
+        driver_select(port_num, forker_fd, ERL_DRV_READ|ERL_DRV_USE, 1);
+        first_call = 0;
+    }
 
     driver_enq(port_num, buf, len);
     if (driver_sizeq(port_num) > sizeof(*proto)) {

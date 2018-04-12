@@ -74,6 +74,8 @@
 -spec start() -> no_return().
 
 start() ->
+  _ = io:setopts(standard_error, [{encoding,unicode}]),
+  _ = io:setopts([{encoding,unicode}]),
   {Args, Analysis} = process_cl_args(),
   %% io:format("Args: ~p\n", [Args]),
   %% io:format("Analysis: ~p\n", [Analysis]),
@@ -81,7 +83,7 @@ start() ->
   TrustedFiles = filter_fd(Args#args.trusted, [], fun is_erl_file/1),
   Analysis2 = extract(Analysis, TrustedFiles),
   All_Files = get_all_files(Args),
-  %% io:format("All_Files: ~p\n", [All_Files]),
+  %% io:format("All_Files: ~tp\n", [All_Files]),
   Analysis3 = Analysis2#analysis{files = All_Files},
   Analysis4 = collect_info(Analysis3),
   %% io:format("Final: ~p\n", [Analysis4#analysis.fms]),
@@ -157,17 +159,16 @@ get_type_info(#analysis{callgraph = CallGraph,
   StrippedCallGraph = remove_external(CallGraph, TrustPLT),
   %% io:format("--- Analyzing callgraph... "),
   try 
-    NewMiniPlt = dialyzer_succ_typings:analyze_callgraph(StrippedCallGraph,
-                                                         TrustPLT,
-                                                         CodeServer),
-    NewPlt = dialyzer_plt:restore_full_plt(NewMiniPlt),
+    NewPlt = dialyzer_succ_typings:analyze_callgraph(StrippedCallGraph,
+                                                     TrustPLT,
+                                                     CodeServer),
     Analysis#analysis{callgraph = StrippedCallGraph, trust_plt = NewPlt}
   catch
-    error:What ->
-      fatal_error(io_lib:format("Analysis failed with message: ~p", 
-				[{What, erlang:get_stacktrace()}]));
+    error:What:Stacktrace ->
+      fatal_error(io_lib:format("Analysis failed with message: ~tp",
+				[{What, Stacktrace}]));
     throw:{dialyzer_succ_typing_error, Msg} ->
-      fatal_error(io_lib:format("Analysis failed with message: ~s", [Msg]))
+      fatal_error(io_lib:format("Analysis failed with message: ~ts", [Msg]))
   end.
 
 -spec remove_external(callgraph(), plt()) -> callgraph().
@@ -177,11 +178,11 @@ remove_external(CallGraph, PLT) ->
   case get_external(Ext, PLT) of
     [] -> ok;
     Externals ->
-      msg(io_lib:format(" Unknown functions: ~p\n", [lists:usort(Externals)])),
+      msg(io_lib:format(" Unknown functions: ~tp\n", [lists:usort(Externals)])),
       ExtTypes = rcv_ext_types(),
       case ExtTypes of
         [] -> ok;
-        _ -> msg(io_lib:format(" Unknown types: ~p\n", [ExtTypes]))
+        _ -> msg(io_lib:format(" Unknown types: ~tp\n", [ExtTypes]))
       end
   end,
   StrippedCG0.
@@ -257,9 +258,9 @@ write_inc_files(Inc) ->
 		     records = maps:new(),
 		     %% Note we need to sort functions here!
 		     functions = lists:keysort(1, Functions)},
-	%% io:format("Types ~p\n", [Info#info.types]),
-	%% io:format("Functions ~p\n", [Info#info.functions]),
-	%% io:format("Records ~p\n", [Info#info.records]),
+	%% io:format("Types ~tp\n", [Info#info.types]),
+	%% io:format("Functions ~tp\n", [Info#info.functions]),
+	%% io:format("Records ~tp\n", [Info#info.records]),
 	write_typed_file(File, Info)
     end,
   lists:foreach(Fun, dict:fetch_keys(Inc#inc.map)).
@@ -349,8 +350,8 @@ check_imported_functions({File, {Line, F, A}}, Inc, Types) ->
   end.
 
 inc_warning({F, A}, File) ->
-  io:format("      ***Warning: Skip function ~p/~p ", [F, A]),
-  io:format("in file ~p because of inconsistent type\n", [File]).
+  io:format("      ***Warning: Skip function ~tp/~p ", [F, A]),
+  io:format("in file ~tp because of inconsistent type\n", [File]).
 
 clean_inc(Inc) ->
   Inc1 = remove_yecc_generated_file(Inc),
@@ -407,13 +408,13 @@ get_type({{M, F, A} = MFA, Range, Arg}, CodeServer, Records) ->
 	{error, invalid_contract} ->
 	  CString = dialyzer_contracts:contract_to_string(Contract),
 	  SigString = dialyzer_utils:format_sig(Sig, Records),
-	  Msg = io_lib:format("Error in contract of function ~w:~w/~w\n" 
+	  Msg = io_lib:format("Error in contract of function ~w:~tw/~w\n"
 			      "\t The contract is: " ++ CString ++ "\n" ++
-			      "\t but the inferred signature is: ~s",
+			      "\t but the inferred signature is: ~ts",
 			      [M, F, A, SigString]),
 	  fatal_error(Msg);
 	{error, ErrorStr} when is_list(ErrorStr) -> % ErrorStr is a string()
-	  Msg = io_lib:format("Error in contract of function ~w:~w/~w: ~s",
+	  Msg = io_lib:format("Error in contract of function ~w:~tw/~w: ~ts",
 			      [M, F, A, ErrorStr]),
 	  fatal_error(Msg)
       end
@@ -448,7 +449,7 @@ remove_module_info(FunInfoList) ->
   lists:filter(F, FunInfoList).
 
 write_typed_file(File, Info) ->
-  io:format("      Processing file: ~p\n", [File]),
+  io:format("      Processing file: ~tp\n", [File]),
   Dir = filename:dirname(File),
   RootName = filename:basename(filename:rootname(File)),
   Ext = filename:extension(File),
@@ -463,18 +464,18 @@ write_typed_file(File, Info) ->
 	    ok -> ok;
 	    {error, enoent} -> ok;
 	    {error, _} ->
-	      Msg = io_lib:format("Error in deleting file ~s\n", [NewFileName]),
+	      Msg = io_lib:format("Error in deleting file ~ts\n", [NewFileName]),
 	      fatal_error(Msg)
 	  end,
 	  write_typed_file(File, Info, NewFileName);
 	enospc ->
-	  Msg = io_lib:format("Not enough space in ~p\n", [Dir]),
+	  Msg = io_lib:format("Not enough space in ~tp\n", [Dir]),
 	  fatal_error(Msg);
 	eacces ->
-	  Msg = io_lib:format("No write permission in ~p\n", [Dir]),
+	  Msg = io_lib:format("No write permission in ~tp\n", [Dir]),
 	  fatal_error(Msg);
 	_ ->
-	  Msg = io_lib:format("Unhandled error ~s when writing ~p\n",
+	  Msg = io_lib:format("Unhandled error ~ts when writing ~tp\n",
 			      [Reason, Dir]),
 	  fatal_error(Msg)
       end;
@@ -484,12 +485,12 @@ write_typed_file(File, Info) ->
 
 write_typed_file(File, Info, NewFileName) ->
   {ok, Binary} = file:read_file(File),
-  Chars = binary_to_list(Binary),
+  Chars = unicode:characters_to_list(Binary),
   write_typed_file(Chars, NewFileName, Info, 1, []),
-  io:format("             Saved as: ~p\n", [NewFileName]).
+  io:format("             Saved as: ~tp\n", [NewFileName]).
 
 write_typed_file(Chars, File, #info{functions = []}, _LNo, _Acc) ->
-  ok = file:write_file(File, list_to_binary(Chars), [append]);
+  ok = file:write_file(File, unicode:characters_to_binary(Chars), [append]);
 write_typed_file([Ch|Chs] = Chars, File, Info, LineNo, Acc) ->
   [{Line,F,A}|RestFuncs] = Info#info.functions,
   case Line of
@@ -519,7 +520,7 @@ write_typed_file([Ch|Chs] = Chars, File, Info, LineNo, Acc) ->
 raw_write(F, A, Info, File, Content) ->
   TypeInfo = get_type_string(F, A, Info, file),
   ContentList = lists:reverse(Content) ++ TypeInfo ++ "\n",
-  ContentBin = list_to_binary(ContentList),
+  ContentBin = unicode:characters_to_binary(ContentList),
   file:write_file(File, ContentBin, [append]).
 
 get_type_string(F, A, Info, Mode) ->
@@ -546,12 +547,12 @@ get_type_string(F, A, Info, Mode) ->
   end.
  
 show_type_info(File, Info) ->
-  io:format("\n%% File: ~p\n%% ", [File]),
+  io:format("\n%% File: ~tp\n%% ", [File]),
   OutputString = lists:concat(["~.", length(File)+8, "c~n"]),
   io:fwrite(OutputString, [$-]),
   Fun = fun ({_LineNo, F, A}) ->
 	    TypeInfo = get_type_string(F, A, Info, show),
-	    io:format("~s\n", [TypeInfo])
+	    io:format("~ts\n", [TypeInfo])
 	end,
   lists:foreach(Fun, Info#info.functions).
 
@@ -561,7 +562,7 @@ get_type_info(Func, Types) ->
       %% Note: Typeinfo of any function should exist in
       %% the result offered by dialyzer, otherwise there 
       %% *must* be something wrong with the analysis
-      Msg = io_lib:format("No type info for function: ~p\n", [Func]),
+      Msg = io_lib:format("No type info for function: ~tp\n", [Func]),
       fatal_error(Msg);
     {contract, _Fun} = C -> C;
     {_RetType, _ArgType} = RA -> RA 
@@ -575,7 +576,7 @@ get_type_info(Func, Types) ->
 
 process_cl_args() ->
   ArgList = init:get_plain_arguments(),
-  %% io:format("Args is ~p\n", [ArgList]),
+  %% io:format("Args is ~tp\n", [ArgList]),
   {Args, Analysis} = analyze_args(ArgList, #args{}, #analysis{}),
   %% if the mode has not been set, set it to the default mode (show)
   {Args, case Analysis#analysis.mode of
@@ -608,7 +609,7 @@ cl(["-D"++Def|Opts]) ->
   case Def of
     "" -> fatal_error("no variable name specified after -D");
     _ ->
-      DefPair = process_def_list(re:split(Def, "=", [{return, list}])),
+      DefPair = process_def_list(re:split(Def, "=", [{return, list}, unicode])),
       {{def, DefPair}, Opts}
   end;
 cl(["-I",Dir|Opts]) -> {{inc, Dir}, Opts};
@@ -697,7 +698,7 @@ get_all_files(#args{files = Fs, files_r = Ds}) ->
 test_erl_file_exclude_ann(File) ->
   case is_erl_file(File) of
     true -> %% Exclude files ending with ".ann.erl"
-      case re:run(File, "[\.]ann[\.]erl$") of
+      case re:run(File, "[\.]ann[\.]erl$", [unicode]) of
 	{match, _} -> false;
 	nomatch -> true
       end;
@@ -848,7 +849,7 @@ collect_one_file_info(File, Analysis) ->
   Options = dialyzer_utils:src_compiler_opts() ++ Is ++ Ds,
   case dialyzer_utils:get_core_from_src(File, Options) of
     {error, Reason} ->
-      %% io:format("File=~p\n,Options=~p\n,Error=~p\n", [File,Options,Reason]),
+      %% io:format("File=~tp\n,Options=~p\n,Error=~p\n", [File,Options,Reason]),
       compile_error(Reason);
     {ok, Core} ->
       case dialyzer_utils:get_record_and_type_info(Core) of
@@ -922,7 +923,7 @@ analyze_one_function({Var, FunBody} = Function, Acc) ->
   {FuncAcc, IncFuncAcc} =
     case (FileName =:= OriginalName) orelse (BaseName =:= OriginalName) of
       true -> %% Coming from original file
-	%% io:format("Added function ~p\n", [{LineNo, F, A}]),
+	%% io:format("Added function ~tp\n", [{LineNo, F, A}]),
 	{Acc#tmpAcc.funcAcc ++ [FuncInfo], Acc#tmpAcc.incFuncAcc};
       false ->
 	%% Coming from other sourses, including:
@@ -972,7 +973,7 @@ get_exported_types_from_core(Core) ->
 -spec fatal_error(string()) -> no_return().
 
 fatal_error(Slogan) ->
-  msg(io_lib:format("typer: ~s\n", [Slogan])),
+  msg(io_lib:format("typer: ~ts\n", [Slogan])),
   erlang:halt(1).
 
 -spec mode_error(mode(), mode()) -> no_return().
@@ -993,7 +994,7 @@ compile_error(Reason) ->
 -spec msg(string()) -> 'ok'.
 
 msg(Msg) ->
-  io:format(standard_error, "~s", [Msg]).
+  io:format(standard_error, "~ts", [Msg]).
 
 %%--------------------------------------------------------------------
 %% Version and help messages.

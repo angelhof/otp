@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2017. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,7 +88,7 @@ ERTS_GLB_INLINE int erts_index_num_entries(IndexTable* t)
      * on tables where entries are never erased.
      * index_put_entry() does matching write barrier.
      */
-    ERTS_SMP_READ_MEMORY_BARRIER;
+    ERTS_THR_READ_MEMORY_BARRIER;
     return ret;
 }
 

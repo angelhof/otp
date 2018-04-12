@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,18 +37,25 @@
 -define(TLS_URL_START, "https://").
 -define(NOT_IN_USE_PORT, 8997).
 
+%% Using hardcoded file path to keep it below 107 charaters
+%% (maximum length supported by erlang)
+-define(UNIX_SOCKET, "/tmp/inets_httpc_SUITE.sock").
+
 -record(sslsocket, {fd = nil, pid = nil}).
 %%--------------------------------------------------------------------
 %% Common Test interface functions -----------------------------------
 %%--------------------------------------------------------------------
 suite() ->
-    [{ct_hooks,[ts_install_cth]}
+    [{ct_hooks,[ts_install_cth]},
+     {timetrap,{seconds, 30}}
     ].
 
 all() ->
     [
      {group, http},
      {group, sim_http},
+     {group, http_internal},
+     {group, http_unix_socket},
      {group, https},
      {group, sim_https},
      {group, misc}
@@ -57,7 +64,12 @@ all() ->
 groups() ->
     [
      {http, [], real_requests()},
-     {sim_http, [], only_simulated()},
+     %% process_leak_on_keepalive is depending on stream_fun_server_close
+     %% and it shall be the last test case in the suite otherwise cookie
+     %% will fail.
+     {sim_http, [], only_simulated() ++ server_closing_connection() ++ [process_leak_on_keepalive]},
+     {http_internal, [], real_requests_esi()},
+     {http_unix_socket, [], simulated_unix_socket()},
      {https, [], real_requests()},
      {sim_https, [], only_simulated()},
      {misc, [], misc()}
@@ -67,6 +79,7 @@ real_requests()->
     [
      head,
      get,
+     get_query_string,
      post,
      delete,
      post_stream,
@@ -92,6 +105,12 @@ real_requests()->
      invalid_body
     ].
 
+real_requests_esi() ->
+    [slow_connection].
+
+simulated_unix_socket() ->
+    [unix_domain_socket].
+
 only_simulated() ->
     [
      cookie,
@@ -108,15 +127,16 @@ only_simulated() ->
      tolerate_missing_CR,
      userinfo,
      bad_response,
+     timeout_redirect,
      internal_server_error,
      invalid_http,
      invalid_chunk_size,
      headers_dummy,
      headers_with_obs_fold,
+     headers_conflict_chunked_with_length,
      empty_response_header,
      remote_socket_close,
      remote_socket_close_async,
-     process_leak_on_keepalive,
      transfer_encoding,
      transfer_encoding_identity,
      redirect_loop,
@@ -125,10 +145,19 @@ only_simulated() ->
      redirect_found,
      redirect_see_other,
      redirect_temporary_redirect,
+     redirect_relative_uri,
      port_in_host_header,
      redirect_port_in_host_header,
      relaxed,
-     multipart_chunks
+     multipart_chunks,
+     get_space,
+     stream_fun_server_close
+    ].
+
+server_closing_connection() ->
+    [
+     server_closing_connection_on_first_response,
+     server_closing_connection_on_second_response
     ].
 
 misc() ->
@@ -141,7 +170,6 @@ misc() ->
 %%--------------------------------------------------------------------
 
 init_per_suite(Config) ->
-    ct:timetrap({seconds, 30}),
     PrivDir = proplists:get_value(priv_dir, Config),
     DataDir = proplists:get_value(data_dir, Config),
     inets_test_lib:start_apps([inets]),
@@ -168,22 +196,35 @@ init_per_group(Group, Config0) when Group =:= sim_https; Group =:= https->
     catch crypto:stop(),
     try crypto:start() of
         ok ->
-            ct:timetrap({seconds, 30}),
             start_apps(Group),
             do_init_per_group(Group, Config0)
     catch
         _:_ ->
             {skip, "Crypto did not start"}
     end;
-
+init_per_group(http_unix_socket = Group, Config0) ->
+    case os:type() of
+        {win32,_} ->
+            {skip, "Unix Domain Sockets are not supported on Windows"};
+        _ ->
+            file:delete(?UNIX_SOCKET),
+            start_apps(Group),
+            Config = proplists:delete(port, Config0),
+            Port = server_start(Group, server_config(Group, Config)),
+            [{port, Port} | Config]
+    end;
 init_per_group(Group, Config0) ->
     start_apps(Group),
     Config = proplists:delete(port, Config0),
     Port = server_start(Group, server_config(Group, Config)),
     [{port, Port} | Config].
 
+end_per_group(http_unix_socket,_Config) ->
+    file:delete(?UNIX_SOCKET),
+    ok;
 end_per_group(_, _Config) ->
     ok.
+
 do_init_per_group(Group, Config0) ->
     Config = proplists:delete(port, Config0),
     Port = server_start(Group, server_config(Group, Config)),
@@ -198,7 +239,7 @@ init_per_testcase(pipeline, Config) ->
 init_per_testcase(persistent_connection, Config) ->
     inets:start(httpc, [{profile, persistent}]),
     httpc:set_options([{keep_alive_timeout, 50000},
-		       {max_keep_alive_length, 3}], persistent_connection),
+		       {max_keep_alive_length, 3}], persistent),
 
     Config;
 init_per_testcase(wait_for_whole_response, Config) ->
@@ -217,6 +258,24 @@ end_per_testcase(pipeline, _Config) ->
     inets:stop(httpc, pipeline);
 end_per_testcase(persistent_connection, _Config) ->
     inets:stop(httpc, persistent);
+end_per_testcase(Case, Config)
+  when Case == server_closing_connection_on_first_response;
+       Case == server_closing_connection_on_second_response ->
+    %% Test case uses at most one session.  Ensure no leftover
+    %% sessions left behind.
+    {_, Status} = proplists:lookup(tc_status, Config),
+    ShallCleanup = case Status of
+                       ok -> true;
+                       {failed, _} -> true;
+                       {skipped, _} -> false
+                   end,
+    if ShallCleanup =:= true ->
+            httpc:request(url(group_name(Config), "/just_close.html", Config)),
+            ok;
+       true ->
+            ct:pal("Not cleaning up because test case status was ~p", [Status]),
+            ok
+    end;
 
 end_per_testcase(_Case, _Config) ->
     ok.
@@ -242,6 +301,25 @@ get(Config) when is_list(Config) ->
 
     {ok, {{_,200,_}, [_ | _], BinBody}} =  httpc:request(get, Request, [], [{body_format, binary}]),
     true = is_binary(BinBody).
+
+
+get_query_string() ->
+    [{doc, "Test http get request with query string against local server"}].
+get_query_string(Config) when is_list(Config) ->
+    Request  = {url(group_name(Config), "/dummy.html?foo=bar", Config), []},
+    {ok, {{_,200,_}, [_ | _], Body = [_ | _]}} = httpc:request(get, Request, [], []),
+
+    inets_test_lib:check_body(Body).
+
+%%--------------------------------------------------------------------
+get_space() ->
+    [{"Test http get request with '%20' in the path of the URL."}].
+get_space(Config) when is_list(Config) ->
+    Request  = {url(group_name(Config), "/space%20.html", Config), []},
+    {ok, {{_,200,_}, [_ | _], Body = [_ | _]}} = httpc:request(get, Request, [], []),
+
+    inets_test_lib:check_body(Body).
+
 %%--------------------------------------------------------------------
 post() ->
     [{"Test http post request against local server. We do in this case "
@@ -575,7 +653,26 @@ redirect_temporary_redirect(Config) when is_list(Config) ->
     {ok, {{_,200,_}, [_ | _], [_|_]}}
 	= httpc:request(post, {URL307, [],"text/plain", "foobar"},
 			[], []).
+%%-------------------------------------------------------------------------
+redirect_relative_uri() ->
+    [{doc, "The server SHOULD generate a Location header field in the response "
+      "containing a preferred URI reference for the new permanent URI.  The user "
+      "agent MAY use the Location field value for automatic redirection.  The server's "
+      "response payload usually contains a short hypertext note with a "
+      "hyperlink to the new URI(s)."}].
+redirect_relative_uri(Config) when is_list(Config) ->
 
+    URL301 = url(group_name(Config), "/301_rel_uri.html", Config),
+
+    {ok, {{_,200,_}, [_ | _], [_|_]}}
+	= httpc:request(get, {URL301, []}, [], []),
+
+    {ok, {{_,200,_}, [_ | _], []}}
+	= httpc:request(head, {URL301, []}, [], []),
+
+    {ok, {{_,200,_}, [_ | _], [_|_]}}
+	= httpc:request(post, {URL301, [],"text/plain", "foobar"},
+			[], []).
 %%-------------------------------------------------------------------------
 redirect_loop() ->
     [{"doc, Test redirect loop detection"}].
@@ -745,7 +842,7 @@ empty_body() ->
 empty_body(Config) when is_list(Config) ->
     URL = url(group_name(Config), "/empty.html", Config),
     {ok, {{_,200,_}, [_ | _], []}} =
-	httpc:request(get, {URL, []}, [{timeout, 500}], []).
+	httpc:request(get, {URL, []}, [], []).
 
 %%-------------------------------------------------------------------------
 
@@ -783,6 +880,14 @@ bad_response(Config) when is_list(Config) ->
     {error, Reason} = httpc:request(URL1),
 
     ct:print("Wrong Statusline: ~p~n", [Reason]).
+%%-------------------------------------------------------------------------
+
+timeout_redirect() ->
+    [{doc, "Test that timeout works for redirects, check ERL-420."}].
+timeout_redirect(Config) when is_list(Config) ->
+    URL = url(group_name(Config), "/redirect_to_missing_crlf.html", Config),
+    {error, timeout} = httpc:request(get, {URL, []}, [{timeout, 400}], []).
+
 %%-------------------------------------------------------------------------
 
 internal_server_error(doc) ->
@@ -969,7 +1074,6 @@ headers_dummy(Config) when is_list(Config) ->
 		       {"If-Range", "Sat, 29 Oct 1994 19:43:31 GMT"},
 		       {"If-Match", "*"},
 		       {"Content-Type", "text/plain"},
-		       {"Content-Encoding", "chunked"},
 		       {"Content-Length", "6"},
 		       {"Content-Language", "en"},
 		       {"Content-Location", "http://www.foobar.se"},
@@ -992,6 +1096,18 @@ headers_with_obs_fold(Config) when is_list(Config) ->
     Request = {url(group_name(Config), "/obs_folded_headers.html", Config), []},
     {ok, {{_,200,_}, Headers, [_|_]}} = httpc:request(get, Request, [], []),
     "a b" = proplists:get_value("folded", Headers).
+
+%%-------------------------------------------------------------------------
+
+headers_conflict_chunked_with_length(doc) ->
+    ["Test the code for handling headers with both Transfer-Encoding"
+     "and Content-Length which must receive error in default (not relaxed) mode"
+     "and must receive successful response in relaxed mode"];
+headers_conflict_chunked_with_length(Config) when is_list(Config) ->
+    Request = {url(group_name(Config), "/headers_conflict_chunked_with_length.html", Config), []},
+    {error, {could_not_parse_as_http, _}} = httpc:request(get, Request, [{relaxed, false}], []),
+    {ok,{{_,200,_},_,_}} = httpc:request(get, Request, [{relaxed, true}], []),
+    ok.
 
 %%-------------------------------------------------------------------------
 
@@ -1034,8 +1150,6 @@ remote_socket_close_async(Config) when is_list(Config) ->
 %%-------------------------------------------------------------------------
 
 process_leak_on_keepalive(Config) ->
-    {ok, ClosedSocket} = gen_tcp:listen(6666, [{active, false}]),
-    ok = gen_tcp:close(ClosedSocket),
     Request  = {url(group_name(Config), "/dummy.html", Config), []},
     HttpcHandlers0 = supervisor:which_children(httpc_handler_sup),
     {ok, {{_, 200, _}, _, Body}} = httpc:request(get, Request, [], []),
@@ -1047,11 +1161,10 @@ process_leak_on_keepalive(Config) ->
         ordsets:to_list(
           ordsets:subtract(ordsets:from_list(HttpcHandlers1),
                            ordsets:from_list(HttpcHandlers0))),
-    sys:replace_state(
-      Pid, fun (State) ->
-                   Session = element(3, State),
-                   setelement(3, State, Session#session{socket=ClosedSocket})
-           end),
+    State = sys:get_state(Pid),
+    #session{socket=Socket} = element(3, State),
+    gen_tcp:close(Socket),
+
     {ok, {{_, 200, _}, _, Body}} = httpc:request(get, Request, [], []),
     %% bad handler with the closed socket should get replaced by
     %% the new one, so children count should stay the same
@@ -1170,6 +1283,102 @@ wait_for_whole_response(Config) when is_list(Config) ->
      ReqSeqNumServer ! shutdown.
 
 %%--------------------------------------------------------------------
+stream_fun_server_close() ->
+    [{doc, "Test that an error msg is received when using a receiver fun as stream target"}].
+stream_fun_server_close(Config) when is_list(Config) ->
+    Request  = {url(group_name(Config), "/delay_close.html", Config), []},
+    Self = self(),
+    Fun = fun(X) -> Self ! X end,
+    {ok, RequestId} = httpc:request(get, Request, [], [{sync, false}, {receiver, Fun}]),
+    receive
+        {RequestId, {error, Reason}} ->
+            ct:pal("Close ~p", [Reason]),
+            ok
+    after 13000 ->
+            ct:fail(did_not_receive_close)
+    end. 
+
+%%--------------------------------------------------------------------
+server_closing_connection_on_first_response() ->
+    [{doc, "Client receives \"Connection: close\" on first response."
+      "A client that receives a \"close\" connection option MUST cease sending"
+      "requests on that connection and close the connection after reading"
+      "the response message containing the \"close\""}].
+server_closing_connection_on_first_response(Config) when is_list(Config) ->
+    ReqSrvSendOctFun =
+        fun(V, U, S) ->
+                {ok, {{V, S, _}, Headers0, []}} =
+                    httpc:request(get, {U, []}, [{version, V}], []),
+                {_, SendOctStr} =
+                    proplists:lookup("x-socket-stat-send-oct", Headers0),
+                list_to_integer(SendOctStr)
+        end,
+    V = "HTTP/1.1",
+    Url0 = url(group_name(Config), "/http_1_1_send_oct.html", Config),
+    Url1 = url(group_name(Config), "/http_1_1_send_oct_and_connection_close.html", Config),
+    %% Test case assumes at most one reusable past session.
+    _ = ReqSrvSendOctFun(V, Url1, 204),
+    0 = ReqSrvSendOctFun(V, Url0, 204),
+    ok.
+
+%%--------------------------------------------------------------------
+server_closing_connection_on_second_response() ->
+    [{doc, "Client receives \"Connection: close\" on second response."
+      "A client that receives a \"close\" connection option MUST cease sending"
+      "requests on that connection and close the connection after reading"
+      "the response message containing the \"close\""}].
+server_closing_connection_on_second_response(Config) when is_list(Config) ->
+    ReqSrvSendOctFun =
+        fun(V, U, S) ->
+                {ok, {{V, S, _}, Headers0, []}} =
+                    httpc:request(get, {U, []}, [{version, V}], []),
+                {_, SendOctStr} =
+                    proplists:lookup("x-socket-stat-send-oct", Headers0),
+                list_to_integer(SendOctStr)
+        end,
+    V = "HTTP/1.1",
+    Url0 = url(group_name(Config), "/http_1_1_send_oct.html", Config),
+    Url1 = url(group_name(Config), "/http_1_1_send_oct_and_connection_close.html", Config),
+    %% Test case assumes no reusable past sessions.
+    SendOct0 = 0 = ReqSrvSendOctFun(V, Url0, 204),
+    case ReqSrvSendOctFun(V, Url1, 204) of SendOct1 when SendOct1 > SendOct0 -> ok end,
+    0 = ReqSrvSendOctFun(V, Url0, 204),
+    ok.
+
+%%--------------------------------------------------------------------
+slow_connection() ->
+    [{doc, "Test that a request on a slow keep-alive connection won't crash the httpc_manager"}].
+slow_connection(Config) when is_list(Config) ->
+    BodyFun = fun(0) -> eof;
+                 (LenLeft) -> timer:sleep(1000),
+                              {ok, lists:duplicate(10, "1"), LenLeft - 10}
+              end,
+    Request  = {url(group_name(Config), "/httpc_SUITE:esi_post", Config),
+                [{"content-length", "100"}],
+                "text/plain",
+                {BodyFun, 100}},
+    {ok, _} = httpc:request(post, Request, [], []),
+    %% Second request causes a crash if gen_server timeout is not set to infinity
+    %% in httpc_handler.
+    {ok, _} = httpc:request(post, Request, [], []).
+
+%%-------------------------------------------------------------------------
+unix_domain_socket() ->
+    [{"doc, Test HTTP requests over unix domain sockets"}].
+unix_domain_socket(Config) when is_list(Config) ->
+
+    URL = "http:///v1/kv/foo",
+
+    {ok,[{unix_socket,?UNIX_SOCKET}]} =
+        httpc:get_options([unix_socket]),
+    {ok, {{_,200,_}, [_ | _], _}}
+	= httpc:request(put, {URL, [], [], ""}, [], []),
+    {ok, {{_,200,_}, [_ | _], _}}
+        = httpc:request(get, {URL, []}, [], []).
+
+
+
+%%--------------------------------------------------------------------
 %% Internal Functions ------------------------------------------------
 %%--------------------------------------------------------------------
 stream(ReceiverPid, Receiver, Config) ->
@@ -1262,6 +1471,8 @@ url(https, End, Config) ->
     ?TLS_URL_START ++ Host ++ ":" ++ integer_to_list(Port) ++ End;
 url(sim_http, End, Config) ->
     url(http, End, Config);
+url(http_internal, End, Config) ->
+    url(http, End, Config);
 url(sim_https, End, Config) ->
     url(https, End, Config).
 url(http, UserInfo, End, Config) ->
@@ -1281,19 +1492,28 @@ group_name(Config) ->
 
 server_start(sim_http, _) ->
     Inet = inet_version(),
-    ok = httpc:set_options([{ipfamily, Inet}]),
-    {_Pid, Port} = dummy_server(Inet),
+    ok = httpc:set_options([{ipfamily, Inet},{unix_socket, undefined}]),
+    {_Pid, Port} = http_test_lib:dummy_server(ip_comm, Inet, [{content_cb, ?MODULE}]),
     Port;
 
 server_start(sim_https, SslConfig) ->
     Inet = inet_version(),
-    ok = httpc:set_options([{ipfamily, Inet}]),
-    {_Pid, Port} = dummy_server(ssl, Inet, SslConfig),
+    ok = httpc:set_options([{ipfamily, Inet},{unix_socket, undefined}]),
+    {_Pid, Port} = http_test_lib:dummy_server(ssl, Inet, [{ssl, SslConfig}, {content_cb, ?MODULE}]),
+    Port;
+
+server_start(http_unix_socket, Config) ->
+    Inet = local,
+    Socket = proplists:get_value(unix_socket, Config),
+    ok = httpc:set_options([{ipfamily, Inet},{unix_socket, Socket}]),
+    {_Pid, Port} = http_test_lib:dummy_server(unix_socket, Inet, [{content_cb, ?MODULE},
+                                                                  {unix_socket, Socket}]),
     Port;
 
 server_start(_, HttpdConfig) ->
     {ok, Pid} = inets:start(httpd, HttpdConfig),
     Serv = inets:services_info(),
+    ok = httpc:set_options([{ipfamily, inet_version()},{unix_socket, undefined}]),
     {value, {_, _, Info}} = lists:keysearch(Pid, 2, Serv),
     proplists:get_value(port, Info).
 
@@ -1308,13 +1528,30 @@ server_config(http, Config) ->
      {mime_type, "text/plain"},
      {script_alias, {"/cgi-bin/", filename:join(ServerRoot, "cgi-bin") ++ "/"}}
     ];
-
+server_config(http_internal, Config) ->
+    ServerRoot = proplists:get_value(server_root, Config),
+    [{port, 0},
+     {server_name,"httpc_test"},
+     {server_root, ServerRoot},
+     {document_root, proplists:get_value(doc_root, Config)},
+     {bind_address, any},
+     {ipfamily, inet_version()},
+     {mime_type, "text/plain"},
+     {erl_script_alias, {"", [httpc_SUITE]}}
+    ];
 server_config(https, Config) ->
     [{socket_type, {essl, ssl_config(Config)}} | server_config(http, Config)];
 server_config(sim_https, Config) ->
     ssl_config(Config);
+server_config(http_unix_socket, _Config) ->
+    Socket = ?UNIX_SOCKET,
+    [{unix_socket, Socket}];
+
 server_config(_, _) ->
     [].
+
+esi_post(Sid, _Env, _Input) ->
+    mod_esi:deliver(Sid, ["OK"]).
 
 start_apps(https) ->
     inets_test_lib:start_apps([crypto, public_key, ssl]);
@@ -1392,13 +1629,7 @@ receive_replys([ID|IDs]) ->
 	    ct:pal({recived_canceld_id, Other})
     end.
 
-%% Perform a synchronous stop
-dummy_server_stop(Pid) ->
-    Pid ! {stop, self()},
-    receive 
-	{stopped, Pid} ->
-	    ok
-    end.
+
 
 inet_version() ->
     inet. %% Just run inet for now
@@ -1526,7 +1757,7 @@ dummy_request_handler_loop({Module, Function, Args}, SockType, Socket) ->
 handle_request(Module, Function, Args, Socket) ->
     case Module:Function(Args) of
 	{ok, Result} ->
-	    case handle_http_msg(Result, Socket) of
+	    case handle_http_msg(Result, Socket, []) of
 		stop ->
 		    stop;
 		<<>> ->
@@ -1551,8 +1782,7 @@ handle_request(Module, Function, Args, Socket) ->
 	    NewMFA
     end.
 
-handle_http_msg({Method, RelUri, _, {_, Headers}, Body}, Socket) ->
-
+handle_http_msg({Method, RelUri, _, {_, Headers}, Body}, Socket, _) ->
     ct:print("Request: ~p ~p", [Method, RelUri]),
 
     NextRequest = 
@@ -1676,6 +1906,15 @@ content_length(["content-length:" ++ Value | _]) ->
 content_length([_Head | Tail]) ->
    content_length(Tail).
 
+handle_uri("GET","/dummy.html?foo=bar",_,_,_,_) ->
+    "HTTP/1.0 200 OK\r\n\r\nTEST";
+
+handle_uri("GET","/space%20.html",_,_,_,_) ->
+    Body = "<HTML><BODY>foobar</BODY></HTML>",
+    "HTTP/1.1 200 OK\r\n" ++
+        "Content-Length:" ++ integer_to_list(length(Body)) ++ "\r\n\r\n" ++
+        Body;
+
 handle_uri(_,"/just_close.html",_,_,_,_) ->
 		close;
 handle_uri(_,"/no_content.html",_,_,_,_) ->
@@ -1740,6 +1979,23 @@ handle_uri(_,"/301.html",Port,_,Socket,_) ->
 	"Location:" ++ NewUri ++  "\r\n" ++
 	"Content-Length:" ++ integer_to_list(length(Body))
 	++ "\r\n\r\n" ++ Body;
+
+
+handle_uri("HEAD","/301_rel_uri.html",_,_,_,_) ->
+    NewUri = "/dummy.html",
+    "HTTP/1.1 301 Moved Permanently\r\n" ++
+	"Location:" ++ NewUri ++  "\r\n" ++
+	"Content-Length:0\r\n\r\n";
+
+handle_uri(_,"/301_rel_uri.html",_,_,_,_) ->
+    NewUri = "/dummy.html",
+  Body = "<HTML><BODY><a href=" ++ NewUri ++
+	">New place</a></BODY></HTML>",
+    "HTTP/1.1 301 Moved Permanently\r\n" ++
+	"Location:" ++ NewUri ++  "\r\n" ++
+	"Content-Length:" ++ integer_to_list(length(Body))
+	++ "\r\n\r\n" ++ Body;
+
 
 handle_uri("HEAD","/302.html",Port,_,Socket,_) ->
     NewUri = url_start(Socket) ++
@@ -1844,7 +2100,6 @@ handle_uri(_,"/dummy_headers.html",_,_,Socket,_) ->
     %% user to evaluate. This is not a valid response
     %% it only tests that the header handling code works.
     Head = "HTTP/1.1 200 ok\r\n" ++
-	"Content-Length:32\r\n" ++
 	"Pragma:1#no-cache\r\n"  ++
 	"Via:1.0 fred, 1.1 nowhere.com (Apache/1.1)\r\n"  ++
 	"Warning:1#pseudonym foobar\r\n"  ++
@@ -1873,6 +2128,15 @@ handle_uri(_,"/obs_folded_headers.html",_,_,_,_) ->
     "Folded: a\r\n"
     " b\r\n\r\n"
     "Hello";
+
+handle_uri(_,"/headers_conflict_chunked_with_length.html",_,_,Socket,_) ->
+    Head =  "HTTP/1.1 200 ok\r\n"
+        "Content-Length:32\r\n"
+	"Transfer-Encoding:Chunked\r\n\r\n",
+    send(Socket, Head),
+    send(Socket, http_chunk:encode("<HTML><BODY>fo")),
+    send(Socket, http_chunk:encode("obar</BODY></HTML>")),
+    http_chunk:encode_last();
 
 handle_uri(_,"/capital_transfer_encoding.html",_,_,Socket,_) ->
     Head =  "HTTP/1.1 200 ok\r\n" ++
@@ -1914,6 +2178,16 @@ handle_uri(_,"/missing_crlf.html",_,_,_,_) ->
     "HTTP/1.1 200 ok" ++
 	"Content-Length:32\r\n" ++
 	"<HTML><BODY>foobar</BODY></HTML>";
+
+handle_uri(_,"/redirect_to_missing_crlf.html",Port,_,Socket,_) ->
+    NewUri = url_start(Socket) ++
+	integer_to_list(Port) ++ "/missing_crlf.html",
+    Body = "<HTML><BODY><a href=" ++ NewUri ++
+	">New place</a></BODY></HTML>",
+    "HTTP/1.1 303 See Other \r\n" ++
+	"Location:" ++ NewUri ++  "\r\n" ++
+	"Content-Length:" ++ integer_to_list(length(Body))
+	++ "\r\n\r\n" ++ Body;
 
 handle_uri(_,"/wrong_statusline.html",_,_,_,_) ->
     "ok 200 HTTP/1.1\r\n\r\n" ++
@@ -2011,11 +2285,49 @@ handle_uri(_,"/multipart_chunks.html",_,_,Socket,_) ->
     send(Socket, Head),
     send_multipart_chunks(Socket),
     http_chunk:encode_last();
+handle_uri(_,"/delay_close.html",_,_,Socket,_) ->
+    ct:sleep(10000),
+    close(Socket);
 handle_uri("HEAD",_,_,_,_,_) ->
     "HTTP/1.1 200 ok\r\n" ++
 	"Content-Length:0\r\n\r\n";
+handle_uri("PUT","/v1/kv/foo",_,_,_,_) ->
+    "HTTP/1.1 200 OK\r\n" ++
+        "Date: Tue, 20 Feb 2018 14:39:08 GMT\r\n" ++
+        "Content-Length: 5\r\n\r\n" ++
+        "Content-Type: application/json\r\n\r\n" ++
+        "true\n";
+handle_uri("GET","/v1/kv/foo",_,_,_,_) ->
+    "HTTP/1.1 200 OK\r\n" ++
+        "Date: Tue, 20 Feb 2018 14:39:08 GMT\r\n" ++
+        "Content-Length: 24\r\n" ++
+        "Content-Type: application/json\r\n\r\n" ++
+        "[{\"Value\": \"aGVsbG8=\"}]\n";
+handle_uri(_,"/http_1_1_send_oct.html",_,_,Socket,_) ->
+    "HTTP/1.1 204 No Content\r\n" ++
+        "X-Socket-Stat-Send-Oct: " ++ integer_to_list(get_stat(Socket, send_oct)) ++ "\r\n" ++
+        "\r\n";
+handle_uri(_,"/http_1_1_send_oct_and_connection_close.html",_,_,Socket,_) ->
+    "HTTP/1.1 204 No Content\r\n" ++
+        "X-Socket-Stat-Send-Oct: " ++ integer_to_list(get_stat(Socket, send_oct)) ++ "\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n";
+
 handle_uri(_,_,_,_,_,DefaultResponse) ->
     DefaultResponse.
+
+get_stat(S, Opt) ->
+    case getstat(S, [Opt]) of
+        {ok, [{Opt, V}]} when is_integer(V) ->
+            V;
+        {error, _} = E ->
+            E
+    end.
+
+getstat(#sslsocket{} = S, Opts) ->
+    ssl:getstat(S, Opts);
+getstat(S, Opts) ->
+    inet:getstat(S, Opts).
 
 url_start(#sslsocket{}) ->
     {ok,Host} = inet:gethostname(),

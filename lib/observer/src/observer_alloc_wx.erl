@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2015-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2015-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -79,8 +79,8 @@ init([Notebook, Parent, Config]) ->
                       max   = #{}
 		     }
 	}
-    catch _:Err ->
-	    io:format("~p crashed ~p: ~p~n",[?MODULE, Err, erlang:get_stacktrace()]),
+    catch _:Err:Stacktrace ->
+	    io:format("~p crashed ~tp: ~tp~n",[?MODULE, Err, Stacktrace]),
 	    {stop, Err}
     end.
 
@@ -183,7 +183,7 @@ handle_info({'EXIT', Old, _}, State = #state{appmon=Old}) ->
     {noreply, State#state{active=false, appmon=undefined}};
 
 handle_info(_Event, State) ->
-    %% io:format("~p:~p: ~p~n",[?MODULE,?LINE,_Event]),
+    %% io:format("~p:~p: ~tp~n",[?MODULE,?LINE,_Event]),
     {noreply, State}.
 
 terminate(_Event, #state{}) ->
@@ -194,14 +194,17 @@ code_change(_, _, State) ->
 %%%%%%%%%%
 
 restart_fetcher(Node, #state{panel=Panel, wins=Wins0, time=Ti} = State) ->
-    SysInfo = observer_wx:try_rpc(Node, observer_backend, sys_info, []),
-    Info = alloc_info(SysInfo),
-    Max = lists:foldl(fun calc_max/2, #{}, Info),
-    {Wins, Samples} = add_data(Info, {0, queue:new()}, Wins0, Ti, true),
-    erlang:send_after(1000 div ?DISP_FREQ, self(), {refresh, 0}),
-    wxWindow:refresh(Panel),
-    precalc(State#state{active=true, appmon=Node, time=Ti#ti{tick=0},
-			wins=Wins, samples=Samples, max=Max}).
+    case rpc:call(Node, observer_backend, sys_info, []) of
+        {badrpc, _} -> State;
+        SysInfo ->
+            Info = alloc_info(SysInfo),
+            Max = lists:foldl(fun calc_max/2, #{}, Info),
+            {Wins, Samples} = add_data(Info, {0, queue:new()}, Wins0, Ti, true),
+            erlang:send_after(1000 div ?DISP_FREQ, self(), {refresh, 0}),
+            wxWindow:refresh(Panel),
+            precalc(State#state{active=true, appmon=Node, time=Ti#ti{tick=0},
+                                wins=Wins, samples=Samples, max=Max})
+    end.
 
 precalc(#state{samples=Data0, paint=Paint, time=Ti, wins=Wins0}=State) ->
     Wins = [precalc(Ti, Data0, Paint, Win) || Win <- Wins0],

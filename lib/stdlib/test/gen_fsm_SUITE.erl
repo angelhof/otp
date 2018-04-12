@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@
 
 -export([undef_in_handle_info/1, undef_in_terminate/1]).
 
--export([hibernate/1,hiber_idle/3,hiber_wakeup/3,hiber_idle/2,hiber_wakeup/2]).
+-export([hibernate/1,auto_hibernate/1,hiber_idle/3,hiber_wakeup/3,hiber_idle/2,hiber_wakeup/2]).
 
 -export([enter_loop/1]).
 
@@ -68,7 +68,7 @@ suite() -> [{ct_hooks,[ts_install_cth]}].
 
 all() ->
     [{group, start}, {group, abnormal}, shutdown,
-     {group, sys}, hibernate, enter_loop, {group, undef_callbacks},
+     {group, sys}, hibernate, auto_hibernate, enter_loop, {group, undef_callbacks},
      undef_in_handle_info, undef_in_terminate].
 
 groups() ->
@@ -389,7 +389,7 @@ stop10(_Config) ->
     Dir = filename:dirname(code:which(?MODULE)),
     rpc:call(Node,code,add_path,[Dir]),
     {ok, Pid} = rpc:call(Node,gen_fsm,start,[{global,to_stop},?MODULE,[],[]]),
-    global:sync(),
+    ok = global:sync(),
     ok = gen_fsm:stop({global,to_stop}),
     false = rpc:call(Node,erlang,is_process_alive,[Pid]),
     {'EXIT',noproc} = (catch gen_fsm:stop({global,to_stop})),
@@ -700,6 +700,43 @@ hibernate(Config) when is_list(Config) ->
     process_flag(trap_exit, OldFl),
     ok.
 
+%% Auto hibernation
+auto_hibernate(Config) when is_list(Config) ->
+    OldFl = process_flag(trap_exit, true),
+    HibernateAfterTimeout = 100,
+    State = {auto_hibernate_state},
+    {ok, Pid} = gen_fsm:start_link({local, my_test_name_auto_hibernate}, ?MODULE, {state_data, State}, [{hibernate_after, HibernateAfterTimeout}]),
+    %% After init test
+    is_not_in_erlang_hibernate(Pid),
+    timer:sleep(HibernateAfterTimeout),
+    is_in_erlang_hibernate(Pid),
+    %% Get state test
+    {_, State} = sys:get_state(my_test_name_auto_hibernate),
+    is_in_erlang_hibernate(Pid),
+    %% Sync send event test
+    'alive!' = gen_fsm:sync_send_event(Pid,'alive?'),
+    is_not_in_erlang_hibernate(Pid),
+    timer:sleep(HibernateAfterTimeout),
+    is_in_erlang_hibernate(Pid),
+    %% Send event test
+    ok = gen_fsm:send_all_state_event(Pid,{'alive?', self()}),
+    wfor(yes),
+    is_not_in_erlang_hibernate(Pid),
+    timer:sleep(HibernateAfterTimeout),
+    is_in_erlang_hibernate(Pid),
+    %% Info test
+    Pid ! {self(), handle_info},
+    wfor({Pid, handled_info}),
+    is_not_in_erlang_hibernate(Pid),
+    timer:sleep(HibernateAfterTimeout),
+    is_in_erlang_hibernate(Pid),
+    stop_it(Pid),
+    receive
+        {'EXIT',Pid,normal} -> ok
+    end,
+    process_flag(trap_exit, OldFl),
+    ok.
+
 is_in_erlang_hibernate(Pid) ->
     receive after 1 -> ok end,
     is_in_erlang_hibernate_1(200, Pid).
@@ -968,7 +1005,7 @@ undef_in_terminate(Config) when is_list(Config) ->
     State = {undef_in_terminate, {?MODULE, terminate}},
     {ok, FSM} = gen_fsm:start(?MODULE, {state_data, State}, []),
     try
-        gen_fsm:stop(FSM),
+        ok = gen_fsm:stop(FSM),
         ct:fail(failed)
     catch
         exit:{undef, [{?MODULE, terminate, _, _}|_]} ->
@@ -1151,6 +1188,8 @@ idle(badreturn, _From, _Data) ->
 idle({timeout,Time}, From, _Data) ->
     gen_fsm:send_event_after(Time, {timeout,Time}),
     {next_state, timeout, From};
+idle('alive?', _From, Data) ->
+    {reply, 'alive!', idle, Data};
 idle(_, _From, Data) ->
     {reply, 'eh?', idle, Data}.
 
@@ -1162,7 +1201,7 @@ timeout({timeout,Ref,{timeout,Time}}, {From,Ref}) ->
     Cref = gen_fsm:start_timer(Time, cancel),
     Time4 = Time*4,
     receive after Time4 -> ok end,
-    gen_fsm:cancel_timer(Cref),
+    _= gen_fsm:cancel_timer(Cref),
     {next_state, timeout, {From,Ref2}};
 timeout({timeout,Ref2,ok},{From,Ref2}) ->
     gen_fsm:reply(From, ok),
@@ -1226,6 +1265,9 @@ handle_info(hibernate_later, _SName, _State) ->
 handle_info({call_undef_fun, {Mod, Fun}}, State, Data) ->
     Mod:Fun(),
     {next_state, State, Data};
+handle_info({From, handle_info}, SName, State) ->
+    From ! {self(), handled_info},
+    {next_state, SName, State};
 handle_info(Info, _State, Data) ->
     {stop, {unexpected,Info}, Data}.
 

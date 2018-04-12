@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2003-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -529,7 +529,7 @@ bin_opt_info(Config) when is_list(Config) ->
 	    Code,
 	    [bin_opt_info],
 	    {warnings,
-	     [{4,sys_core_fold,orig_bin_var_used_in_guard},
+	     [{4,sys_core_bsm,orig_bin_var_used_in_guard},
 	      {5,beam_bsm,{no_bin_opt,{{t1,1},no_suitable_bs_start_match}}},
 	      {9,beam_bsm,{no_bin_opt,
 			   {binary_used_in,{extfunc,erlang,split_binary,2}}}} ]}}],

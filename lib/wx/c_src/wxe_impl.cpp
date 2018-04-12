@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2008-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2008-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -267,7 +267,7 @@ int WxeApp::dispatch_cmds()
   return more;
 }
 
-#define BREAK_BATCH 200
+#define BREAK_BATCH 10000
 
 int WxeApp::dispatch(wxeFifo * batch)
 {
@@ -284,7 +284,7 @@ int WxeApp::dispatch(wxeFifo * batch)
 	if(blevel>0) {
           blevel--;
           if(blevel==0)
-            wait += BREAK_BATCH*100;
+            wait += BREAK_BATCH/4;
         }
 	break;
       case WXE_BATCH_BEGIN:
@@ -317,7 +317,7 @@ int WxeApp::dispatch(wxeFifo * batch)
       erl_drv_mutex_lock(wxe_batch_locker_m);
       batch->Cleanup();
     }
-    if(blevel <= 0 || wait > BREAK_BATCH) {
+    if(blevel <= 0 || wait >= BREAK_BATCH) {
       erl_drv_mutex_unlock(wxe_batch_locker_m);
       if(blevel > 0) {
         return 1; // We are still in a batch but we can let wx check for events

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -86,6 +86,7 @@
     cd_relative/1,
     close_deaf_port/1,
     count_fds/1,
+    dropped_commands/1,
     dying_port/1,
     env/1,
     eof/1,
@@ -108,7 +109,6 @@
     mon_port_pid_demonitor/1,
     mon_port_remote_on_remote/1,
     mon_port_driver_die/1,
-    mon_port_driver_die_demonitor/1,
     mul_basic/1,
     mul_slow_writes/1,
     name1/1,
@@ -153,12 +153,12 @@
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
-     {timetrap, {seconds, 10}}].
+     {timetrap, {minutes, 1}}].
 
 all() ->
     [otp_6224, {group, stream}, basic_ping, slow_writes,
      bad_packet, bad_port_messages, {group, options},
-     {group, multiple_packets}, parallell, dying_port,
+     {group, multiple_packets}, parallell, dying_port, dropped_commands,
      port_program_with_path, open_input_file_port,
      open_output_file_port, name1, env, huge_env, bad_env, cd,
      cd_relative, pipe_limit_env, bad_args,
@@ -179,8 +179,7 @@ all() ->
      mon_port_bad_named,
      mon_port_pid_demonitor,
      mon_port_name_demonitor,
-     mon_port_driver_die,
-     mon_port_driver_die_demonitor
+     mon_port_driver_die
     ].
 
 groups() ->
@@ -547,6 +546,47 @@ make_dying_port(Config) when is_list(Config) ->
     PortTest = port_test(Config),
     Command = lists:concat([PortTest, " -h0 -d -q"]),
     open_port({spawn, Command}, [stream]).
+
+%% Test that dropped port_commands work correctly.
+%% This used to cause a segfault.
+%%
+%% This testcase creates a port and then lets many processes
+%% do parallel commands to it. After a while it closes the
+%% port and we are trying to catch the race when doing a
+%% command while the port is closing.
+dropped_commands(Config) ->
+    %% Test with output callback
+    dropped_commands(Config, false, {self(), {command, "1"}}),
+    %% Test with outputv callback
+    dropped_commands(Config, true, {self(), {command, "1"}}).
+
+dropped_commands(Config, Outputv, Cmd) ->
+    Path = proplists:get_value(data_dir, Config),
+    os:putenv("ECHO_DRV_USE_OUTPUTV", atom_to_list(Outputv)),
+    ok = load_driver(Path, "echo_drv"),
+    [dropped_commands_test(Cmd) || _ <- lists:seq(1, 100)],
+    timer:sleep(100),
+    erl_ddll:unload_driver("echo_drv"),
+    os:unsetenv("ECHO_DRV_USE_OUTPUTV"),
+    ok.
+
+dropped_commands_test(Cmd) ->
+    spawn_monitor(
+      fun() ->
+              Port = erlang:open_port({spawn_driver, "echo_drv"},
+                                      [{parallelism, true}]),
+              [spawn_link(fun() -> spin(Port, Cmd) end) || _ <- lists:seq(1,8)],
+              timer:sleep(5),
+              port_close(Port),
+              timer:sleep(5),
+              exit(nok)
+      end),
+    receive _M -> timer:sleep(5) end.
+
+spin(P, Cmd) ->
+    P ! Cmd,
+    spin(P, Cmd).
+
 
 %% Tests that port program with complete path (but without any
 %% .exe extension) can be started, even if there is a file with
@@ -993,6 +1033,9 @@ huge_env(Config) when is_list(Config) ->
     try erlang:open_port({spawn,Cmd},[exit_status, {env, Env}]) of
         P ->
             receive
+                {P, {exit_status,N}} = M when N > 127->
+                    %% If exit status is > 127 something went very wrong
+                    ct:fail("Open port failed got ~p",[M]);
                 {P, {exit_status,N}} = M ->
                     %% We test that the exit status is an integer, this means
                     %% that the child program has started. If we get an atom
@@ -1042,7 +1085,7 @@ pipe_limit_env_do(Bytes, Cmd, CmdSize) ->
 
 %% environ format: KEY=VALUE\0
 env_of_bytes(Bytes) when Bytes > 3 ->
-    Env = [{"X",lists:duplicate(Bytes-3, $x)}];
+    [{"X",lists:duplicate(Bytes-3, $x)}];
 env_of_bytes(_) -> [].
 
 %% White box assumption about payload written to pipe
@@ -1620,13 +1663,7 @@ spawn_executable(Config) when is_list(Config) ->
     [ExactFile2,"hello world","dlrow olleh"] =
     run_echo_args_2(unicode:characters_to_binary("\""++ExactFile2++"\" "++"\"hello world\" \"dlrow olleh\"")),
 
-    ExeExt =
-    case string:to_lower(lists:last(string:tokens(ExactFile2,"."))) of
-        "exe" ->
-            ".exe";
-        _ ->
-            ""
-    end,
+    ExeExt = filename:extension(ExactFile2),
     Executable2 = "spoky name"++ExeExt,
     file:copy(ExactFile1,filename:join([SpaceDir,Executable2])),
     ExactFile3 = filename:nativename(filename:join([SpaceDir,Executable2])),
@@ -1794,7 +1831,7 @@ collect_data(Port) ->
     end.
 
 parse_echo_args_output(Data) ->
-    [lists:last(string:tokens(S,"|")) || S <- string:tokens(Data,"\r\n")].
+    [lists:last(string:lexemes(S,"|")) || S <- string:lexemes(Data,["\r\n",$\n])].
 
 %% Test that the emulator does not mix up ports when the port table wraps
 mix_up_ports(Config) when is_list(Config) ->
@@ -1920,7 +1957,7 @@ max_ports() ->
     erlang:system_info(port_limit).
 
 port_ix(Port) when is_port(Port) ->
-    ["#Port",_,PortIxStr] = string:tokens(erlang:port_to_list(Port),
+    ["#Port",_,PortIxStr] = string:lexemes(erlang:port_to_list(Port),
                                           "<.>"),
     list_to_integer(PortIxStr).
 
@@ -2744,7 +2781,7 @@ mon_port_driver_die(Config) ->
     end,
     ok.
 
-
+-ifdef(DISABLED_TESTCASE).
 %% 1. Spawn a port which will sleep 3 seconds
 %% 2. Monitor port
 %% 3. Port driver and dies horribly (via C driver_failure call). This should
@@ -2780,6 +2817,7 @@ mon_port_driver_die_demonitor(Config) ->
     after 5000 -> ?assert(false)
     end,
     ok.
+-endif.
 
 %% @doc Makes a controllable port for testing. Underlying mechanism of this
 %% port is not important, only important is our ability to close/kill it or

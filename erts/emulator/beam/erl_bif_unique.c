@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2014-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2014-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,10 +77,8 @@ init_reference(void)
     ref_init_value += (Uint64) tv.tv_usec;
 #ifdef DEBUG
     max_thr_id = (Uint32) erts_no_schedulers;
-#ifdef ERTS_DIRTY_SCHEDULERS
     max_thr_id += (Uint32) erts_no_dirty_cpu_schedulers;
     max_thr_id += (Uint32) erts_no_dirty_io_schedulers;
-#endif
 #endif
     erts_atomic64_init_nob(&global_reference.count,
 			   (erts_aint64_t) ref_init_value);
@@ -136,7 +134,7 @@ Eterm erts_make_ref(Process *c_p)
     Eterm* hp;
     Uint32 ref[ERTS_REF_NUMBERS];
 
-    ERTS_SMP_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(c_p));
+    ERTS_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(c_p));
 
     hp = HAlloc(c_p, ERTS_REF_THING_SIZE);
 
@@ -392,7 +390,8 @@ init_magic_ref_tables(void)
     erts_snprintf(&tblp->name[0], sizeof(tblp->name),
 		  "magic_ref_table_0");
     hash_init(0, &tblp->hash, &tblp->name[0], 1, hash_funcs);
-    erts_rwmtx_init(&tblp->rwmtx, "magic_ref_table");
+    erts_rwmtx_init(&tblp->rwmtx, "magic_ref_table", NIL,
+        ERTS_LOCK_FLAGS_PROPERTY_STATIC | ERTS_LOCK_FLAGS_CATEGORY_GENERIC);
 
     hash_funcs.hash = nsched_mreft_hash;
     hash_funcs.cmp = nsched_mreft_cmp;
@@ -402,7 +401,8 @@ init_magic_ref_tables(void)
 	erts_snprintf(&tblp->name[0], sizeof(tblp->name),
 		      "magic_ref_table_%d", i);
 	hash_init(0, &tblp->hash, &tblp->name[0], 1, hash_funcs);
-	erts_rwmtx_init(&tblp->rwmtx, "magic_ref_table");
+	erts_rwmtx_init(&tblp->rwmtx, "magic_ref_table", NIL,
+        ERTS_LOCK_FLAGS_PROPERTY_STATIC | ERTS_LOCK_FLAGS_CATEGORY_GENERIC);
     }
 }
 
@@ -437,10 +437,8 @@ init_unique_integer(void)
 {
     int bits;
     unique_data.r.o.val0_max = (Uint64) erts_no_schedulers;
-#ifdef ERTS_DIRTY_SCHEDULERS
     unique_data.r.o.val0_max += (Uint64) erts_no_dirty_cpu_schedulers;
     unique_data.r.o.val0_max += (Uint64) erts_no_dirty_io_schedulers;
-#endif
     bits = erts_fit_in_bits_int64(unique_data.r.o.val0_max);
     unique_data.r.o.left_shift = bits;
     unique_data.r.o.right_shift = 64 - bits;
@@ -801,7 +799,7 @@ BIF_RETTYPE make_ref_0(BIF_ALIST_0)
     BIF_RETTYPE res;
     Eterm* hp;
 
-    ERTS_SMP_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(BIF_P));
+    ERTS_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(BIF_P));
 
     hp = HAlloc(BIF_P, ERTS_REF_THING_SIZE);
 

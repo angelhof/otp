@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 2006-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2006-2017. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,8 @@
 /*
  * Purpose: Dialyzer front-end.
  */
-#ifdef HAVE_CONFIG_H
-#  include "config.h"
-#endif
 
-#include "sys.h"
-#ifdef __WIN32__
-#include <winbase.h>
-#endif
-
-#include <ctype.h>
+#include "etc_common.h"
 
 #define NO 0
 #define YES 1
@@ -263,7 +255,7 @@ int main(int argc, char** argv)
     }
 
     PUSH("+B");
-    PUSH2("-boot", "start_clean");
+    PUSH2("-boot", "no_dot_erlang");
     PUSH3("-run", "dialyzer", "plain_cl");
     PUSH("-extra");
 

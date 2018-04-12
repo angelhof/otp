@@ -418,11 +418,13 @@ trans_fun([{wait_timeout,{_,Lbl},Reg}|Instructions], Env) ->
   SuspTmout = hipe_icode:mk_if(suspend_msg_timeout,[],
 			       map_label(Lbl),hipe_icode:label_name(DoneLbl)),
   Movs ++ [SetTmout, SuspTmout, DoneLbl | trans_fun(Instructions,Env1)];
-%%--- recv_mark/1 & recv_set/1 ---  XXX: Handle better??
+%%--- recv_mark/1 & recv_set/1 ---
 trans_fun([{recv_mark,{f,_}}|Instructions], Env) ->
-  trans_fun(Instructions,Env);
+  Mark = hipe_icode:mk_primop([],recv_mark,[]),
+  [Mark | trans_fun(Instructions,Env)];
 trans_fun([{recv_set,{f,_}}|Instructions], Env) ->
-  trans_fun(Instructions,Env);
+  Set = hipe_icode:mk_primop([],recv_set,[]),
+  [Set | trans_fun(Instructions,Env)];
 %%--------------------------------------------------------------------
 %%--- Translation of arithmetics {bif,ArithOp, ...} ---
 %%--------------------------------------------------------------------
@@ -606,6 +608,16 @@ trans_fun([{get_list,List,Head,Tail}|Instructions], Env) ->
       ?error_msg("hd and tl regs identical in get_list~n",[]),
       erlang:error(not_handled)
   end;
+%%--- get_hd ---
+trans_fun([{get_hd,List,Head}|Instructions], Env) ->
+  TransList = [trans_arg(List)],
+  I = hipe_icode:mk_primop([mk_var(Head)],unsafe_hd,TransList),
+  [I | trans_fun(Instructions,Env)];
+%%--- get_tl ---
+trans_fun([{get_tl,List,Tail}|Instructions], Env) ->
+  TransList = [trans_arg(List)],
+  I = hipe_icode:mk_primop([mk_var(Tail)],unsafe_tl,TransList),
+  [I | trans_fun(Instructions,Env)];
 %%--- get_tuple_element ---
 trans_fun([{get_tuple_element,Xreg,Index,Dst}|Instructions], Env) ->
   I = hipe_icode:mk_primop([mk_var(Dst)],
@@ -797,7 +809,7 @@ trans_fun([{bs_append,{f,Lbl},Size,W,R,U,Binary,{field_flags,F},Dst}|
   SizeArg = trans_arg(Size),
   BinArg = trans_arg(Binary),
   IcodeDst = mk_var(Dst),
-  Offset = mk_var(reg),
+  Offset = mk_var(reg_gcsafe),
   Base = mk_var(reg),
   trans_bin_call({hipe_bs_primop,{bs_append,W,R,U,F}},Lbl,[SizeArg,BinArg],
 		[IcodeDst,Base,Offset],
@@ -808,7 +820,7 @@ trans_fun([{bs_private_append,{f,Lbl},Size,U,Binary,{field_flags,F},Dst}|
   SizeArg = trans_arg(Size),
   BinArg = trans_arg(Binary),
   IcodeDst = mk_var(Dst),
-  Offset = mk_var(reg),
+  Offset = mk_var(reg_gcsafe),
   Base = mk_var(reg),
   trans_bin_call({hipe_bs_primop,{bs_private_append,U,F}},
 		 Lbl,[SizeArg,BinArg],
@@ -847,7 +859,7 @@ trans_fun([{bs_init2,{f,Lbl},Size,_Words,_LiveRegs,{field_flags,Flags0},X}|
 	   Instructions], Env) ->
   Dst = mk_var(X),
   Flags = resolve_native_endianess(Flags0),
-  Offset = mk_var(reg),
+  Offset = mk_var(reg_gcsafe),
   Base = mk_var(reg),
   {Name, Args} =
     case Size of
@@ -863,7 +875,7 @@ trans_fun([{bs_init_bits,{f,Lbl},Size,_Words,_LiveRegs,{field_flags,Flags0},X}|
 	   Instructions], Env) ->
   Dst = mk_var(X),
   Flags = resolve_native_endianess(Flags0),
-  Offset = mk_var(reg),
+  Offset = mk_var(reg_gcsafe),
   Base = mk_var(reg),
   {Name, Args} =
     case Size of
@@ -1160,6 +1172,17 @@ trans_fun([{put_map_exact,{f,Lbl},Map,Dst,_N,{list,Pairs}}|Instructions], Env) -
 	  gen_put_map_instrs(new, exact, TempMapVar, Dst, new, Pairs, Env1)
       end,
   [MapMove, TempMapMove, PutInstructions | trans_fun(Instructions, Env2)];
+%%--- build_stacktrace ---
+trans_fun([build_stacktrace|Instructions], Env) ->
+  Vars = [mk_var({x,0})], %{x,0} is implict arg and dst
+  [hipe_icode:mk_primop(Vars,build_stacktrace,Vars),
+   trans_fun(Instructions, Env)];
+%%--- raw_raise ---
+trans_fun([raw_raise|Instructions], Env) ->
+  Vars = [mk_var({x,0}),mk_var({x,1}),mk_var({x,2})],
+  Dst = [mk_var({x,0})],
+  [hipe_icode:mk_primop(Dst,raw_raise,Vars) |
+   trans_fun(Instructions, Env)];
 %%--------------------------------------------------------------------
 %%--- ERROR HANDLING ---
 %%--------------------------------------------------------------------
@@ -1508,7 +1531,10 @@ clone_dst(Dest) ->
   New = 
     case hipe_icode:is_reg(Dest) of
       true ->
-	mk_var(reg);
+	case hipe_icode:reg_is_gcsafe(Dest) of
+	  true -> mk_var(reg_gcsafe);
+	  false -> mk_var(reg)
+	end;
       false ->
 	true = hipe_icode:is_var(Dest),	      
 	mk_var(new)
@@ -2129,7 +2155,12 @@ mk_var(reg) ->
   T = hipe_gensym:new_var(icode),
   V = (5*T)+4,
   hipe_gensym:update_vrange(icode,V),
-  hipe_icode:mk_reg(V).
+  hipe_icode:mk_reg(V);
+mk_var(reg_gcsafe) ->
+  T = hipe_gensym:new_var(icode),
+  V = (5*T)+4, % same namespace as 'reg'
+  hipe_gensym:update_vrange(icode,V),
+  hipe_icode:mk_reg_gcsafe(V).
 
 %%-----------------------------------------------------------------------
 %% Make an icode label of proper type
@@ -2299,6 +2330,12 @@ split_code([First|Code], Label, Instr) ->
 
 split_code([Instr|Code], Label, Instr, Prev, As) when Prev =:= Label ->
   split_code_final(Code, As);  % drop both label and instruction
+split_code([{icode_end_try}|_]=Code, Label, {try_case,_}, Prev, As)
+  when Prev =:= Label ->
+  %% The try_case has been replaced with try_end as an optimization.
+  %% Keep this instruction, since it might be the only try_end instruction
+  %% for this try/catch block.
+  split_code_final(Code, As);  % drop label
 split_code([Other|_Code], Label, Instr, Prev, _As) when Prev =:= Label ->
   ?EXIT({missing_instr_after_label, Label, Instr, [Other, Prev | _As]});
 split_code([Other|Code], Label, Instr, Prev, As) ->

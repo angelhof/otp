@@ -755,6 +755,7 @@ put_behaviour_api_calls(Calls,
 -spec to_dot(callgraph(), file:filename()) -> 'ok'.
 
 to_dot(#callgraph{digraph = DG, esc = Esc} = CG, File) ->
+  %% TODO: handle Unicode names.
   Fun = fun(L) ->
 	    case lookup_name(L, CG) of
 	      error -> L;
@@ -769,14 +770,14 @@ to_dot(#callgraph{digraph = DG, esc = Esc} = CG, File) ->
 -spec to_ps(callgraph(), file:filename(), string()) -> 'ok'.
 
 to_ps(#callgraph{} = CG, File, Args) ->
+  %% TODO: handle Unicode names.
   Dot_File = filename:rootname(File) ++ ".dot",
   to_dot(CG, Dot_File),
-  Command = io_lib:format("dot -Tps ~s -o ~s ~s", [Args, File, Dot_File]),
+  Command = io_lib:format("dot -Tps ~ts -o ~ts ~ts", [Args, File, Dot_File]),
   _ = os:cmd(Command),
   ok.
 
 condensation(G) ->
-  erlang:garbage_collect(), % reduce heap size
   {Pid, Ref} = erlang:spawn_monitor(do_condensation(G, self())),
   receive {'DOWN', Ref, process, Pid, Result} ->
       {SCCInts, OutETS, InETS, MapsETS} = Result,

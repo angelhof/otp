@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -46,6 +46,7 @@
 
 %%% Internal application API
 -export([start_connection/4,
+         available_hkey_algorithms/2,
 	 open_channel/6,
 	 request/6, request/7,
 	 reply_request/3, 
@@ -55,7 +56,7 @@
 	 connection_info/2,
 	 channel_info/3,
 	 adjust_window/3, close/2,
-	 disconnect/1, disconnect/2,
+	 disconnect/4,
 	 get_print_info/1
 	]).
 
@@ -67,8 +68,20 @@
 -export([init_connection_handler/3,	   % proc_lib:spawn needs this
 	 init_ssh_record/3,		   % Export of this internal function
 					   % intended for low-level protocol test suites
-	 renegotiate/1, renegotiate_data/1 % Export intended for test cases
+	 renegotiate/1, renegotiate_data/1, alg/1 % Export intended for test cases
 	]).
+
+-export([dbg_trace/3]).
+
+
+-define(send_disconnect(Code, DetailedText, StateName, State),
+        send_disconnect(Code, DetailedText, ?MODULE, ?LINE, StateName, State)).
+
+-define(send_disconnect(Code, Reason, DetailedText, StateName, State),
+        send_disconnect(Code, Reason, DetailedText, ?MODULE, ?LINE, StateName, State)).
+
+-define(call_disconnectfun_and_log_cond(LogMsg, DetailedText, StateName, D),
+        call_disconnectfun_and_log_cond(LogMsg, DetailedText, ?MODULE, ?LINE, StateName, D)).
 
 %%====================================================================
 %% Start / stop
@@ -148,17 +161,16 @@ start_connection(server = Role, Socket, Options, Timeout) ->
 
 %%--------------------------------------------------------------------
 %%% Some other module has decided to disconnect.
--spec disconnect(#ssh_msg_disconnect{}) -> no_return().
--spec disconnect(#ssh_msg_disconnect{}, iodata()) -> no_return().
+
+-spec disconnect(Code::integer(), Details::iodata(),
+                      Module::atom(), Line::integer()) -> no_return().
 %% . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
-disconnect(Msg = #ssh_msg_disconnect{}) ->
-    throw({keep_state_and_data, 
-	   [{next_event, internal, {disconnect, Msg, Msg#ssh_msg_disconnect.description}}]}).
 
-disconnect(Msg = #ssh_msg_disconnect{}, ExtraInfo) ->
+% Preferable called with the macro ?DISCONNECT
+
+disconnect(Code, DetailedText, Module, Line) ->
     throw({keep_state_and_data,
-	   [{next_event, internal, {disconnect, Msg, {Msg#ssh_msg_disconnect.description,ExtraInfo}}}]}).
-
+	   [{next_event, internal, {send_disconnect, Code, DetailedText, Module, Line}}]}).
 
 %%--------------------------------------------------------------------
 -spec open_channel(connection_ref(), 
@@ -319,34 +331,46 @@ renegotiate(ConnectionHandler) ->
 renegotiate_data(ConnectionHandler) ->
     cast(ConnectionHandler, data_size).
 
+%%--------------------------------------------------------------------
+alg(ConnectionHandler) ->
+    call(ConnectionHandler, get_alg).
 
 %%====================================================================
 %% Internal process state
 %%====================================================================
 -record(data, {
-	  starter                               :: pid(),
+	  starter                               :: pid()
+						 | undefined,
 	  auth_user                             :: string()
 						 | undefined,
 	  connection_state                      :: #connection{},
-	  latest_channel_id         = 0         :: non_neg_integer(),
+	  latest_channel_id         = 0         :: non_neg_integer()
+                                                 | undefined,
 	  idle_timer_ref                        :: undefined 
 						 | infinity
 						 | reference(),
 	  idle_timer_value          = infinity  :: infinity
 						 | pos_integer(),
-	  transport_protocol                    :: atom(),	% ex: tcp
-	  transport_cb                          :: atom(),	% ex: gen_tcp
-	  transport_close_tag                   :: atom(),	% ex: tcp_closed
-	  ssh_params                            :: #ssh{},
-	  socket                                :: inet:socket(),
-	  decrypted_data_buffer     = <<>>      :: binary(),
-	  encrypted_data_buffer     = <<>>      :: binary(),
+	  transport_protocol                    :: atom()
+                                                 | undefined,	% ex: tcp
+	  transport_cb                          :: atom()
+                                                 | undefined,	% ex: gen_tcp
+	  transport_close_tag                   :: atom()
+                                                 | undefined,	% ex: tcp_closed
+	  ssh_params                            :: #ssh{}
+                                                 | undefined,
+	  socket                                :: inet:socket()
+                                                 | undefined,
+	  decrypted_data_buffer     = <<>>      :: binary()
+                                                 | undefined,
+	  encrypted_data_buffer     = <<>>      :: binary()
+                                                 | undefined,
 	  undecrypted_packet_length             :: undefined | non_neg_integer(),
 	  key_exchange_init_msg                 :: #ssh_msg_kexinit{}
 						 | undefined,
 	  last_size_rekey           = 0         :: non_neg_integer(),
 	  event_queue               = []        :: list(),
-	  opts                                  :: ssh_options:options(),
+%	  opts                                  :: ssh_options:options(),
 	  inet_initial_recbuf_size              :: pos_integer()
 						 | undefined
 	 }).
@@ -369,16 +393,17 @@ init_connection_handler(Role, Socket, Opts) ->
                                   StartState,
                                   D);
 
-        {stop, enotconn} ->
-	    %% Handles the abnormal sequence:
-	    %%    SYN->
-	    %%            <-SYNACK
-	    %%    ACK->
-	    %%    RST->
-	    exit({shutdown, "TCP connection to server was prematurely closed by the client"});
-        
-	{stop, OtherError} ->
-	    exit({shutdown, {init,OtherError}})
+        {stop, Error} ->
+            Sups = ?GET_INTERNAL_OPT(supervisors, Opts),
+            C = #connection{system_supervisor =     proplists:get_value(system_sup,     Sups),
+                            sub_system_supervisor = proplists:get_value(subsystem_sup,  Sups),
+                            connection_supervisor = proplists:get_value(connection_sup, Sups)
+                           },
+            gen_statem:enter_loop(?MODULE,
+                                  [],
+                                  {init_error,Error},
+                                  #data{connection_state=C,
+                                        socket=Socket})
     end.
 
 
@@ -398,8 +423,7 @@ init([Role,Socket,Opts]) ->
                        transport_protocol = Protocol,
                        transport_cb = Callback,
                        transport_close_tag = CloseTag,
-                       ssh_params = init_ssh_record(Role, Socket, PeerAddr, Opts),
-                       opts = Opts
+                       ssh_params = init_ssh_record(Role, Socket, PeerAddr, Opts)
               },
             D = case Role of
                     client ->
@@ -432,22 +456,21 @@ init_ssh_record(Role, Socket, Opts) ->
     {ok,PeerAddr} = inet:peername(Socket),
     init_ssh_record(Role, Socket, PeerAddr, Opts).
 
-init_ssh_record(Role, _Socket, PeerAddr, Opts) ->
-    KeyCb = ?GET_OPT(key_cb, Opts),
-    AuthMethods =
-        case Role of
-            server -> ?GET_OPT(auth_methods, Opts);
-            client -> undefined
-        end,
+init_ssh_record(Role, Socket, PeerAddr, Opts) ->
+    AuthMethods = ?GET_OPT(auth_methods, Opts),
     S0 = #ssh{role = Role,
-	      key_cb = KeyCb,
+	      key_cb = ?GET_OPT(key_cb, Opts),
 	      opts = Opts,
 	      userauth_supported_methods = AuthMethods,
-	      available_host_keys = supported_host_keys(Role, KeyCb, Opts),
+	      available_host_keys = available_hkey_algorithms(Role, Opts),
 	      random_length_padding = ?GET_OPT(max_random_length_padding, Opts)
 	   },
 
     {Vsn, Version} = ssh_transport:versions(Role, Opts),
+    LocalName = case inet:sockname(Socket) of
+                    {ok,Local} -> Local;
+                    _ -> undefined
+                end,
     case Role of
 	client ->
 	    PeerName = case ?GET_INTERNAL_OPT(host, Opts) of
@@ -458,16 +481,21 @@ init_ssh_record(Role, _Socket, PeerAddr, Opts) ->
                            PeerName0 when is_list(PeerName0) ->
                                PeerName0
                        end,
-	    S0#ssh{c_vsn = Vsn,
-		   c_version = Version,
-		   io_cb = case ?GET_OPT(user_interaction, Opts) of
-			       true ->  ssh_io;
-			       false -> ssh_no_io
-			   end,
-                   userauth_pubkeys = ?GET_OPT(pref_public_key_algs, Opts),
-		   userauth_quiet_mode = ?GET_OPT(quiet_mode, Opts),
-		   peer = {PeerName, PeerAddr}
-		  };
+            S1 =
+                S0#ssh{c_vsn = Vsn,
+                       c_version = Version,
+                       io_cb = case ?GET_OPT(user_interaction, Opts) of
+                                   true ->  ssh_io;
+                                   false -> ssh_no_io
+                               end,
+                       userauth_quiet_mode = ?GET_OPT(quiet_mode, Opts),
+                       peer = {PeerName, PeerAddr},
+                       local = LocalName
+                      },
+            S1#ssh{userauth_pubkeys = [K || K <- ?GET_OPT(pref_public_key_algs, Opts),
+                                            is_usable_user_pubkey(K, S1)
+                                      ]
+                  };
 
 	server ->
 	    S0#ssh{s_vsn = Vsn,
@@ -475,7 +503,8 @@ init_ssh_record(Role, _Socket, PeerAddr, Opts) ->
 		   io_cb = ?GET_INTERNAL_OPT(io_cb, Opts, ssh_io),
 		   userauth_methods = string:tokens(AuthMethods, ","),
 		   kb_tries_left = 3,
-		   peer = {undefined, PeerAddr}
+		   peer = {undefined, PeerAddr},
+                   local = LocalName
 		  }
     end.
 
@@ -532,9 +561,27 @@ renegotiation(_) -> false.
 callback_mode() ->
     handle_event_function.
 
+
+handle_event(_, _Event, {init_error,Error}=StateName, D) ->
+    case Error of
+        enotconn ->
+           %% Handles the abnormal sequence:
+           %%    SYN->
+           %%            <-SYNACK
+           %%    ACK->
+           %%    RST->
+            ?call_disconnectfun_and_log_cond("Protocol Error",
+                                             "TCP connenction to server was prematurely closed by the client",
+                                             StateName, D),
+            {stop, {shutdown,"TCP connenction to server was prematurely closed by the client"}};
+
+        OtherError ->
+            {stop, {shutdown,{init,OtherError}}}
+    end;
+
 %%% ######## {hello, client|server} ####
 %% The very first event that is sent when the we are set as controlling process of Socket
-handle_event(_, socket_control, {hello,_}, D) ->
+handle_event(_, socket_control, {hello,_}=StateName, D) ->
     VsnMsg = ssh_transport:hello_version_msg(string_version(D#data.ssh_params)),
     send_bytes(VsnMsg, D),
     case inet:getopts(Socket=D#data.socket, [recbuf]) of
@@ -549,10 +596,13 @@ handle_event(_, socket_control, {hello,_}, D) ->
 	    {keep_state, D#data{inet_initial_recbuf_size=Size}};
 
 	Other ->
+            ?call_disconnectfun_and_log_cond("Option return", 
+                                             io_lib:format("Unexpected getopts return:~n  ~p",[Other]),
+                                             StateName, D),
 	    {stop, {shutdown,{unexpected_getopts_return, Other}}}
     end;
 
-handle_event(_, {info_line,_Line}, {hello,Role}, D) ->
+handle_event(_, {info_line,_Line}, {hello,Role}=StateName, D) ->
     case Role of
 	client ->
 	    %% The server may send info lines to the client before the version_exchange
@@ -563,28 +613,33 @@ handle_event(_, {info_line,_Line}, {hello,Role}, D) ->
 	    %% But the client may NOT send them to the server. Openssh answers with cleartext,
 	    %% and so do we
 	    send_bytes("Protocol mismatch.", D),
+            ?call_disconnectfun_and_log_cond("Protocol mismatch.", 
+                                             "Protocol mismatch in version exchange. Client sent info lines.",
+                                             StateName, D),
 	    {stop, {shutdown,"Protocol mismatch in version exchange. Client sent info lines."}}
     end;
 
-handle_event(_, {version_exchange,Version}, {hello,Role}, D) ->
+handle_event(_, {version_exchange,Version}, {hello,Role}, D0) ->
     {NumVsn, StrVsn} = ssh_transport:handle_hello_version(Version),
-    case handle_version(NumVsn, StrVsn, D#data.ssh_params) of
+    case handle_version(NumVsn, StrVsn, D0#data.ssh_params) of
 	{ok, Ssh1} ->
 	    %% Since the hello part is finnished correctly, we set the
 	    %% socket to the packet handling mode (including recbuf size):
-	    inet:setopts(D#data.socket, [{packet,0},
+	    inet:setopts(D0#data.socket, [{packet,0},
 					 {mode,binary},
 					 {active, once},
-					 {recbuf, D#data.inet_initial_recbuf_size}]),
+					 {recbuf, D0#data.inet_initial_recbuf_size}]),
 	    {KeyInitMsg, SshPacket, Ssh} = ssh_transport:key_exchange_init_msg(Ssh1),
-	    send_bytes(SshPacket, D),
-	    {next_state, {kexinit,Role,init}, D#data{ssh_params = Ssh,
+	    send_bytes(SshPacket, D0),
+	    {next_state, {kexinit,Role,init}, D0#data{ssh_params = Ssh,
 						     key_exchange_init_msg = KeyInitMsg}};
 	not_supported ->
-	    disconnect(
-	      #ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED,
-				  description = ["Protocol version ",StrVsn," not supported"]},
-	      {next_state, {hello,Role}, D})
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED,
+                                 io_lib:format("Offending version is ~p",[string:chomp(Version)]),
+                                 {hello,Role},
+                                 D0),
+	    {stop, Shutdown, D}
     end;
 
 		  
@@ -730,18 +785,20 @@ handle_event(internal, Msg, {ext_info,Role,_ReNegFlag}, D) when is_tuple(Msg) ->
 
 %%% ######## {service_request, client|server} ####
 
-handle_event(_, Msg = #ssh_msg_service_request{name=ServiceName}, StateName = {service_request,server}, D) ->
+handle_event(_, Msg = #ssh_msg_service_request{name=ServiceName}, StateName = {service_request,server}, D0) ->
     case ServiceName of
 	"ssh-userauth" ->
-	    Ssh0 = #ssh{session_id=SessionId} = D#data.ssh_params,
+	    Ssh0 = #ssh{session_id=SessionId} = D0#data.ssh_params,
 	    {ok, {Reply, Ssh}} = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
-	    send_bytes(Reply, D),
-	    {next_state, {userauth,server}, D#data{ssh_params = Ssh}};
+	    send_bytes(Reply, D0),
+	    {next_state, {userauth,server}, D0#data{ssh_params = Ssh}};
 
 	_ ->
-	    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
-					   description = "Unknown service"},
-		       StateName, D)
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
+                                 io_lib:format("Unknown service: ~p",[ServiceName]),
+                                 StateName, D0),
+            {stop, Shutdown, D}
     end;
 
 handle_event(_, #ssh_msg_service_accept{name = "ssh-userauth"}, {service_request,client},
@@ -757,15 +814,15 @@ handle_event(_, #ssh_msg_service_accept{name = "ssh-userauth"}, {service_request
 handle_event(_, 
 	     Msg = #ssh_msg_userauth_request{service = ServiceName, method = Method},
 	     StateName = {userauth,server},
-	     D = #data{ssh_params=Ssh0}) ->
+	     D0 = #data{ssh_params=Ssh0}) ->
 
     case {ServiceName, Ssh0#ssh.service, Method} of
 	{"ssh-connection", "ssh-connection", "none"} ->
 	    %% Probably the very first userauth_request but we deny unauthorized login
 	    {not_authorized, _, {Reply,Ssh}} =
 		ssh_auth:handle_userauth_request(Msg, Ssh0#ssh.session_id, Ssh0),
-	    send_bytes(Reply, D),
-	    {keep_state, D#data{ssh_params = Ssh}};
+	    send_bytes(Reply, D0),
+	    {keep_state, D0#data{ssh_params = Ssh}};
 	
 	{"ssh-connection", "ssh-connection", Method} ->
 	    %% Userauth request with a method like "password" or so
@@ -774,20 +831,20 @@ handle_event(_,
 		    %% Yepp! we support this method
 		    case ssh_auth:handle_userauth_request(Msg, Ssh0#ssh.session_id, Ssh0) of
 			{authorized, User, {Reply, Ssh}} ->
-			    send_bytes(Reply, D),
-			    D#data.starter ! ssh_connected,
-			    connected_fun(User, Method, D),
+			    send_bytes(Reply, D0),
+			    D0#data.starter ! ssh_connected,
+			    connected_fun(User, Method, D0),
 			    {next_state, {connected,server},
-			     D#data{auth_user = User, 
+			     D0#data{auth_user = User, 
 				    ssh_params = Ssh#ssh{authenticated = true}}};
 			{not_authorized, {User, Reason}, {Reply, Ssh}} when Method == "keyboard-interactive" ->
-			    retry_fun(User, Reason, D),
-			    send_bytes(Reply, D),
-			    {next_state, {userauth_keyboard_interactive,server}, D#data{ssh_params = Ssh}};
+			    retry_fun(User, Reason, D0),
+			    send_bytes(Reply, D0),
+			    {next_state, {userauth_keyboard_interactive,server}, D0#data{ssh_params = Ssh}};
 			{not_authorized, {User, Reason}, {Reply, Ssh}} ->
-			    retry_fun(User, Reason, D),
-			    send_bytes(Reply, D),
-			    {keep_state, D#data{ssh_params = Ssh}}
+			    retry_fun(User, Reason, D0),
+			    send_bytes(Reply, D0),
+			    {keep_state, D0#data{ssh_params = Ssh}}
 		    end;
 		false ->
 		    %% No we do not support this method (=/= none)
@@ -801,9 +858,11 @@ handle_event(_,
 	%% {ServiceName,      Expected, Method} when Expected =/= ServiceName -> Do what?
 
 	{ServiceName, _, _} when ServiceName =/= "ssh-connection" ->
-	    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
-					   description = "Unknown service"},
-		       StateName, D)
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
+                                 io_lib:format("Unknown service: ~p",[ServiceName]),
+                                 StateName, D0),
+            {stop, Shutdown, D}
     end;
 
 %%---- userauth success to client
@@ -819,14 +878,14 @@ handle_event(_, #ssh_msg_userauth_success{}, {userauth,client}, D=#data{ssh_para
 
 %%---- userauth failure response to client
 handle_event(_, #ssh_msg_userauth_failure{}, {userauth,client}=StateName,
-	     D = #data{ssh_params = #ssh{userauth_methods = []}}) ->
-    Msg = #ssh_msg_disconnect{code = ?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
-			      description = "Unable to connect using the available"
-			                    " authentication methods"},
-    disconnect(Msg, StateName, D);
-
+	     #data{ssh_params = #ssh{userauth_methods = []}} = D0) ->
+    {Shutdown, D} =
+        ?send_disconnect(?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE, 
+                         io_lib:format("User auth failed for: ~p",[D0#data.auth_user]),
+                         StateName, D0),
+    {stop, Shutdown, D};
 handle_event(_, #ssh_msg_userauth_failure{authentications = Methods}, StateName={userauth,client},
-	     D = #data{ssh_params = Ssh0}) ->
+	     D0 = #data{ssh_params = Ssh0}) ->
     %% The prefered authentication method failed try next method
     Ssh1 = case Ssh0#ssh.userauth_methods of
 	       none ->
@@ -837,15 +896,18 @@ handle_event(_, #ssh_msg_userauth_failure{authentications = Methods}, StateName=
 		   Ssh0
 	   end,
     case ssh_auth:userauth_request_msg(Ssh1) of
-	{disconnect, DisconnectMsg, {Msg, Ssh}} ->
-	    send_bytes(Msg, D),
-	    disconnect(DisconnectMsg, StateName, D#data{ssh_params = Ssh});
+        {send_disconnect, Code, Ssh} ->
+            {Shutdown, D} =
+                ?send_disconnect(Code, 
+                                 io_lib:format("User auth failed for: ~p",[D0#data.auth_user]),
+                                 StateName, D0#data{ssh_params = Ssh}),
+	    {stop, Shutdown, D};
 	{"keyboard-interactive", {Msg, Ssh}} ->
-	    send_bytes(Msg, D),
-	    {next_state, {userauth_keyboard_interactive,client}, D#data{ssh_params = Ssh}};
+	    send_bytes(Msg, D0),
+	    {next_state, {userauth_keyboard_interactive,client}, D0#data{ssh_params = Ssh}};
 	{_Method, {Msg, Ssh}} ->
-	    send_bytes(Msg, D),
-	    {keep_state, D#data{ssh_params = Ssh}}
+	    send_bytes(Msg, D0),
+	    {keep_state, D0#data{ssh_params = Ssh}}
     end;
 
 %%---- banner to client
@@ -936,10 +998,10 @@ handle_event(_, {#ssh_msg_kexinit{},_}, {connected,Role}, D0) ->
     {next_state, {kexinit,Role,renegotiate}, D, [postpone]};
 
 handle_event(_, #ssh_msg_disconnect{description=Desc} = Msg, StateName, D0) ->
-    {disconnect, _, {{replies,Replies}, _}} =
+    {disconnect, _, RepliesCon} =
 	ssh_connection:handle_msg(Msg, D0#data.connection_state, role(StateName)),
-    {Actions,D} = send_replies(Replies, D0),
-    disconnect_fun(Desc, D),
+    {Actions,D} = send_replies(RepliesCon, D0),
+    disconnect_fun("Received disconnect: "++Desc, D),
     {stop_and_reply, {shutdown,Desc}, Actions, D};
 
 handle_event(_, #ssh_msg_ignore{}, _, _) ->
@@ -1006,6 +1068,10 @@ handle_event(cast, renegotiate, {connected,Role}, D) ->
     {next_state, {kexinit,Role,renegotiate}, D#data{ssh_params = Ssh,
 						    key_exchange_init_msg = KeyInitMsg}};
 
+handle_event({call,From}, get_alg, _, D) ->
+    #ssh{algorithms=Algs} = D#data.ssh_params,
+    {keep_state_and_data, [{reply,From,Algs}]};
+
 handle_event(cast, renegotiate, _, _) ->
     %% Already in key-exchange so safe to ignore
     timer:apply_after(?REKEY_TIMOUT, gen_statem, cast, [self(), renegotiate]), % FIXME: not here in original
@@ -1016,7 +1082,7 @@ handle_event(cast, renegotiate, _, _) ->
 handle_event(cast, data_size, {connected,Role}, D) ->
     {ok, [{send_oct,Sent0}]} = inet:getstat(D#data.socket, [send_oct]),
     Sent = Sent0 - D#data.last_size_rekey,
-    MaxSent = ?GET_OPT(rekey_limit, D#data.opts),
+    MaxSent = ?GET_OPT(rekey_limit, (D#data.ssh_params)#ssh.opts),
     timer:apply_after(?REKEY_DATA_TIMOUT, gen_statem, cast, [self(), data_size]),
     case Sent >= MaxSent of
 	true ->
@@ -1135,38 +1201,39 @@ handle_event({call,From}, {info, ChannelPid}, _, D) ->
 	       end, [], cache(D)),
     {keep_state_and_data, [{reply, From, {ok,Result}}]};
 
-handle_event({call,From}, stop, StateName, D0) ->
-    {disconnect, _Reason, {{replies, Replies}, Connection}} =
-	ssh_connection:handle_msg(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
-						      description = "User closed down connection"},
-				  D0#data.connection_state,
-				  role(StateName)),
-    {Repls,D} = send_replies(Replies, D0),
-    {stop_and_reply, normal, [{reply,From,ok}|Repls], D#data{connection_state=Connection}};
-
+handle_event({call,From}, stop, _StateName, D0) ->
+    {Repls,D} = send_replies(ssh_connection:handle_stop(D0#data.connection_state), D0),
+    {stop_and_reply, normal, [{reply,From,ok}|Repls], D};
 
 handle_event({call,_}, _, StateName, _) when not ?CONNECTED(StateName) ->
     {keep_state_and_data, [postpone]};
 
 handle_event({call,From}, {request, ChannelPid, ChannelId, Type, Data, Timeout}, StateName, D0) 
   when ?CONNECTED(StateName) ->
-    D = handle_request(ChannelPid, ChannelId, Type, Data, true, From, D0),
-    %% Note reply to channel will happen later when reply is recived from peer on the socket
-    start_channel_request_timer(ChannelId, From, Timeout),
-    {keep_state, cache_request_idle_timer_check(D)};
+    case handle_request(ChannelPid, ChannelId, Type, Data, true, From, D0) of
+        {error,Error} ->
+            {keep_state, D0, {reply,From,{error,Error}}};
+        D ->
+            %% Note reply to channel will happen later when reply is recived from peer on the socket
+            start_channel_request_timer(ChannelId, From, Timeout),
+            {keep_state, cache_request_idle_timer_check(D)}
+    end;
 
 handle_event({call,From}, {request, ChannelId, Type, Data, Timeout}, StateName, D0) 
   when ?CONNECTED(StateName) ->
-    D = handle_request(ChannelId, Type, Data, true, From, D0),
-    %% Note reply to channel will happen later when reply is recived from peer on the socket
-    start_channel_request_timer(ChannelId, From, Timeout),
-    {keep_state, cache_request_idle_timer_check(D)};
+    case handle_request(ChannelId, Type, Data, true, From, D0) of
+        {error,Error} ->
+            {keep_state, D0, {reply,From,{error,Error}}};
+        D ->
+            %% Note reply to channel will happen later when reply is recived from peer on the socket
+            start_channel_request_timer(ChannelId, From, Timeout),
+            {keep_state, cache_request_idle_timer_check(D)}
+    end;
 
 handle_event({call,From}, {data, ChannelId, Type, Data, Timeout}, StateName, D0) 
   when ?CONNECTED(StateName) ->
-    {{replies, Replies}, Connection} =
-	ssh_connection:channel_data(ChannelId, Type, Data, D0#data.connection_state, From),
-    {Repls,D} = send_replies(Replies, D0#data{connection_state = Connection}),
+    {Repls,D} = send_replies(ssh_connection:channel_data(ChannelId, Type, Data, D0#data.connection_state, From),
+                             D0),
     start_channel_request_timer(ChannelId, From, Timeout), % FIXME: No message exchange so why?
     {keep_state, D, Repls};
 
@@ -1256,29 +1323,32 @@ handle_event(info, {Proto, Sock, NewData}, StateName, D0 = #data{socket = Sock,
 	  D0#data.ssh_params)
     of
 	{packet_decrypted, DecryptedBytes, EncryptedDataRest, Ssh1} ->
-	    D = D0#data{ssh_params =
+	    D1 = D0#data{ssh_params =
 			    Ssh1#ssh{recv_sequence = ssh_transport:next_seqnum(Ssh1#ssh.recv_sequence)},
 			decrypted_data_buffer = <<>>,
 			undecrypted_packet_length = undefined,
 			encrypted_data_buffer = EncryptedDataRest},
 	    try
-		ssh_message:decode(set_kex_overload_prefix(DecryptedBytes,D))
+		ssh_message:decode(set_kex_overload_prefix(DecryptedBytes,D1))
 	    of
 		Msg = #ssh_msg_kexinit{} ->
-		    {keep_state, D, [{next_event, internal, prepare_next_packet},
+		    {keep_state, D1, [{next_event, internal, prepare_next_packet},
 				     {next_event, internal, {Msg,DecryptedBytes}}
 				    ]};
 		Msg ->
-		    {keep_state, D, [{next_event, internal, prepare_next_packet},
+		    {keep_state, D1, [{next_event, internal, prepare_next_packet},
 				     {next_event, internal, Msg}
 				    ]}
 	    catch
-		_C:_E  ->
-		    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_ERROR,
-						   description = "Bad packet"},
-			       StateName, D)
+		C:E  ->
+                    {Shutdown, D} =  
+                        ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_ERROR,
+                                         io_lib:format("Bad packet: Decrypted, but can't decode~n~p:~p~n~p",
+                                                       [C,E,erlang:get_stacktrace()]),
+                                         StateName, D1),
+                    {stop, Shutdown, D}
 	    end;
-
+        
 	{get_more, DecryptedBytes, EncryptedDataRest, RemainingSshPacketLen, Ssh1} ->
 	    %% Here we know that there are not enough bytes in
 	    %% EncryptedDataRest to use. We must wait for more.
@@ -1289,19 +1359,26 @@ handle_event(info, {Proto, Sock, NewData}, StateName, D0 = #data{socket = Sock,
 				 ssh_params = Ssh1}};
 
 	{bad_mac, Ssh1} ->
-	    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_ERROR,
-					   description = "Bad packet"},
-		       StateName, D0#data{ssh_params=Ssh1});
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_ERROR,
+                                 "Bad packet: bad mac",
+                                 StateName, D0#data{ssh_params=Ssh1}),
+            {stop, Shutdown, D};
 
-	{error, {exceeds_max_size,_PacketLen}} ->
-	    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_ERROR,
-					   description = "Bad packet"},
-		       StateName, D0)
+	{error, {exceeds_max_size,PacketLen}} ->
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_ERROR,
+                                 io_lib:format("Bad packet: Size (~p bytes) exceeds max size",
+                                               [PacketLen]),
+                                 StateName, D0),
+            {stop, Shutdown, D}
     catch
-	_C:_E ->
-	    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_ERROR,
-					   description = "Bad packet"},
-		       StateName, D0)
+	C:E ->
+            {Shutdown, D} =  
+                ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_ERROR,
+                                 io_lib:format("Bad packet: Couldn't decrypt~n~p:~p~n~p",[C,E,erlang:get_stacktrace()]),
+                                 StateName, D0),
+            {stop, Shutdown, D}
     end;
 
 
@@ -1317,15 +1394,13 @@ handle_event(internal, prepare_next_packet, _, D) ->
     inet:setopts(D#data.socket, [{active, once}]),
     keep_state_and_data;
 
-handle_event(info, {CloseTag,Socket}, StateName,
-	     D = #data{socket = Socket,
-		       transport_close_tag = CloseTag}) ->
-    %% Simulate a disconnect from the peer
-    handle_event(info,
-		 #ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
-				     description = "Connection closed"},
-		 StateName,
-		 D);
+handle_event(info, {CloseTag,Socket}, _StateName,
+	     D0 = #data{socket = Socket,
+                        transport_close_tag = CloseTag,
+                        connection_state = C0}) ->
+    {Repls, D} = send_replies(ssh_connection:handle_stop(C0), D0),
+    disconnect_fun("Received a transport close", D),
+    {stop_and_reply, {shutdown,"Connection closed"}, Repls, D};
 
 handle_event(info, {timeout, {_, From} = Request}, _,
 	     #data{connection_state = #connection{requests = Requests} = C0} = D) ->
@@ -1342,9 +1417,7 @@ handle_event(info, {timeout, {_, From} = Request}, _,
 
 %%% Handle that ssh channels user process goes down
 handle_event(info, {'DOWN', _Ref, process, ChannelPid, _Reason}, _, D0) ->
-    {{replies, Replies}, D1} = handle_channel_down(ChannelPid, D0),
-    {Repls, D} = send_replies(Replies, D1),
-    {keep_state, D, Repls};
+    {keep_state, handle_channel_down(ChannelPid, D0)};
 
 %%% So that terminate will be run when supervisor is shutdown
 handle_event(info, {'EXIT', _Sup, Reason}, _, _) ->
@@ -1358,6 +1431,7 @@ handle_event(info, UnexpectedMessage, StateName, D = #data{ssh_params = Ssh}) ->
 	report ->
 	    Msg = lists:flatten(
 		    io_lib:format(
+                      "*** SSH: "
 		      "Unexpected message '~p' received in state '~p'\n"
 		      "Role: ~p\n"
 		      "Peer: ~p\n"
@@ -1366,7 +1440,7 @@ handle_event(info, UnexpectedMessage, StateName, D = #data{ssh_params = Ssh}) ->
                        StateName,
                        Ssh#ssh.role, 
                        Ssh#ssh.peer,
-                       ?GET_INTERNAL_OPT(address, Ssh#ssh.opts)])),
+                       ?GET_INTERNAL_OPT(address, Ssh#ssh.opts, undefined)])),
 	    error_logger:info_report(Msg),
 	    keep_state_and_data;
 
@@ -1375,7 +1449,8 @@ handle_event(info, UnexpectedMessage, StateName, D = #data{ssh_params = Ssh}) ->
 
 	Other ->
 	    Msg = lists:flatten(
-		    io_lib:format("Call to fun in 'unexpectedfun' failed:~n"
+		    io_lib:format("*** SSH: "
+                                  "Call to fun in 'unexpectedfun' failed:~n"
 				  "Return: ~p\n"
 				  "Message: ~p\n"
 				  "Role: ~p\n"
@@ -1384,70 +1459,86 @@ handle_event(info, UnexpectedMessage, StateName, D = #data{ssh_params = Ssh}) ->
                                   [Other,
                                    UnexpectedMessage,
                                    Ssh#ssh.role,
-                                   element(2,Ssh#ssh.peer),
-                                   ?GET_INTERNAL_OPT(address, Ssh#ssh.opts)]
+                                   Ssh#ssh.peer,
+                                   ?GET_INTERNAL_OPT(address, Ssh#ssh.opts, undefined)]
 				 )),
 	    error_logger:error_report(Msg),
 	    keep_state_and_data
     end;
 
-handle_event(internal, {disconnect,Msg,_Reason}, StateName, D) ->
-    disconnect(Msg, StateName, D);
+handle_event(internal, {send_disconnect,Code,DetailedText,Module,Line}, StateName, D0) ->
+    {Shutdown, D} =  
+        send_disconnect(Code, DetailedText, Module, Line, StateName, D0),
+    {stop, Shutdown, D};
 
 handle_event(_Type, _Msg, {ext_info,Role,_ReNegFlag}, D) ->
     %% If something else arrives, goto next state and handle the event in that one
     {next_state, {connected,Role}, D, [postpone]};
 
-handle_event(Type, Ev, StateName, D) ->
-    Descr =
+handle_event(Type, Ev, StateName, D0) ->
+    Details =
 	case catch atom_to_list(element(1,Ev)) of
 	    "ssh_msg_" ++_ when Type==internal ->
-%%		"Message in wrong state";
                 lists:flatten(io_lib:format("Message ~p in wrong state (~p)", [element(1,Ev), StateName]));
 	    _ ->
-		"Internal error"
+		io_lib:format("Unhandled event in state ~p:~n~p", [StateName,Ev])
 	end,
-    disconnect(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_PROTOCOL_ERROR,
-				   description = Descr},
-	       StateName, D).
+    {Shutdown, D} =  
+        ?send_disconnect(?SSH_DISCONNECT_PROTOCOL_ERROR, Details, StateName, D0),
+    {stop, Shutdown, D}.
 
 
 %%--------------------------------------------------------------------
 -spec terminate(any(),
 		state_name(),
 		#data{}
-	       ) -> finalize_termination_result() .
+	       ) -> term().
 			
 %% . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
-terminate(normal, StateName, State) ->
-    finalize_termination(StateName, State);
+terminate(normal, _StateName, D) ->
+    stop_subsystem(D),
+    close_transport(D);
 
-terminate({shutdown,{init,Reason}}, StateName, State) ->
-    error_logger:info_report(io_lib:format("Erlang ssh in connection handler init: ~p~n",[Reason])),
-    finalize_termination(StateName, State);
+terminate({shutdown,"Connection closed"}, _StateName, D) ->
+    %% Normal: terminated by a sent by peer
+    stop_subsystem(D),
+    close_transport(D);
 
-terminate(shutdown, StateName, State0) ->
+terminate({shutdown,{init,Reason}}, StateName, D) ->
+    %% Error in initiation. "This error should not occur".
+    log(error, D, io_lib:format("Shutdown in init (StateName=~p): ~p~n",[StateName,Reason])),
+    stop_subsystem(D),
+    close_transport(D);
+
+terminate({shutdown,_R}, _StateName, D) ->
+    %% Internal termination, usually already reported via ?send_disconnect resulting in a log entry
+    stop_subsystem(D),
+    close_transport(D);
+
+terminate(shutdown, _StateName, D0) ->
     %% Terminated by supervisor
-    State = send_msg(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
-					 description = "Application shutdown"},
-		     State0),
-    finalize_termination(StateName, State);
+    %% Use send_msg directly instead of ?send_disconnect to avoid filling the log
+    D = send_msg(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
+                                     description = "Terminated (shutdown) by supervisor"},
+                 D0),
+    stop_subsystem(D),
+    close_transport(D);
 
-%% terminate({shutdown,Msg}, StateName, State0) when is_record(Msg,ssh_msg_disconnect)->
-%%     State = send_msg(Msg, State0),
-%%     finalize_termination(StateName, Msg, State);
+terminate(kill, _StateName, D) ->
+    %% Got a kill signal
+    stop_subsystem(D),
+    close_transport(D);
 
-terminate({shutdown,_R}, StateName, State) ->
-    finalize_termination(StateName, State);
-
-terminate(Reason, StateName, State0) ->
-    %% Others, e.g  undef, {badmatch,_}
-    log_error(Reason),
-    State = send_msg(#ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
-					   description = "Internal error"},
-		     State0),
-    finalize_termination(StateName, State).
+terminate(Reason, StateName, D0) ->
+    %% Others, e.g  undef, {badmatch,_}, ...
+    log(error, D0, Reason),
+    {_ShutdownReason, D} = ?send_disconnect(?SSH_DISCONNECT_BY_APPLICATION,
+                                            "Internal error",
+                                            io_lib:format("Reason: ~p",[Reason]),
+                                            StateName, D0),
+    stop_subsystem(D),
+    close_transport(D).
 
 %%--------------------------------------------------------------------
 
@@ -1456,36 +1547,41 @@ terminate(Reason, StateName, State0) ->
 format_status(normal, [_, _StateName, D]) ->
     [{data, [{"State", D}]}];
 format_status(terminate, [_, _StateName, D]) ->
-    DataPropList0 = fmt_stat_rec(record_info(fields, data), D,
-				 [decrypted_data_buffer,
-				  encrypted_data_buffer,
-				  key_exchange_init_msg,
-				  user_passwords,
-				  opts,
-				  inet_initial_recbuf_size]),
-    SshPropList = fmt_stat_rec(record_info(fields, ssh), D#data.ssh_params,
-			       [c_keyinit,
-				s_keyinit,
-				send_mac_key,
-				send_mac_size,
-				recv_mac_key,
-				recv_mac_size,
-				encrypt_keys,
-				encrypt_ctx,
-				decrypt_keys,
-				decrypt_ctx,
-				compress_ctx,
-				decompress_ctx,
-				shared_secret,
-				exchanged_hash,
-				session_id,
-				keyex_key,
-				keyex_info,
-				available_host_keys]),
-    DataPropList = lists:keyreplace(ssh_params, 1, DataPropList0,
-				    {ssh_params,SshPropList}),
-    [{data, [{"State", DataPropList}]}].
+    [{data, [{"State", state_data2proplist(D)}]}].
 
+
+state_data2proplist(D) ->
+    DataPropList0 =
+        fmt_stat_rec(record_info(fields, data), D,
+                     [decrypted_data_buffer,
+                      encrypted_data_buffer,
+                      key_exchange_init_msg,
+                      user_passwords,
+                      opts,
+                      inet_initial_recbuf_size]),
+    SshPropList =
+        fmt_stat_rec(record_info(fields, ssh), D#data.ssh_params,
+                     [c_keyinit,
+                      s_keyinit,
+                      send_mac_key,
+                      send_mac_size,
+                      recv_mac_key,
+                      recv_mac_size,
+                      encrypt_keys,
+                      encrypt_ctx,
+                      decrypt_keys,
+                      decrypt_ctx,
+                      compress_ctx,
+                      decompress_ctx,
+                      shared_secret,
+                      exchanged_hash,
+                      session_id,
+                      keyex_key,
+                      keyex_info,
+                      available_host_keys]),
+    lists:keyreplace(ssh_params, 1, DataPropList0,
+                     {ssh_params,SshPropList}).
+    
 
 fmt_stat_rec(FieldNames, Rec, Exclude) ->
     Values = tl(tuple_to_list(Rec)),
@@ -1522,20 +1618,24 @@ start_the_connection_child(UserPid, Role, Socket, Options0) ->
 
 %%--------------------------------------------------------------------
 %% Stopping
--type finalize_termination_result() :: ok .
 
-finalize_termination(_StateName, #data{transport_cb = Transport,
-				       connection_state = Connection,
-				       socket = Socket}) ->
-    case Connection of
-	#connection{system_supervisor = SysSup,
-		    sub_system_supervisor = SubSysSup} when is_pid(SubSysSup) ->
-	    ssh_system_sup:stop_subsystem(SysSup, SubSysSup);
-	_ ->
-	    do_nothing
-    end,
-    (catch Transport:close(Socket)),
+stop_subsystem(#data{connection_state =
+                         #connection{system_supervisor = SysSup,
+                                     sub_system_supervisor = SubSysSup}}) when is_pid(SubSysSup) ->
+    ssh_system_sup:stop_subsystem(SysSup, SubSysSup);
+stop_subsystem(_) ->
     ok.
+
+
+close_transport(#data{transport_cb = Transport,
+                      socket = Socket}) ->
+    try
+        Transport:close(Socket)
+    of
+        _ -> ok
+    catch
+        _:_ -> ok
+    end.
 
 %%--------------------------------------------------------------------
 %% "Invert" the Role
@@ -1543,44 +1643,42 @@ peer_role(client) -> server;
 peer_role(server) -> client.
 
 %%--------------------------------------------------------------------
-supported_host_keys(client, _, Options) ->
-    try
-        find_sup_hkeys(Options)
-    of
-	[] ->
+available_hkey_algorithms(Role, Options) ->
+    KeyCb = ?GET_OPT(key_cb, Options),
+    case [A || A <- available_hkey_algos(Options),
+               (Role==client) orelse available_host_key(KeyCb, A, Options)
+         ] of
+        
+        [] when Role==client ->
 	    error({shutdown, "No public key algs"});
+
+        [] when Role==server ->
+	    error({shutdown, "No host key available"});
+
 	Algs ->
 	    [atom_to_list(A) || A<-Algs]
-    catch
-	exit:Reason ->
-	    error({shutdown, Reason})
-    end;
-supported_host_keys(server, KeyCb, Options) ->
-    [atom_to_list(A) || A <- find_sup_hkeys(Options),
-			available_host_key(KeyCb, A, Options)
-    ].
-
-
-find_sup_hkeys(Options) ->
-    case proplists:get_value(public_key,
-                             ?GET_OPT(preferred_algorithms,Options)
-                            )
-    of
-        undefined ->
-            ssh_transport:default_algorithms(public_key);
-        L ->
-            NonSupported =  L--ssh_transport:supported_algorithms(public_key),
-            L -- NonSupported
     end.
 
+
+available_hkey_algos(Options) ->
+    SupAlgos = ssh_transport:supported_algorithms(public_key),
+    HKeys = proplists:get_value(public_key,
+                                ?GET_OPT(preferred_algorithms,Options)
+                               ),
+    NonSupported =  HKeys -- SupAlgos,
+    AvailableAndSupported = HKeys -- NonSupported,
+    AvailableAndSupported.
 
 
 %% Alg :: atom()
 available_host_key({KeyCb,KeyCbOpts}, Alg, Opts) ->
     UserOpts = ?GET_OPT(user_options, Opts),
     case KeyCb:host_key(Alg, [{key_cb_private,KeyCbOpts}|UserOpts]) of
-        {ok,_} -> true;
-        _ -> false
+        {ok,Key} ->
+            %% Check the key - the KeyCb may be a buggy plugin
+            ssh_transport:valid_key_sha_alg(Key, Alg);
+        _ ->
+            false
     end.
 
 
@@ -1637,7 +1735,20 @@ handle_connection_msg(Msg, StateName, D0 = #data{starter = User,
     Renegotiation = renegotiation(StateName),
     Role = role(StateName),
     try ssh_connection:handle_msg(Msg, Connection0, Role) of
-	{{replies, Replies}, Connection} ->
+	{disconnect, Reason0, RepliesConn} ->
+            {Repls, D} = send_replies(RepliesConn, D0),
+            case {Reason0,Role} of
+                {{_, Reason}, client} when ((StateName =/= {connected,client}) and (not Renegotiation)) ->
+		   User ! {self(), not_connected, Reason};
+                _ ->
+                    ok
+            end,
+            {stop_and_reply, {shutdown,normal}, Repls, D};
+
+	{[], Connection} ->
+	    {keep_state, D0#data{connection_state = Connection}};
+
+	{Replies, Connection} when is_list(Replies) ->
 	    {Repls, D} = 
 		case StateName of
 		    {connected,_} ->
@@ -1646,30 +1757,15 @@ handle_connection_msg(Msg, StateName, D0 = #data{starter = User,
 			{ConnReplies, NonConnReplies} = lists:splitwith(fun not_connected_filter/1, Replies),
 			send_replies(NonConnReplies, D0#data{event_queue = Qev0 ++ ConnReplies})
 		end,
-	    {keep_state, D, Repls};
-
-	{noreply, Connection} ->
-	    {keep_state, D0#data{connection_state = Connection}};
-
-	{disconnect, Reason0, {{replies, Replies}, Connection}} ->
-	   {Repls, D} = send_replies(Replies, D0#data{connection_state = Connection}),
-	   case {Reason0,Role} of
-	       {{_, Reason}, client} when ((StateName =/= {connected,client}) and (not Renegotiation)) ->
-		   User ! {self(), not_connected, Reason};
-	       _ ->
-		   ok
-	   end,
-	   {stop_and_reply, {shutdown,normal}, Repls, D#data{connection_state = Connection}}
+	    {keep_state, D, Repls}
 
     catch
-	_:Error ->
-	    {disconnect, _Reason, {{replies, Replies}, Connection}} =
-		ssh_connection:handle_msg(
-		  #ssh_msg_disconnect{code = ?SSH_DISCONNECT_BY_APPLICATION,
-				      description = "Internal error"},
-		  Connection0, Role),
-	    {Repls, D} = send_replies(Replies, D0#data{connection_state = Connection}),
-	    {stop_and_reply, {shutdown,Error}, Repls, D#data{connection_state = Connection}}
+	Class:Error ->
+            {Repls, D1} = send_replies(ssh_connection:handle_stop(Connection0), D0),
+            {Shutdown, D} = ?send_disconnect(?SSH_DISCONNECT_BY_APPLICATION,
+                                             io_lib:format("Internal error: ~p:~p",[Class,Error]),
+                                             StateName, D1),
+            {stop_and_reply, Shutdown, Repls, D}
     end.
 
 
@@ -1705,51 +1801,90 @@ handle_ssh_msg_ext_info(#ssh_msg_ext_info{data=Data}, D0) ->
     lists:foldl(fun ext_info/2, D0, Data).
 
 
-ext_info({"server-sig-algs",SigAlgs}, D0 = #data{ssh_params=#ssh{role=client}=Ssh0}) ->
-    %% Make strings to eliminate risk of beeing bombed with odd strings that fills the atom table:
-    SupportedAlgs = lists:map(fun erlang:atom_to_list/1, ssh_transport:supported_algorithms(public_key)),
-    Ssh = Ssh0#ssh{userauth_pubkeys = 
-                       [list_to_atom(SigAlg) || SigAlg <- string:tokens(SigAlgs,","),
-                                                %% length of SigAlg is implicitly checked by member:
-                                                lists:member(SigAlg, SupportedAlgs)
-                       ]},
-    D0#data{ssh_params = Ssh};
+ext_info({"server-sig-algs",SigAlgsStr},
+         D0 = #data{ssh_params=#ssh{role=client,
+                                    userauth_pubkeys=ClientSigAlgs}=Ssh0}) ->
+    %% ClientSigAlgs are the pub_key algortithms that:
+    %%  1) is usable, that is, the user has such a public key and
+    %%  2) is either the default list or set by the caller
+    %%     with the client option 'pref_public_key_algs'
+    %%
+    %% The list is already checked for duplicates.
+
+    SigAlgs = [A || Astr <- string:tokens(SigAlgsStr, ","),
+                    A <- try [list_to_existing_atom(Astr)]
+                              %% list_to_existing_atom will fail for unknown algorithms
+                         catch _:_ -> []
+                         end],
+
+    CommonAlgs = [A || A <- SigAlgs,
+                       lists:member(A, ClientSigAlgs)],
+
+    %% Re-arrange the client supported public-key algorithms so that the server
+    %% preferred ones are tried first.
+    %% Trying algorithms not mentioned by the server is ok, since the server can't know
+    %% if the client supports 'server-sig-algs' or not.
+
+    D0#data{
+      ssh_params =
+          Ssh0#ssh{
+            userauth_pubkeys =
+                CommonAlgs ++ (ClientSigAlgs -- CommonAlgs)
+           }};
 
 ext_info(_, D0) ->
     %% Not implemented
     D0.
 
 %%%----------------------------------------------------------------
+is_usable_user_pubkey(A, Ssh) ->
+    case ssh_auth:get_public_key(A, Ssh) of
+        {ok,_} -> true;
+        _ -> false
+    end.
+
+%%%----------------------------------------------------------------
 handle_request(ChannelPid, ChannelId, Type, Data, WantReply, From, D) ->
     case ssh_channel:cache_lookup(cache(D), ChannelId) of
-	#channel{remote_id = Id} = Channel ->
+	#channel{remote_id = Id,
+                 sent_close = false} = Channel ->
 	    update_sys(cache(D), Channel, Type, ChannelPid),
 	    send_msg(ssh_connection:channel_request_msg(Id, Type, WantReply, Data),
 		     add_request(WantReply, ChannelId, From, D));
-	undefined ->
-	    D
+
+        _ when WantReply==true ->
+            {error,closed};
+
+        _ ->
+            D
     end.
 
 handle_request(ChannelId, Type, Data, WantReply, From, D) ->
     case ssh_channel:cache_lookup(cache(D), ChannelId) of
-	#channel{remote_id = Id} ->
+	#channel{remote_id = Id,
+                 sent_close = false} ->
 	    send_msg(ssh_connection:channel_request_msg(Id, Type, WantReply, Data),
 		     add_request(WantReply, ChannelId, From, D));
-	undefined ->
-	    D
+
+	_ when WantReply==true ->
+            {error,closed};
+        
+        _ ->
+            D
     end.
 
 %%%----------------------------------------------------------------
 handle_channel_down(ChannelPid, D) ->
+    Cache = cache(D),
     ssh_channel:cache_foldl(
-	       fun(Channel, Acc) when Channel#channel.user == ChannelPid ->
-		       ssh_channel:cache_delete(cache(D),
-						Channel#channel.local_id),
-		       Acc;
-		  (_,Acc) ->
-		       Acc
-	       end, [], cache(D)),
-    {{replies, []}, cache_check_set_idle_timer(D)}.
+      fun(#channel{user=U,
+                   local_id=Id}, Acc) when U == ChannelPid ->
+              ssh_channel:cache_delete(Cache, Id),
+              Acc;
+         (_,Acc) ->
+              Acc
+      end, [], Cache),
+    cache_check_set_idle_timer(D).
 
 
 update_sys(Cache, Channel, Type, ChannelPid) ->
@@ -1771,11 +1906,49 @@ new_channel_id(#data{connection_state = #connection{channel_id_seed = Id} =
 			Connection#connection{channel_id_seed = Id + 1}}}.
 
 %%%----------------------------------------------------------------
-%% %%% This server/client has decided to disconnect via the state machine:
-disconnect(Msg=#ssh_msg_disconnect{description=Description}, _StateName, State0) ->
-    State = send_msg(Msg, State0),
-    disconnect_fun(Description, State),
-    {stop, {shutdown,Description}, State}.
+%%% This server/client has decided to disconnect via the state machine:
+%%% The unused arguments are for debugging.
+
+send_disconnect(Code, DetailedText, Module, Line, StateName, D) ->
+    send_disconnect(Code, default_text(Code), DetailedText, Module, Line, StateName, D).
+
+send_disconnect(Code, Reason, DetailedText, Module, Line, StateName, D0) ->
+    Msg = #ssh_msg_disconnect{code = Code,
+                              description = Reason},
+    D = send_msg(Msg, D0),
+    LogMsg = io_lib:format("Disconnects with code = ~p [RFC4253 11.1]: ~s",[Code,Reason]),
+    call_disconnectfun_and_log_cond(LogMsg, DetailedText, Module, Line, StateName, D),
+    {{shutdown,Reason}, D}.
+
+call_disconnectfun_and_log_cond(LogMsg, DetailedText, Module, Line, StateName, D) ->
+    case disconnect_fun(LogMsg, D) of
+        void ->
+            log(info, D, 
+                io_lib:format("~s~n"
+                              "State = ~p~n"
+                              "Module = ~p, Line = ~p.~n"
+                              "Details:~n  ~s~n",
+                              [LogMsg, StateName, Module, Line, DetailedText]));
+        _ ->
+            ok
+    end.
+
+
+default_text(?SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT) -> "Host not allowed to connect";
+default_text(?SSH_DISCONNECT_PROTOCOL_ERROR) -> "Protocol error";
+default_text(?SSH_DISCONNECT_KEY_EXCHANGE_FAILED) -> "Key exchange failed";
+default_text(?SSH_DISCONNECT_RESERVED) -> "Reserved";
+default_text(?SSH_DISCONNECT_MAC_ERROR) -> "Mac error";
+default_text(?SSH_DISCONNECT_COMPRESSION_ERROR) -> "Compression error";
+default_text(?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE) -> "Service not available";
+default_text(?SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED) -> "Protocol version not supported";
+default_text(?SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE) -> "Host key not verifiable";
+default_text(?SSH_DISCONNECT_CONNECTION_LOST) -> "Connection lost";
+default_text(?SSH_DISCONNECT_BY_APPLICATION) -> "By application";
+default_text(?SSH_DISCONNECT_TOO_MANY_CONNECTIONS) -> "Too many connections";
+default_text(?SSH_DISCONNECT_AUTH_CANCELLED_BY_USER) -> "Auth cancelled by user";
+default_text(?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE) -> "Unable to connect using the available authentication methods";
+default_text(?SSH_DISCONNECT_ILLEGAL_USER_NAME) -> "Illegal user name".
 
 %%%----------------------------------------------------------------
 counterpart_versions(NumVsn, StrVsn, #ssh{role = server} = Ssh) ->
@@ -1788,8 +1961,7 @@ conn_info(client_version, #data{ssh_params=S}) -> {S#ssh.c_vsn, S#ssh.c_version}
 conn_info(server_version, #data{ssh_params=S}) -> {S#ssh.s_vsn, S#ssh.s_version};
 conn_info(peer,           #data{ssh_params=S}) -> S#ssh.peer;
 conn_info(user,                             D) -> D#data.auth_user;
-conn_info(sockname, D) -> {ok, SockName} = inet:sockname(D#data.socket),
-			  SockName;
+conn_info(sockname,       #data{ssh_params=S}) -> S#ssh.local;
 %% dbg options ( = not documented):
 conn_info(socket, D) -> D#data.socket;
 conn_info(chan_ids, D) -> 
@@ -1820,23 +1992,54 @@ fold_keys(Keys, Fun, Extra) ->
 		end, [], Keys).
 
 %%%----------------------------------------------------------------
-log_error(Reason) ->
-    Report = io_lib:format("Erlang ssh connection handler failed with reason:~n"
-			   "    ~p~n"
-			   "Stacktrace:~n"
-			   "    ~p~n",
-			   [Reason, erlang:get_stacktrace()]),
-    error_logger:error_report(Report).
+log(Tag, D, Reason) ->
+    case atom_to_list(Tag) of                   % Dialyzer-technical reasons...
+        "error"   -> do_log(error_msg,   Reason, D);
+        "warning" -> do_log(warning_msg, Reason, D);
+        "info"    -> do_log(info_msg,    Reason, D)
+    end.
+
+do_log(F, Reason, #data{ssh_params = #ssh{role = Role} = S
+                       }) ->
+    VSN =
+        case application:get_key(ssh,vsn) of
+            {ok,Vsn} -> Vsn;
+            undefined -> ""
+        end,
+    PeerVersion =
+        case Role of
+            server -> S#ssh.c_version;
+            client -> S#ssh.s_version
+        end,
+    CryptoInfo =
+        try 
+            [{_,_,CI}] = crypto:info_lib(),
+            <<"(",CI/binary,")">>
+        catch
+            _:_ -> ""
+        end,
+    Other =
+         case Role of
+            server -> "Client";
+            client -> "Server"
+        end,
+    error_logger:F("Erlang SSH ~p ~s ~s.~n"
+                   "~s: ~p~n"
+                   "~s~n",
+                   [Role, VSN, CryptoInfo, 
+                    Other, PeerVersion,
+                    Reason]).
 
 %%%----------------------------------------------------------------
 not_connected_filter({connection_reply, _Data}) -> true;
 not_connected_filter(_) -> false.
 
 %%%----------------------------------------------------------------
+
+send_replies({Repls,C = #connection{}}, D) when is_list(Repls) ->
+    send_replies(Repls, D#data{connection_state=C});
 send_replies(Repls, State) ->
-    lists:foldl(fun get_repl/2,
-		{[],State},
-		Repls).
+    lists:foldl(fun get_repl/2, {[],State}, Repls).
 
 get_repl({connection_reply,Msg}, {CallRepls,S}) ->
     if is_record(Msg, ssh_msg_channel_success) ->
@@ -1857,15 +2060,17 @@ get_repl({flow_control,Cache,Channel,From,Msg}, {CallRepls,S}) ->
     {[{reply,From,Msg}|CallRepls], S};
 get_repl({flow_control,From,Msg}, {CallRepls,S}) ->
     {[{reply,From,Msg}|CallRepls], S};
-get_repl(noreply, Acc) ->
-    Acc;
+%% get_repl(noreply, Acc) ->
+%%     Acc;
+%% get_repl([], Acc) ->
+%%     Acc;
 get_repl(X, Acc) ->
     exit({get_repl,X,Acc}).
 
 %%%----------------------------------------------------------------
--define(CALL_FUN(Key,D), catch (?GET_OPT(Key, D#data.opts)) ).
+-define(CALL_FUN(Key,D), catch (?GET_OPT(Key, (D#data.ssh_params)#ssh.opts)) ).
 
-disconnect_fun({disconnect,Msg}, D) -> ?CALL_FUN(disconnectfun,D)(Msg);
+%%disconnect_fun({disconnect,Msg}, D) -> ?CALL_FUN(disconnectfun,D)(Msg);
 disconnect_fun(Reason, D)           -> ?CALL_FUN(disconnectfun,D)(Reason).
 
 unexpected_fun(UnexpectedMessage, #data{ssh_params = #ssh{peer = {_,Peer} }} = D) ->
@@ -1913,7 +2118,7 @@ retry_fun(User, Reason, #data{ssh_params = #ssh{opts = Opts,
 %%% channels open for a while.
 
 cache_init_idle_timer(D) ->
-    case ?GET_OPT(idle_time, D#data.opts) of
+    case ?GET_OPT(idle_time, (D#data.ssh_params)#ssh.opts) of
 	infinity ->
 	    D#data{idle_timer_value = infinity,
 		   idle_timer_ref = infinity	% A flag used later...
@@ -2020,3 +2225,137 @@ update_inet_buffers(Socket) ->
     catch
         _:_ -> ok
     end.
+
+%%%################################################################
+%%%#
+%%%# Tracing
+%%%#
+
+dbg_trace(points,         _,  _) -> [terminate, disconnect, connections, connection_events];
+
+dbg_trace(flags,  connections,  A) -> [c] ++ dbg_trace(flags, terminate, A);
+dbg_trace(on,     connections,  A) -> dbg:tp(?MODULE,  init_connection_handler, 3, x),
+                                      dbg_trace(on, terminate, A);
+dbg_trace(off,    connections,  A) -> dbg:ctpg(?MODULE, init_connection_handler, 3),
+                                      dbg_trace(off, terminate, A);
+dbg_trace(format, connections, {call, {?MODULE,init_connection_handler, [Role, Sock, Opts]}}) ->
+    DefaultOpts = ssh_options:handle_options(Role,[]),
+    ExcludedKeys = [internal_options, user_options],
+    NonDefaultOpts =
+        maps:filter(fun(K,V) ->
+                            case lists:member(K,ExcludedKeys) of
+                                true ->
+                                    false;
+                                false ->
+                                    V =/= (catch maps:get(K,DefaultOpts))
+                            end
+                    end,
+                    Opts),
+    {ok, {IPp,Portp}} = inet:peername(Sock),
+    {ok, {IPs,Ports}} = inet:sockname(Sock),
+    [io_lib:format("Starting ~p connection:\n",[Role]),
+     io_lib:format("Socket = ~p, Peer = ~s:~p, Local = ~s:~p,~n"
+                   "Non-default options:~n~p",
+                   [Sock,inet:ntoa(IPp),Portp,inet:ntoa(IPs),Ports,
+                    NonDefaultOpts])
+    ];
+dbg_trace(format, connections, F) ->
+    dbg_trace(format, terminate, F);
+
+dbg_trace(flags,  connection_events,  _) -> [c];
+dbg_trace(on,     connection_events,  _) -> dbg:tp(?MODULE,   handle_event, 4, x);
+dbg_trace(off,    connection_events,  _) -> dbg:ctpg(?MODULE, handle_event, 4);
+dbg_trace(format, connection_events, {call, {?MODULE,handle_event, [EventType, EventContent, State, _Data]}}) ->
+    ["Connection event\n",
+     io_lib:format("EventType: ~p~nEventContent: ~p~nState: ~p~n", [EventType, EventContent, State])
+    ];
+dbg_trace(format, connection_events, {return_from, {?MODULE,handle_event,4}, Ret}) ->
+    ["Connection event result\n",
+     io_lib:format("~p~n", [event_handler_result(Ret)])
+    ];
+
+dbg_trace(flags,  terminate,  _) -> [c];
+dbg_trace(on,     terminate,  _) -> dbg:tp(?MODULE,  terminate, 3, x);
+dbg_trace(off,    terminate,  _) -> dbg:ctpg(?MODULE, terminate, 3);
+dbg_trace(format, terminate, {call, {?MODULE,terminate, [Reason, StateName, D]}}) ->
+    ExtraInfo =
+        try
+            {conn_info(peer,D),
+             conn_info(user,D),
+             conn_info(sockname,D)}
+        of
+            {{_,{IPp,Portp}}, Usr, {IPs,Ports}} when is_tuple(IPp), is_tuple(IPs),
+                                                     is_integer(Portp), is_integer(Ports) ->
+                io_lib:format("Peer=~s:~p, Local=~s:~p, User=~p",
+                              [inet:ntoa(IPp),Portp,inet:ntoa(IPs),Ports,Usr]);
+            {Peer,Usr,Sockname} ->
+                io_lib:format("Peer=~p, Local=~p, User=~p",[Peer,Sockname,Usr])
+        catch
+            _:_ ->
+                ""
+        end,
+    if
+        Reason == normal ;
+        Reason == shutdown ;
+        element(1,Reason) == shutdown
+        ->
+            ["Connection Terminating:\n",
+             io_lib:format("Reason: ~p, StateName: ~p~n~s", [Reason, StateName, ExtraInfo])
+            ];
+
+        true ->
+            ["Connection Terminating:\n",
+             io_lib:format("Reason: ~p, StateName: ~p~n~s~nStateData = ~p",
+                           [Reason, StateName, ExtraInfo, state_data2proplist(D)])
+            ]
+    end;
+
+dbg_trace(flags,  disconnect, _) -> [c];
+dbg_trace(on,     disconnect, _) -> dbg:tpl(?MODULE,  send_disconnect, 7, x);
+dbg_trace(off,    disconnect, _) -> dbg:ctpl(?MODULE, send_disconnect, 7);
+dbg_trace(format, disconnect, {call,{?MODULE,send_disconnect,
+                                    [Code, Reason, DetailedText, Module, Line, StateName, _D]}}) ->
+    ["Disconnecting:\n",
+     io_lib:format(" Module = ~p, Line = ~p, StateName = ~p,~n"
+                   " Code = ~p, Reason = ~p,~n"
+                   " DetailedText =~n"
+                   " ~p",
+                   [Module, Line, StateName, Code, Reason, lists:flatten(DetailedText)])
+    ].
+
+
+event_handler_result({next_state, NextState, _NewData}) ->
+    {next_state, NextState, "#data{}"};
+event_handler_result({next_state, NextState, _NewData, Actions}) ->
+    {next_state, NextState, "#data{}", Actions};
+event_handler_result(R) ->
+    state_callback_result(R).
+
+state_callback_result({keep_state, _NewData}) ->
+    {keep_state, "#data{}"};
+state_callback_result({keep_state, _NewData, Actions}) ->
+    {keep_state, "#data{}", Actions};
+state_callback_result(keep_state_and_data) ->
+    keep_state_and_data;
+state_callback_result({keep_state_and_data, Actions}) ->
+    {keep_state_and_data, Actions};
+state_callback_result({repeat_state, _NewData}) ->
+    {repeat_state, "#data{}"};
+state_callback_result({repeat_state, _NewData, Actions}) ->
+    {repeat_state, "#data{}", Actions};
+state_callback_result(repeat_state_and_data) ->
+    repeat_state_and_data;
+state_callback_result({repeat_state_and_data, Actions}) ->
+    {repeat_state_and_data, Actions};
+state_callback_result(stop) ->
+    stop;
+state_callback_result({stop, Reason}) ->
+    {stop, Reason};
+state_callback_result({stop, Reason, _NewData}) ->
+    {stop, Reason, "#data{}"};
+state_callback_result({stop_and_reply, Reason,  Replies}) ->
+    {stop_and_reply, Reason,  Replies};
+state_callback_result({stop_and_reply, Reason,  Replies, _NewData}) ->
+    {stop_and_reply, Reason,  Replies, "#data{}"};
+state_callback_result(R) ->
+    R.

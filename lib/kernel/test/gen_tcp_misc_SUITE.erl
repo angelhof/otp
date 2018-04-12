@@ -50,9 +50,8 @@
 	 killing_acceptor/1,killing_multi_acceptors/1,killing_multi_acceptors2/1,
 	 several_accepts_in_one_go/1, accept_system_limit/1,
 	 active_once_closed/1, send_timeout/1, send_timeout_active/1,
-	 otp_7731/1, zombie_sockets/1, otp_7816/1, otp_8102/1,
-	 wrapping_oct/0, wrapping_oct/1,
-         otp_9389/1]).
+         otp_7731/1, zombie_sockets/1, otp_7816/1, otp_8102/1,
+         wrapping_oct/0, wrapping_oct/1, otp_9389/1, otp_13939/1]).
 
 %% Internal exports.
 -export([sender/3, not_owner/1, passive_sockets_server/2, priority_server/1, 
@@ -1573,52 +1572,56 @@ fill_sendq(Config) when is_list(Config) ->
     Master = self(),
     Server =
 	spawn_link(fun () ->
-			   {ok,L} = gen_tcp:listen
-				      (0, [{active,false},binary,
-					   {reuseaddr,true},{packet,0}]),
+			   {ok,L} = gen_tcp:listen(0, [{active,false},binary,
+                                                       {reuseaddr,true},{packet,0}]),
 			   {ok,Port} = inet:port(L),
 			   Master ! {self(),client,
 				     fill_sendq_client(Port, Master)},
 			   fill_sendq_srv(L, Master)
 		   end),
     io:format("~p Server~n", [Server]),
-    receive {Server,client,Client} ->
-		  io:format("~p Client~n", [Client]),
-		  receive {Server,reader,Reader} ->
-				io:format("~p Reader~n", [Reader]),
-				fill_sendq_loop(Server, Client, Reader)
+    receive
+        {Server,client,Client} ->
+            io:format("~p Client~n", [Client]),
+            receive
+                {Server,reader,Reader} ->
+                    io:format("~p Reader~n", [Reader]),
+                    fill_sendq_loop(Server, Client, Reader)
 	    end
     end.
 
 fill_sendq_loop(Server, Client, Reader) ->
     %% Master
     %%
-    receive {Server,send} ->
+    receive
+        {Server,send} ->
 	    fill_sendq_loop(Server, Client, Reader)
     after 2000 ->
 	    %% Send queue full, sender blocked -> close client.
 	    io:format("Send timeout, closing Client...~n", []),
 	    Client ! {self(),close},
-	    receive {Server,[{error,closed}]} ->
-			  io:format("Got server closed.~n"),
-			  receive {Reader,[{error,closed}]} ->
-					io:format
-						("Got reader closed.~n"),
-					ok
-				after 3000 ->
-					ct:fail({timeout,{closed,reader}})
-				end;
-			  {Reader,[{error,closed}]} ->
-			  io:format("Got reader closed.~n"),
-			  receive {Server,[{error,closed}]} ->
-					io:format("Got server closed~n"),
-					ok
-				after 3000 ->
-					ct:fail({timeout,{closed,server}})
-				end
-		  after 3000 ->
-			  ct:fail({timeout,{closed,[server,reader]}})
-		  end
+	    receive
+                {Server,[{error,closed}]} ->
+                    io:format("Got server closed.~n"),
+                    receive
+                        {Reader,[{error,closed}]} ->
+                            io:format("Got reader closed.~n"),
+                            ok
+                    after 3000 ->
+                            ct:fail({timeout,{closed,reader}})
+                    end;
+                {Reader,[{error,closed}]} ->
+                    io:format("Got reader closed.~n"),
+                    receive
+                        {Server,[{error,closed}]} ->
+                            io:format("Got server closed~n"),
+                            ok
+                    after 3000 ->
+                            ct:fail({timeout,{closed,server}})
+                    end
+            after 3000 ->
+                    ct:fail({timeout,{closed,[server,reader]}})
+            end
     end.
 
 fill_sendq_srv(L, Master) ->
@@ -3014,3 +3017,42 @@ ok({ok,V}) -> V.
 get_hostname(Name) ->
     "@"++Host = lists:dropwhile(fun(C) -> C =/= $@ end, atom_to_list(Name)),
     Host.
+
+otp_13939(doc) ->
+    ["Check that writing to a remotely closed socket doesn't block forever "
+     "when exit_on_close is false."];
+otp_13939(suite) ->
+    [];
+otp_13939(Config) when is_list(Config) ->
+    {Pid, Ref} = spawn_opt(
+        fun() ->
+            {ok, Listener} = gen_tcp:listen(0, [{exit_on_close, false}]),
+            {ok, Port} = inet:port(Listener),
+
+            spawn_link(
+                fun() ->
+                    {ok, Client} = gen_tcp:connect("localhost", Port,
+                        [{active, false}]),
+                    ok = gen_tcp:close(Client)
+                end),
+
+            {ok, Accepted} = gen_tcp:accept(Listener),
+
+            ok = gen_tcp:send(Accepted, <<0:(10*1024*1024*8)>>),
+
+            %% The bug surfaces when there's a delay between the send
+            %% operations; inet:getstat is a red herring.
+            timer:sleep(100),
+
+            {error, Code} = gen_tcp:send(Accepted, <<0:(10*1024*1024*8)>>),
+            ct:pal("gen_tcp:send returned ~p~n", [Code])
+        end, [link, monitor]),
+
+    receive
+        {'DOWN', Ref, process, Pid, normal} ->
+            ok
+    after 1000 ->
+        demonitor(Ref, [flush]),
+        exit(Pid, normal),
+        ct:fail("Server process blocked on send.")
+    end.

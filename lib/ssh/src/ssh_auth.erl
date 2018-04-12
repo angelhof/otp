@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,7 +28,8 @@
 -include("ssh_auth.hrl").
 -include("ssh_transport.hrl").
 
--export([publickey_msg/1, password_msg/1, keyboard_interactive_msg/1,
+-export([get_public_key/2,
+         publickey_msg/1, password_msg/1, keyboard_interactive_msg/1,
 	 service_request_msg/1, init_userauth_request_msg/1,
 	 userauth_request_msg/1, handle_userauth_request/3,
 	 handle_userauth_info_request/2, handle_userauth_info_response/2
@@ -39,15 +40,12 @@
 %%--------------------------------------------------------------------
 %%%----------------------------------------------------------------
 userauth_request_msg(#ssh{userauth_methods = ServerMethods,
-			  userauth_supported_methods = UserPrefMethods, % Note: this is not documented as supported for clients
+			  userauth_supported_methods = UserPrefMethods,
 			  userauth_preference = ClientMethods0
 			 } = Ssh0) ->
     case sort_select_mthds(ClientMethods0, UserPrefMethods, ServerMethods) of
 	[] ->
-	    Msg = #ssh_msg_disconnect{code = ?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
-				      description = "Unable to connect using the available authentication methods",
-				      language = "en"},
-	    {disconnect, Msg, ssh_transport:ssh_packet(Msg, Ssh0)};
+            {send_disconnect, ?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE, Ssh0};
 	
 	[{Pref,Module,Function,Args} | Prefs] ->
 	    Ssh = case Pref of
@@ -136,41 +134,52 @@ keyboard_interactive_msg([#ssh{user = User,
 	      Ssh)
     end.
 
-publickey_msg([SigAlg, #ssh{user = User,
-		       session_id = SessionId,
-		       service = Service,
-		       opts = Opts} = Ssh]) ->
-    Hash = ssh_transport:sha(SigAlg),
+
+get_public_key(SigAlg, #ssh{opts = Opts}) ->
     KeyAlg = key_alg(SigAlg),
     {KeyCb,KeyCbOpts} = ?GET_OPT(key_cb, Opts),
     UserOpts = ?GET_OPT(user_options, Opts),
     case KeyCb:user_key(KeyAlg, [{key_cb_private,KeyCbOpts}|UserOpts]) of
-	{ok, PrivKey} ->
-	    SigAlgStr = atom_to_list(SigAlg),
+        {ok, PrivKey} ->
             try
+                %% Check the key - the KeyCb may be a buggy plugin
+                true = ssh_transport:valid_key_sha_alg(PrivKey, KeyAlg),
                 Key = ssh_transport:extract_public_key(PrivKey),
                 public_key:ssh_encode(Key, ssh2_pubkey)
             of
-		PubKeyBlob ->
-		    SigData = build_sig_data(SessionId, User, Service,
-                                             PubKeyBlob, SigAlgStr),
-		    Sig = ssh_transport:sign(SigData, Hash, PrivKey),
-		    SigBlob = list_to_binary([?string(SigAlgStr),
-                                              ?binary(Sig)]),
-		    ssh_transport:ssh_packet(
-		      #ssh_msg_userauth_request{user = User,
-						service = Service,
-						method = "publickey",
-						data = [?TRUE,
-							?string(SigAlgStr),
-							?binary(PubKeyBlob),
-							?binary(SigBlob)]},
-		      Ssh)
+                PubKeyBlob -> {ok,{PrivKey,PubKeyBlob}}
             catch
                 _:_ -> 
-		    {not_ok, Ssh}
+                    not_ok
             end;
-     	_Error ->
+
+	_Error ->
+	    not_ok
+    end.
+
+
+publickey_msg([SigAlg, #ssh{user = User,
+		       session_id = SessionId,
+		       service = Service} = Ssh]) ->
+    case get_public_key(SigAlg, Ssh) of
+	{ok, {PrivKey,PubKeyBlob}} ->
+            SigAlgStr = atom_to_list(SigAlg),
+            SigData = build_sig_data(SessionId, User, Service,
+                                     PubKeyBlob, SigAlgStr),
+            Hash = ssh_transport:sha(SigAlg),
+            Sig = ssh_transport:sign(SigData, Hash, PrivKey),
+            SigBlob = list_to_binary([?string(SigAlgStr),
+                                      ?binary(Sig)]),
+            ssh_transport:ssh_packet(
+              #ssh_msg_userauth_request{user = User,
+                                        service = Service,
+                                        method = "publickey",
+                                        data = [?TRUE,
+                                                ?string(SigAlgStr),
+                                                ?binary(PubKeyBlob),
+                                                ?binary(SigBlob)]},
+              Ssh);
+     	_ ->
 	    {not_ok, Ssh}
     end.
 
@@ -184,11 +193,8 @@ init_userauth_request_msg(#ssh{opts = Opts} = Ssh) ->
     %% Client side
     case ?GET_OPT(user, Opts) of
 	undefined ->
-	    ErrStr = "Could not determine the users name",
-	    ssh_connection_handler:disconnect(
-	      #ssh_msg_disconnect{code = ?SSH_DISCONNECT_ILLEGAL_USER_NAME,
-				  description = ErrStr});
-        
+	    ?DISCONNECT(?SSH_DISCONNECT_ILLEGAL_USER_NAME,
+                        "Could not determine the users name");
 	User ->
             ssh_transport:ssh_packet(
               #ssh_msg_userauth_request{user = User,
@@ -292,11 +298,10 @@ handle_userauth_request(#ssh_msg_userauth_request{user = User,
 							   SigWLen/binary>>
 						 }, 
 			SessionId, 
-			#ssh{opts = Opts,
-			     userauth_supported_methods = Methods} = Ssh) ->
+			#ssh{userauth_supported_methods = Methods} = Ssh) ->
     
     case verify_sig(SessionId, User, "ssh-connection", 
-		    BAlg, KeyBlob, SigWLen, Opts) of
+		    BAlg, KeyBlob, SigWLen, Ssh) of
 	true ->
 	    {authorized, User, 
 	     ssh_transport:ssh_packet(
@@ -440,11 +445,8 @@ handle_userauth_info_response({extra,#ssh_msg_userauth_info_response{}},
 
 handle_userauth_info_response(#ssh_msg_userauth_info_response{},
 			      _Auth) ->
-    ssh_connection_handler:disconnect(
-      #ssh_msg_disconnect{code = ?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
-			  description = "Server does not support keyboard-interactive"
-			 }).
-
+    ?DISCONNECT(?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
+                "Server does not support keyboard-interactive").
 
 %%--------------------------------------------------------------------
 %%% Internal functions
@@ -481,10 +483,8 @@ check_password(User, Password, Opts, Ssh) ->
 		{false,NewState} ->
 		    {false, Ssh#ssh{pwdfun_user_state=NewState}};
 		disconnect ->
-		    ssh_connection_handler:disconnect(
-		      #ssh_msg_disconnect{code = ?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
-					  description = "Unable to connect using the available authentication methods"
-					 })
+		    ?DISCONNECT(?SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
+                                "")
 	    end
     end.
 
@@ -506,7 +506,7 @@ pre_verify_sig(User, KeyBlob, Opts) ->
 	    false
     end.
 
-verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, Opts) ->
+verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts} = Ssh) ->
     try
         Alg = binary_to_list(AlgBin),
         {KeyCb,KeyCbOpts} = ?GET_OPT(key_cb, Opts),
@@ -517,7 +517,7 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, Opts) ->
         <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
         <<?UINT32(AlgLen), _Alg:AlgLen/binary,
           ?UINT32(SigLen), Sig:SigLen/binary>> = AlgSig,
-        ssh_transport:verify(PlainText, ssh_transport:sha(Alg), Sig, Key)
+        ssh_transport:verify(PlainText, ssh_transport:sha(Alg), Sig, Key, Ssh)
     catch
 	_:_ ->
 	    false
@@ -580,16 +580,12 @@ keyboard_interact_fun(KbdInteractFun, Name, Instr,  PromptInfos, NumPrompts) ->
     case KbdInteractFun(Name, Instr, Prompts) of
 	Rs when length(Rs) == NumPrompts ->
 	    Rs;
-	Rs ->
-	    throw({mismatching_number_of_responses,
-		   {got,Rs},
-		   {expected, NumPrompts},
-		   #ssh_msg_disconnect{code = ?SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
-				       description = "User interaction failed",
-				       language = "en"}})
+	_Rs ->
+            nok
     end.
 
 
 key_alg('rsa-sha2-256') -> 'ssh-rsa';
 key_alg('rsa-sha2-512') -> 'ssh-rsa';
 key_alg(Alg) -> Alg.
+

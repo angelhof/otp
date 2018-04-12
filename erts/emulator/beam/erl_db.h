@@ -124,10 +124,15 @@ extern Export ets_select_delete_continue_exp;
 extern Export ets_select_count_continue_exp;
 extern Export ets_select_replace_continue_exp;
 extern Export ets_select_continue_exp;
-extern erts_smp_atomic_t erts_ets_misc_mem_size;
+extern erts_atomic_t erts_ets_misc_mem_size;
 
 Eterm erts_ets_colliding_names(Process*, Eterm name, Uint cnt);
 Uint erts_db_get_max_tabs(void);
+
+#ifdef ERTS_ENABLE_LOCK_COUNT
+void erts_lcnt_enable_db_lock_count(DbTable *tb, int enable);
+void erts_lcnt_update_db_locks(int enable);
+#endif
 
 #endif /* ERL_DB_H__ */
 
@@ -146,11 +151,11 @@ do {									\
     erts_aint_t sz__ = (((erts_aint_t) (ALLOC_SZ))			\
 			- ((erts_aint_t) (FREE_SZ)));			\
     ASSERT((TAB));							\
-    erts_smp_atomic_add_nob(&(TAB)->common.memory_size, sz__);		\
+    erts_atomic_add_nob(&(TAB)->common.memory_size, sz__);		\
 } while (0)
 
 #define ERTS_ETS_MISC_MEM_ADD(SZ) \
-  erts_smp_atomic_add_nob(&erts_ets_misc_mem_size, (SZ));
+  erts_atomic_add_nob(&erts_ets_misc_mem_size, (SZ));
 
 ERTS_GLB_INLINE void *erts_db_alloc(ErtsAlcType_t type,
 				    DbTable *tab,
@@ -287,7 +292,7 @@ erts_db_free(ErtsAlcType_t type, DbTable *tab, void *ptr, Uint size)
     ERTS_DB_ALC_MEM_UPDATE_(tab, size, 0);
 
     ASSERT(((void *) tab) != ptr
-	   || erts_smp_atomic_read_nob(&tab->common.memory_size) == 0);
+	   || erts_atomic_read_nob(&tab->common.memory_size) == 0);
 
     erts_free(type, ptr);
 }

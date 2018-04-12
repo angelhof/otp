@@ -95,7 +95,7 @@ print([]) ->
     [].
 
 print(C, F, Ad, P, Pad, Encoding, Strings) ->
-    [$~] ++ print_field_width(F, Ad) ++ print_precision(P) ++
+    [$~] ++ print_field_width(F, Ad) ++ print_precision(P, Pad) ++
         print_pad_char(Pad) ++ print_encoding(Encoding) ++
         print_strings(Strings) ++ [C].
 
@@ -103,8 +103,9 @@ print_field_width(none, _Ad) -> "";
 print_field_width(F, left) -> integer_to_list(-F);
 print_field_width(F, right) -> integer_to_list(F).
 
-print_precision(none) -> "";
-print_precision(P) -> [$. | integer_to_list(P)].
+print_precision(none, $\s) -> "";
+print_precision(none, _Pad) -> ".";  % pad must be second dot
+print_precision(P, _Pad) -> [$. | integer_to_list(P)].
 
 print_pad_char($\s) -> ""; % default, no need to make explicit
 print_pad_char(Pad) -> [$., Pad].
@@ -126,25 +127,23 @@ collect_cseq(Fmt0, Args0) ->
     {F,Ad,Fmt1,Args1} = field_width(Fmt0, Args0),
     {P,Fmt2,Args2} = precision(Fmt1, Args1),
     {Pad,Fmt3,Args3} = pad_char(Fmt2, Args2),
-    {Encoding,Fmt4,Args4} = encoding(Fmt3, Args3),
-    {Strings,Fmt5,Args5} = strings(Fmt4, Args4),
-    {C,As,Fmt6,Args6} = collect_cc(Fmt5, Args5),
-    FormatSpec = #{control_char => C, args => As, width => F, adjust => Ad,
-                   precision => P, pad_char => Pad, encoding => Encoding,
-                   strings => Strings},
-    {FormatSpec,Fmt6,Args6}.
+    Spec0 = #{width => F,
+              adjust => Ad,
+              precision => P,
+              pad_char => Pad,
+              encoding => latin1,
+              strings => true},
+    {Spec1,Fmt4} = modifiers(Fmt3, Spec0),
+    {C,As,Fmt5,Args4} = collect_cc(Fmt4, Args3),
+    Spec2 = Spec1#{control_char => C, args => As},
+    {Spec2,Fmt5,Args4}.
 
-encoding([$t|Fmt],Args) ->
-    true = hd(Fmt) =/= $l,
-    {unicode,Fmt,Args};
-encoding(Fmt,Args) ->
-    {latin1,Fmt,Args}.
-
-strings([$l|Fmt],Args) ->
-    true = hd(Fmt) =/= $t,
-    {false,Fmt,Args};
-strings(Fmt,Args) ->
-    {true,Fmt,Args}.
+modifiers([$t|Fmt], Spec) ->
+    modifiers(Fmt, Spec#{encoding => unicode});
+modifiers([$l|Fmt], Spec) ->
+    modifiers(Fmt, Spec#{strings => false});
+modifiers(Fmt, Spec) ->
+    {Spec, Fmt}.
 
 field_width([$-|Fmt0], Args0) ->
     {F,Fmt,Args} = field_value(Fmt0, Args0),
@@ -335,7 +334,7 @@ base(B) when is_integer(B) ->
 term(T, none, _Adj, none, _Pad) -> T;
 term(T, none, Adj, P, Pad) -> term(T, P, Adj, P, Pad);
 term(T, F, Adj, P0, Pad) ->
-    L = lists:flatlength(T),
+    L = string:length(T),
     P = erlang:min(L, case P0 of none -> F; _ -> min(P0, F) end),
     if
 	L > P ->
@@ -380,7 +379,7 @@ float_e(_Fl, {Ds,E}, P) ->
 	{Fs,false} -> [Fs|float_exp(E-1)]
     end.
 
-%% float_man([Digit], Icount, Dcount) -> {[Chars],CarryFlag}.
+%% float_man([Digit], Icount, Dcount) -> {[Char],CarryFlag}.
 %%  Generate the characters in the mantissa from the digits with Icount
 %%  characters before the '.' and Dcount decimals. Handle carry and let
 %%  caller decide what to do at top.
@@ -395,7 +394,7 @@ float_man([D|Ds], I, Dc) ->
 	{Cs,false} -> {[D|Cs],false}
     end;
 float_man([], I, Dc) ->				%Pad with 0's
-    {string:chars($0, I, [$.|string:chars($0, Dc)]),false}.
+    {lists:duplicate(I, $0) ++ [$.|lists:duplicate(Dc, $0)],false}.
 
 float_man([D|_], 0) when D >= $5 -> {[],true};
 float_man([_|_], 0) -> {[],false};
@@ -405,7 +404,7 @@ float_man([D|Ds], Dc) ->
 	{Cs,true} -> {[D+1|Cs],false}; 
 	{Cs,false} -> {[D|Cs],false}
     end;
-float_man([], Dc) -> {string:chars($0, Dc),false}.	%Pad with 0's
+float_man([], Dc) -> {lists:duplicate(Dc, $0),false}.	%Pad with 0's
 
 %% float_exp(Exponent) -> [Char].
 %%  Generate the exponent of a floating point number. Always include sign.
@@ -429,7 +428,7 @@ fwrite_f(Fl, F, Adj, P, Pad) when P >= 1 ->
 float_f(Fl, Fd, P) when Fl < 0.0 ->
     [$-|float_f(-Fl, Fd, P)];
 float_f(Fl, {Ds,E}, P) when E =< 0 ->
-    float_f(Fl, {string:chars($0, -E+1, Ds),1}, P);	%Prepend enough 0's
+    float_f(Fl, {lists:duplicate(-E+1, $0)++Ds,1}, P);	%Prepend enough 0's
 float_f(_Fl, {Ds,E}, P) ->
     case float_man(Ds, E, P) of
 	{Fs,true} -> "1" ++ Fs;			%Handle carry
@@ -675,11 +674,11 @@ cdata_to_chars(B) when is_binary(B) ->
 
 string(S, none, _Adj, none, _Pad) -> S;
 string(S, F, Adj, none, Pad) ->
-    string_field(S, F, Adj, lists:flatlength(S), Pad);
+    string_field(S, F, Adj, string:length(S), Pad);
 string(S, none, _Adj, P, Pad) ->
-    string_field(S, P, left, lists:flatlength(S), Pad);
+    string_field(S, P, left, string:length(S), Pad);
 string(S, F, Adj, P, Pad) when F >= P ->
-    N = lists:flatlength(S),
+    N = string:length(S),
     if F > P ->
 	    if N > P ->
 		    adjust(flat_trunc(S, P), chars(Pad, F-P), Adj);
@@ -749,20 +748,9 @@ adjust(Data, Pad, right) -> [Pad|Data].
 %% Flatten and truncate a deep list to at most N elements.
 
 flat_trunc(List, N) when is_integer(N), N >= 0 ->
-    flat_trunc(List, N, [], []).
+    string:slice(List, 0, N).
 
-flat_trunc(L, 0, _, R) when is_list(L) ->
-    lists:reverse(R);
-flat_trunc([H|T], N, S, R) when is_list(H) ->
-    flat_trunc(H, N, [T|S], R);
-flat_trunc([H|T], N, S, R) ->
-    flat_trunc(T, N-1, S, [H|R]);
-flat_trunc([], N, [H|S], R) ->
-    flat_trunc(H, N, S, R);
-flat_trunc([], _, [], R) ->
-    lists:reverse(R).
-
-%% A deep version of string:chars/2,3
+%% A deep version of lists:duplicate/2
 
 chars(_C, 0) ->
     [];

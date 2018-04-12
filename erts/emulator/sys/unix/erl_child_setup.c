@@ -56,6 +56,8 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <sys/wait.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #define WANT_NONBLOCKING
 
@@ -433,6 +435,21 @@ main(int argc, char *argv[])
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     if (sigaction(SIGCHLD, &sa, 0) == -1) {
+        perror(NULL);
+        exit(1);
+    }
+
+    /* Ignore SIGTERM.
+       Some container environments send SIGTERM to all processes
+       when terminating. We don't want erl_child_setup to terminate
+       in these cases as that will prevent beam from properly
+       cleaning up.
+    */
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGTERM, &sa, 0) == -1) {
         perror(NULL);
         exit(1);
     }

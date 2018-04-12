@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, start_child/1, stop_child/1]).
+-export([start_link/0, start_child/1]).
 
 %% Supervisor callback
 -export([init/1]).
@@ -43,13 +43,6 @@ start_link() ->
 start_child(Args) ->
     supervisor:start_child(?MODULE, Args).
 
-stop_child(Client) ->
-    spawn(fun() -> 
-		  ClientSup = whereis(?SSHC_SUP),
-		  supervisor:terminate_child(ClientSup, Client)
-	  end),
-    ok.
-
 %%%=========================================================================
 %%%  Supervisor callback
 %%%=========================================================================
@@ -60,10 +53,7 @@ init(_) ->
                 },
     ChildSpecs = [#{id       => undefined, % As simple_one_for_one is used.
                     start    => {ssh_connection_handler, start_link, []},
-                    restart  => temporary,
-                    shutdown => 4000,
-                    type     => worker,
-                    modules  => [ssh_connection_handler]
+                    restart  => temporary % because there is no way to restart a crashed connection
                    }
                  ],
     {ok, {SupFlags,ChildSpecs}}.

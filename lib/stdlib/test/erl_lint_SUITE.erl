@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -65,7 +65,9 @@
          maps/1,maps_type/1,maps_parallel_match/1,
          otp_11851/1,otp_11879/1,otp_13230/1,
          record_errors/1, otp_11879_cont/1,
-         non_latin1_module/1, otp_14323/1]).
+         non_latin1_module/1, otp_14323/1,
+         get_stacktrace/1, stacktrace_syntax/1,
+         otp_14285/1, otp_14378/1]).
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
@@ -85,7 +87,8 @@ all() ->
      too_many_arguments, basic_errors, bin_syntax_errors, predef,
      maps, maps_type, maps_parallel_match,
      otp_11851, otp_11879, otp_13230,
-     record_errors, otp_11879_cont, non_latin1_module, otp_14323].
+     record_errors, otp_11879_cont, non_latin1_module, otp_14323,
+     get_stacktrace, stacktrace_syntax, otp_14285, otp_14378].
 
 groups() -> 
     [{unused_vars_warn, [],
@@ -2052,12 +2055,10 @@ otp_5362(Config) when is_list(Config) ->
                   spawn(A).
            ">>,
            {[nowarn_unused_function]},
-           {error,[{3,erl_lint,disallowed_nowarn_bif_clash},
-		   {4,erl_lint,disallowed_nowarn_bif_clash},
-		   {4,erl_lint,{bad_nowarn_bif_clash,{spawn,2}}}],
-            [{5,erl_lint,{bad_nowarn_deprecated_function,{3,now,-1}}},
-             {5,erl_lint,{bad_nowarn_deprecated_function,{erlang,now,-1}}},
-             {5,erl_lint,{bad_nowarn_deprecated_function,{{a,b,c},now,-1}}}]}
+           {errors,[{3,erl_lint,disallowed_nowarn_bif_clash},
+                    {4,erl_lint,disallowed_nowarn_bif_clash},
+                    {4,erl_lint,{bad_nowarn_bif_clash,{spawn,2}}}],
+            []}
            },
 
           {otp_5362_8,
@@ -3920,21 +3921,91 @@ otp_11879_cont(Config) ->
 
 %% OTP-14285: We currently don't support non-latin1 module names.
 
-non_latin1_module(_Config) ->
+non_latin1_module(Config) ->
     do_non_latin1_module('юникод'),
     do_non_latin1_module(list_to_atom([256,$a,$b,$c])),
     do_non_latin1_module(list_to_atom([$a,$b,256,$c])),
+
+    "module names with non-latin1 characters are not supported" =
+        format_error(non_latin1_module_unsupported),
+    BadCallback =
+        {bad_callback,{'кирилли́ческий атом','кирилли́ческий атом',0}},
+    "explicit module not allowed for callback "
+    "'кирилли́ческий атом':'кирилли́ческий атом'/0" =
+        format_error(BadCallback),
+    UndefBehav = {undefined_behaviour,'кирилли́ческий атом'},
+    "behaviour 'кирилли́ческий атом' undefined" =
+        format_error(UndefBehav),
+    Ts = [{non_latin1_module,
+           <<"
+            %% Report uses of module names with non-Latin-1 characters.
+
+            -import('кирилли́ческий атом', []).
+            -behaviour('кирилли́ческий атом').
+            -behavior('кирилли́ческий атом').
+
+            -callback 'кирилли́ческий атом':'кирилли́ческий атом'() -> a.
+
+            %% erl_lint:gexpr/3 is not extended to check module name here:
+            t1() when 'кирилли́ческий атом':'кирилли́ческий атом'(1) ->
+                b.
+
+            t2() ->
+                'кирилли́ческий атом':'кирилли́ческий атом'().
+
+            -spec 'кирилли́ческий атом':'кирилли́ческий атом'() -> atom().
+
+            -spec 'кирилли́ческий атом'(integer()) ->
+              'кирилли́ческий атом':'кирилли́ческий атом'().
+
+            'кирилли́ческий атом'(1) ->
+                'кирилли́ческий атом':f(),
+                F = f,
+                'кирилли́ческий атом':F()."/utf8>>,
+           [],
+           {error,
+            [{4,erl_lint,non_latin1_module_unsupported},
+             {5,erl_lint,non_latin1_module_unsupported},
+             {6,erl_lint,non_latin1_module_unsupported},
+             {8,erl_lint,non_latin1_module_unsupported},
+             {8,erl_lint,BadCallback},
+             {11,erl_lint,illegal_guard_expr},
+             {15,erl_lint,non_latin1_module_unsupported},
+             {17,erl_lint,non_latin1_module_unsupported},
+             {20,erl_lint,non_latin1_module_unsupported},
+             {23,erl_lint,non_latin1_module_unsupported},
+             {25,erl_lint,non_latin1_module_unsupported}],
+            [{5,erl_lint,UndefBehav},
+             {6,erl_lint,UndefBehav}]}}],
+    run(Config, Ts),
     ok.
 
 do_non_latin1_module(Mod) ->
     File = atom_to_list(Mod) ++ ".erl",
-    Forms = [{attribute,1,file,{File,1}},
-             {attribute,1,module,Mod},
+    L1 = erl_anno:new(1),
+    Forms = [{attribute,L1,file,{File,1}},
+             {attribute,L1,module,Mod},
              {eof,2}],
     error = compile:forms(Forms),
     {error,_,[]} = compile:forms(Forms, [return]),
     ok.
 
+
+otp_14378(Config) ->
+    Ts = [
+          {otp_14378_1,
+           <<"-export([t/0]).
+              -compile({nowarn_deprecated_function,{erlang,now,1}}).
+              t() ->
+                 erlang:now().">>,
+           [],
+           {warnings,[{4,erl_lint,
+                       {deprecated,{erlang,now,0},
+                        "Deprecated BIF. See the \"Time and Time Correction"
+                        " in Erlang\" chapter of the ERTS User's Guide"
+                        " for more information."}}]}}],
+    [] = run(Config, Ts),
+    ok.
 
 %% OTP-14323: Check the dialyzer attribute.
 otp_14323(Config) ->
@@ -3976,9 +4047,171 @@ otp_14323(Config) ->
                     {13,erl_lint,{undefined_function,{a,1}}},
                     {14,erl_lint,{bad_dialyzer_attribute,
                                   {nowarn_function,{a,-1}}}}],
-            []}}],
+            []}},
+          {otp_14323_2,
+           <<"-type t(_) :: atom().">>,
+           [],
+           {errors,[{1,erl_parse,"bad type variable"}],[]}}],
     [] = run(Config, Ts),
     ok.
+
+get_stacktrace(Config) ->
+    Ts = [{old_catch,
+           <<"t1() ->
+                  catch error(foo),
+                  erlang:get_stacktrace().
+           ">>,
+           [],
+           {warnings,[{3,erl_lint,{get_stacktrace,after_old_catch}}]}},
+          {nowarn_get_stacktrace,
+           <<"t1() ->
+                  catch error(foo),
+                  erlang:get_stacktrace().
+           ">>,
+           [nowarn_get_stacktrace],
+           []},
+          {try_catch,
+           <<"t1(X) ->
+                  try abs(X) of
+                    _ ->
+                      erlang:get_stacktrace()
+                  catch
+                      _:_ -> ok
+                  end.
+
+              t2() ->
+                  try error(foo)
+                  catch _:_ -> ok
+                  end,
+                  erlang:get_stacktrace().
+
+              t3() ->
+                  try error(foo)
+                  catch _:_ ->
+                    try error(bar)
+                    catch _:_ ->
+                      ok
+                    end,
+                    erlang:get_stacktrace()
+                  end.
+
+              no_warning(X) ->
+                  try
+                     abs(X)
+                  catch
+                     _:_ ->
+                       erlang:get_stacktrace()
+                  end.
+           ">>,
+           [],
+           {warnings,[{4,erl_lint,{get_stacktrace,wrong_part_of_try}},
+                      {13,erl_lint,{get_stacktrace,after_try}},
+                      {22,erl_lint,{get_stacktrace,after_try}}]}},
+          {multiple_catch_clauses,
+           <<"maybe_error(Arg) ->
+                try 5 / Arg
+                catch
+                    error:badarith ->
+                        _Stacktrace = erlang:get_stacktrace(),
+                        try io:nl()
+                        catch
+                            error:_ -> io:format('internal error')
+                        end;
+                    error:badarg ->
+                        _Stacktrace = erlang:get_stacktrace(),
+                        try io:format(qwe)
+                        catch
+                            error:_ -> io:format('internal error')
+                        end
+                end.
+             ">>,
+           [],
+           []}],
+
+    run(Config, Ts),
+    ok.
+
+stacktrace_syntax(Config) ->
+    Ts = [{guard,
+           <<"t1() ->
+                  try error(foo)
+                  catch _:_:Stk when is_number(Stk) -> ok
+                  end.
+           ">>,
+           [],
+           {errors,[{3,erl_lint,{stacktrace_guard,'Stk'}}],[]}},
+          {bound,
+           <<"t1() ->
+                  Stk = [],
+                  try error(foo)
+                  catch _:_:Stk -> ok
+                  end.
+           ">>,
+           [],
+           {errors,[{4,erl_lint,{stacktrace_bound,'Stk'}}],[]}},
+          {guard_and_bound,
+           <<"t1() ->
+                  Stk = [],
+                  try error(foo)
+                  catch _:_:Stk when is_integer(Stk) -> ok
+                  end.
+           ">>,
+           [],
+           {errors,[{4,erl_lint,{stacktrace_bound,'Stk'}},
+                    {4,erl_lint,{stacktrace_guard,'Stk'}}],[]}}
+         ],
+
+    run(Config, Ts),
+    ok.
+
+
+%% Unicode atoms.
+otp_14285(Config) ->
+    %% A small sample of all the errors and warnings in module erl_lint.
+    E1 = {redefine_function,{'кирилли́ческий атом',0}},
+    E2 = {attribute,'кирилли́ческий атом'},
+    E3 = {undefined_record,'кирилли́ческий атом'},
+    E4 = {undefined_bittype,'кирилли́ческий атом'},
+    "function 'кирилли́ческий атом'/0 already defined" = format_error(E1),
+    "attribute 'кирилли́ческий атом' after function definitions" =
+        format_error(E2),
+    "record 'кирилли́ческий атом' undefined" = format_error(E3),
+    "bit type 'кирилли́ческий атом' undefined" = format_error(E4),
+    Ts = [{otp_14285_1,
+           <<"'кирилли́ческий атом'() -> a.
+              'кирилли́ческий атом'() -> a.
+             "/utf8>>,
+           [],
+           {errors,
+            [{2,erl_lint,E1}],
+            []}},
+         {otp_14285_2,
+           <<"'кирилли́ческий атом'() -> a.
+              -'кирилли́ческий атом'(a).
+             "/utf8>>,
+           [],
+           {errors,
+            [{2,erl_lint,E2}],
+            []}},
+         {otp_14285_3,
+           <<"'кирилли́ческий атом'() -> #'кирилли́ческий атом'{}.
+             "/utf8>>,
+           [],
+           {errors,
+            [{1,erl_lint,E3}],
+            []}},
+         {otp_14285_4,
+           <<"t() -> <<34/'кирилли́ческий атом'>>.
+             "/utf8>>,
+           [],
+           {errors,
+            [{1,erl_lint,E4}],
+            []}}],
+    run(Config, Ts),
+    ok.
+
+format_error(E) ->
+    lists:flatten(erl_lint:format_error(E)).
 
 run(Config, Tests) ->
     F = fun({N,P,Ws,E}, BadL) ->

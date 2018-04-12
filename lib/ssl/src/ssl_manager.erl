@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@
 name(normal) ->
     ?MODULE;
 name(dist) ->
-    list_to_atom(atom_to_list(?MODULE) ++ "dist").
+    list_to_atom(atom_to_list(?MODULE) ++ "_dist").
 
 %%--------------------------------------------------------------------
 -spec start_link(list()) -> {ok, pid()} | ignore | {error, term()}.
@@ -563,7 +563,7 @@ server_register_session(Port, Session, #state{session_cache_server_max = Max,
 
 do_register_session(Key, Session, Max, Pid, Cache, CacheCb) ->
     try CacheCb:size(Cache) of
-	Max ->
+	Size when Size >= Max ->
 	    invalidate_session_cache(Pid, CacheCb, Cache);
 	_ ->	
 	    CacheCb:update(Cache, Key, Session),

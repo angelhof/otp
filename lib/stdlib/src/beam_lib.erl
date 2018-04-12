@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2000-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -148,7 +148,8 @@ chunks(File, Chunks, Options) ->
     try read_chunk_data(File, Chunks, Options)
     catch Error -> Error end.
 
--spec all_chunks(beam()) -> {'ok', 'beam_lib', [{chunkid(), dataB()}]}.
+-spec all_chunks(beam()) ->
+           {'ok', 'beam_lib', [{chunkid(), dataB()}]} | {'error', 'beam_lib', info_rsn()}.
 
 all_chunks(File) ->
     read_all_chunks(File).

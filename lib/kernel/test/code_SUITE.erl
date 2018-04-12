@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@
 	 purge_stacktrace/1, mult_lib_roots/1, bad_erl_libs/1,
 	 code_archive/1, code_archive2/1, on_load/1, on_load_binary/1,
 	 on_load_embedded/1, on_load_errors/1, on_load_update/1,
+         on_load_trace_on_load/1,
 	 on_load_purge/1, on_load_self_call/1, on_load_pending/1,
 	 on_load_deleted/1,
 	 big_boot_embedded/1,
@@ -66,14 +67,16 @@ all() ->
      ext_mod_dep, clash, where_is_file,
      purge_stacktrace, mult_lib_roots,
      bad_erl_libs, code_archive, code_archive2, on_load,
-     on_load_binary, on_load_embedded, on_load_errors, on_load_update,
+     on_load_binary, on_load_embedded, on_load_errors,
+     {group, sequence},
      on_load_purge, on_load_self_call, on_load_pending,
      on_load_deleted,
      module_status,
      big_boot_embedded, native_early_modules, get_mode, normalized_paths].
 
-groups() ->
-    [].
+%% These need to run in order
+groups() -> [{sequence, [sequence], [on_load_update,
+                                     on_load_trace_on_load]}].
 
 init_per_group(_GroupName, Config) ->
 	Config.
@@ -107,13 +110,18 @@ init_per_testcase(big_boot_embedded, Config) ->
 	_Else ->
 	    {skip, "Needs crypto!"}
     end;
-init_per_testcase(on_load_embedded, Config) ->
+init_per_testcase(on_load_embedded, Config0) ->
     LibRoot = code:lib_dir(),
     LinkName = filename:join(LibRoot, "on_load_app-1.0"),
-    [{link_name,LinkName}|Config];
+    Config = [{link_name,LinkName}|Config0],
+    init_per_testcase(Config);
 init_per_testcase(_Func, Config) ->
+    init_per_testcase(Config).
+
+init_per_testcase(Config) ->
     P = code:get_path(),
     [{code_path, P}|Config].
+
 
 end_per_testcase(module_status, Config) ->
     code:purge(?TESTMOD),
@@ -923,37 +931,34 @@ purge_stacktrace(Config) when is_list(Config) ->
     code:purge(code_b_test),
     try code_b_test:call(fun(b) -> ok end, a)
     catch
-	error:function_clause ->
+	error:function_clause:Stacktrace ->
 	    code:load_file(code_b_test),
-	    case erlang:get_stacktrace() of
+	    case Stacktrace of
 		      [{?MODULE,_,[a],_},
 		       {code_b_test,call,2,_},
 		       {?MODULE,purge_stacktrace,1,_}|_] ->
-			  false = code:purge(code_b_test),
-			  [] = erlang:get_stacktrace()
+			  false = code:purge(code_b_test)
 		  end
     end,
     try code_b_test:call(nofun, 2)
     catch
-	error:function_clause ->
+	error:function_clause:Stacktrace2 ->
 	    code:load_file(code_b_test),
-	    case erlang:get_stacktrace() of
+	    case Stacktrace2 of
 		      [{code_b_test,call,[nofun,2],_},
 		       {?MODULE,purge_stacktrace,1,_}|_] ->
-			  false = code:purge(code_b_test),
-			  [] = erlang:get_stacktrace()
+			  false = code:purge(code_b_test)
 		  end
     end,
     Args = [erlang,error,[badarg]],
     try code_b_test:call(erlang, error, [badarg,Args])
     catch
-	error:badarg ->
+	error:badarg:Stacktrace3 ->
 	    code:load_file(code_b_test),
-	    case erlang:get_stacktrace() of
+	    case Stacktrace3 of
 		      [{code_b_test,call,Args,_},
 		       {?MODULE,purge_stacktrace,1,_}|_] ->
-			  false = code:purge(code_b_test),
-			  [] = erlang:get_stacktrace()
+			  false = code:purge(code_b_test)
 		  end
     end,
     ok.
@@ -1488,7 +1493,7 @@ do_on_load_error(ReturnValue) ->
 	    {undef,[{on_load_error,main,[],_}|_]} = Exit
     end.
 
-on_load_update(_Config) ->
+on_load_update(Config) ->
     {Mod,Code1} = on_load_update_code(1),
     {module,Mod} = code:load_binary(Mod, "", Code1),
     42 = Mod:a(),
@@ -1498,7 +1503,7 @@ on_load_update(_Config) ->
     {Mod,Code2} = on_load_update_code(2),
     {error,on_load_failure} = code:load_binary(Mod, "", Code2),
     42 = Mod:a(),
-    100 = Mod:b(99),
+    78 = Mod:b(77),
     {'EXIT',{undef,_}} = (catch Mod:never()),
     4 = erlang:trace_pattern({Mod,'_','_'}, false),
 
@@ -1509,6 +1514,9 @@ on_load_update(_Config) ->
     {'EXIT',{undef,_}} = (catch Mod:b(10)),
     {'EXIT',{undef,_}} = (catch Mod:never()),
 
+    code:purge(Mod),
+    code:delete(Mod),
+    code:purge(Mod),
     ok.
 
 on_load_update_code(Version) ->
@@ -1539,6 +1547,31 @@ on_load_update_code_1(3, Mod) ->
 	"-on_load(f/0).\n",
 	"f() -> ok.\n",
 	"c() -> 100.\n"]).
+
+%% Test -on_load while trace feature 'on_load' is enabled (OTP-14612)
+on_load_trace_on_load(Config) ->
+    Papa = self(),
+    Tracer = spawn_link(fun F() -> receive M -> Papa ! M end, F() end),
+    {tracer,[]} = erlang:trace_info(self(),tracer),
+    erlang:trace(self(), true, [call, {tracer, Tracer}]),
+    erlang:trace_pattern(on_load, true, []),
+    on_load_update(Config),
+    erlang:trace_pattern(on_load, false, []),
+    erlang:trace(self(), false, [call]),
+
+    Ms = flush(),
+    [{trace, Papa, call, {on_load_update_code, a, []}},
+     {trace, Papa, call, {on_load_update_code, b, [99]}},
+     {trace, Papa, call, {on_load_update_code, c, []}}] = Ms,
+
+    exit(Tracer, normal),
+    ok.
+
+flush() ->
+    receive M -> [M | flush()]
+    after 100 -> []
+    end.
+
 
 on_load_purge(_Config) ->
     Mod = ?FUNCTION_NAME,
@@ -1786,6 +1819,19 @@ do_normalized_paths([]) ->
 
 %% Test that module_status/1 behaves as expected
 module_status(_Config) ->
+    case test_server:is_cover() of
+        true ->
+            module_status();
+        false ->
+            %% Make sure that we terminate the cover server.
+            try
+                module_status()
+            after
+                cover:stop()
+            end
+    end.
+
+module_status() ->
     %% basics
     not_loaded = code:module_status(fubar),     % nonexisting
     {file, preloaded} = code:is_loaded(erlang),

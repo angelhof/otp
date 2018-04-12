@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -233,9 +233,8 @@ call([{Hook, call_id, NextFun} | Rest], Config, Meta, Hooks) ->
 		     Rest ++ [{NewId, call_init}, {NewId,NextFun}]}
 	    end,
 	call(resort(NewRest,NewHooks,Meta), Config, Meta, NewHooks)
-    catch Error:Reason ->
-	    Trace = erlang:get_stacktrace(),
-	    ct_logs:log("Suite Hook","Failed to start a CTH: ~p:~p",
+    catch Error:Reason:Trace ->
+	    ct_logs:log("Suite Hook","Failed to start a CTH: ~tp:~tp",
 			[Error,{Reason,Trace}]),
 	    call([], {fail,"Failed to start CTH"
 		      ", see the CT Log for details"}, Meta, Hooks)
@@ -422,13 +421,12 @@ catch_apply(M,F,A, Default, Fallback) ->
 catch_apply(M,F,A) ->
     try
         erlang:apply(M,F,A)
-    catch _:Reason ->
-            Trace = erlang:get_stacktrace(),
-            ct_logs:log("Suite Hook","Call to CTH failed: ~w:~p",
+    catch _:Reason:Trace ->
+            ct_logs:log("Suite Hook","Call to CTH failed: ~w:~tp",
                             [error,{Reason,Trace}]),
             throw({error_in_cth_call,
                    lists:flatten(
-                     io_lib:format("~w:~w/~w CTH call failed",
+                     io_lib:format("~w:~tw/~w CTH call failed",
                                    [M,F,length(A)]))})
     end.
 

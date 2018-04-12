@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,7 +28,11 @@
 	 init_per_suite/1, end_per_suite/1, 
 	 init_per_testcase/2, end_per_testcase/2]).
 
--compile(export_all).
+-export([silent_start/1, create_window/1, several_apps/1, wx_api/1, wx_misc/1,
+         data_types/1, wx_object/1, undef_in_handle_info/1, undef_in_terminate/1,
+         undef_handle_event/1, undef_handle_call/1, undef_handle_cast/1, undef_handle_info/1,
+         undef_code_change/1, undef_terminate1/1, undef_terminate2/1
+        ]).
 
 -include("wx_test_lib.hrl").
 

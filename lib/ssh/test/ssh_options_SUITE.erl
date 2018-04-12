@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,7 +36,9 @@
 	 id_string_no_opt_client/1, 
 	 id_string_no_opt_server/1, 
 	 id_string_own_string_client/1, 
+	 id_string_own_string_client_trail_space/1, 
 	 id_string_own_string_server/1, 
+	 id_string_own_string_server_trail_space/1, 
 	 id_string_random_client/1, 
 	 id_string_random_server/1, 
 	 max_sessions_sftp_start_channel_parallel/1, 
@@ -68,7 +70,8 @@
 	 hostkey_fingerprint_check_sha256/1,
 	 hostkey_fingerprint_check_sha384/1,
 	 hostkey_fingerprint_check_sha512/1,
-	 hostkey_fingerprint_check_list/1
+	 hostkey_fingerprint_check_list/1,
+         save_accepted_host_option/1
 	]).
 
 %%% Common test callbacks
@@ -116,10 +119,13 @@ all() ->
      hostkey_fingerprint_check_list,
      id_string_no_opt_client,
      id_string_own_string_client,
+     id_string_own_string_client_trail_space,
      id_string_random_client,
      id_string_no_opt_server,
      id_string_own_string_server,
+     id_string_own_string_server_trail_space,
      id_string_random_server,
+     save_accepted_host_option,
      {group, hardening_tests}
     ].
 
@@ -202,32 +208,23 @@ end_per_group(_, Config) ->
 %%--------------------------------------------------------------------
 init_per_testcase(_TestCase, Config) ->
     ssh:start(),
-    Config.
-
-end_per_testcase(TestCase, Config) when TestCase == server_password_option;
-					TestCase == server_userpassword_option;
-					TestCase == server_pwdfun_option;
-					TestCase == server_pwdfun_4_option ->
+    %% Create a clean user_dir
     UserDir = filename:join(proplists:get_value(priv_dir, Config), nopubkey),
     ssh_test_lib:del_dirs(UserDir),
-    end_per_testcase(Config);
-end_per_testcase(_TestCase, Config) ->
-    end_per_testcase(Config).
+    file:make_dir(UserDir),
+    [{user_dir,UserDir}|Config].
 
-end_per_testcase(_Config) ->    
+end_per_testcase(_TestCase, Config) ->
     ssh:stop(),
     ok.
 
 %%--------------------------------------------------------------------
 %% Test Cases --------------------------------------------------------
 %%--------------------------------------------------------------------
-%%--------------------------------------------------------------------
 
 %%% validate to server that uses the 'password' option
 server_password_option(Config) when is_list(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
 					     {user_dir, UserDir},
@@ -258,12 +255,10 @@ server_password_option(Config) when is_list(Config) ->
 
 %%% validate to server that uses the 'password' option
 server_userpassword_option(Config) when is_list(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),	  
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
-					     {user_dir, PrivDir},
+					     {user_dir, UserDir},
 					     {user_passwords, [{"vego", "morot"}]}]),
 
     ConnectionRef =
@@ -293,15 +288,13 @@ server_userpassword_option(Config) when is_list(Config) ->
 %%--------------------------------------------------------------------
 %%% validate to server that uses the 'pwdfun' option
 server_pwdfun_option(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),	  
     CHKPWD = fun("foo",Pwd) -> Pwd=="bar";
 		(_,_) -> false
 	     end,
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
-					     {user_dir, PrivDir},
+					     {user_dir, UserDir},
 					     {pwdfun,CHKPWD}]),
     ConnectionRef =
 	ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
@@ -331,9 +324,7 @@ server_pwdfun_option(Config) ->
 %%--------------------------------------------------------------------
 %%% validate to server that uses the 'pwdfun/4' option
 server_pwdfun_4_option(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),	  
     PWDFUN = fun("foo",Pwd,{_,_},undefined) -> Pwd=="bar";
 		("fie",Pwd,{_,_},undefined) -> {Pwd=="bar",new_state};
@@ -341,7 +332,7 @@ server_pwdfun_4_option(Config) ->
 		(_,_,_,_) -> false
 	     end,
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
-					     {user_dir, PrivDir},
+					     {user_dir, UserDir},
 					     {pwdfun,PWDFUN}]),
     ConnectionRef1 =
 	ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
@@ -391,9 +382,7 @@ server_pwdfun_4_option(Config) ->
     
 %%--------------------------------------------------------------------
 server_pwdfun_4_option_repeat(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),	  
     %% Test that the state works
     Parent = self(),
@@ -402,7 +391,7 @@ server_pwdfun_4_option_repeat(Config) ->
 		(_,P,_,S) -> Parent!{P,S},          {false,S+1}
 	     end,
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
-					     {user_dir, PrivDir},
+					     {user_dir, UserDir},
 					     {auth_methods,"keyboard-interactive"},
 					     {pwdfun,PWDFUN}]),
 
@@ -486,9 +475,7 @@ user_dir_option(Config) ->
 %%--------------------------------------------------------------------
 %%% validate client that uses the 'ssh_msg_debug_fun' option
 ssh_msg_debug_fun_option_client(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
@@ -526,9 +513,7 @@ ssh_msg_debug_fun_option_client(Config) ->
 
 %%--------------------------------------------------------------------
 connectfun_disconnectfun_server(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -555,14 +540,14 @@ connectfun_disconnectfun_server(Config) ->
 		{disconnect,Ref,R} ->
 		    ct:log("Disconnect result: ~p",[R]),
 		    ssh:stop_daemon(Pid)
-	    after 5000 ->
+	    after 10000 ->
 		    receive
 			X -> ct:log("received ~p",[X])
 		    after 0 -> ok
 		    end,
 		    {fail, "No disconnectfun action"}
 	    end
-    after 5000 ->
+    after 10000 ->
 	    receive
 		X -> ct:log("received ~p",[X])
 	    after 0 -> ok
@@ -572,9 +557,7 @@ connectfun_disconnectfun_server(Config) ->
 
 %%--------------------------------------------------------------------
 connectfun_disconnectfun_client(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -603,9 +586,7 @@ connectfun_disconnectfun_client(Config) ->
 %%--------------------------------------------------------------------
 %%% validate client that uses the 'ssh_msg_debug_fun' option
 ssh_msg_debug_fun_option_server(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -647,9 +628,7 @@ ssh_msg_debug_fun_option_server(Config) ->
 
 %%--------------------------------------------------------------------
 disconnectfun_option_server(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -682,9 +661,7 @@ disconnectfun_option_server(Config) ->
 
 %%--------------------------------------------------------------------
 disconnectfun_option_client(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -716,9 +693,7 @@ disconnectfun_option_client(Config) ->
 
 %%--------------------------------------------------------------------
 unexpectedfun_option_server(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -759,9 +734,7 @@ unexpectedfun_option_server(Config) ->
 
 %%--------------------------------------------------------------------
 unexpectedfun_option_client(Config) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
 
     Parent = self(),
@@ -836,13 +809,8 @@ supported_hash(HashAlg) ->
 
 
 really_do_hostkey_fingerprint_check(Config, HashAlg) ->
-    PrivDir = proplists:get_value(priv_dir, Config),
-    UserDirServer = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDirServer),
+    UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),
-
-    UserDirClient = 
-	ssh_test_lib:create_random_dir(Config), % Ensure no 'known_hosts' disturbs
 
     %% All host key fingerprints.  Trust that public_key has checked the ssh_hostkey_fingerprint
     %% function since that function is used by the ssh client...
@@ -869,7 +837,7 @@ really_do_hostkey_fingerprint_check(Config, HashAlg) ->
 
     %% Start daemon with the public keys that we got fingerprints from
     {Pid, Host0, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
-					     {user_dir, UserDirServer},
+					     {user_dir, UserDir},
 					     {password, "morot"}]),
     Host = ssh_test_lib:ntoa(Host0),
     FP_check_fun = fun(PeerName, FP) ->
@@ -892,7 +860,8 @@ really_do_hostkey_fingerprint_check(Config, HashAlg) ->
 				       end},
 				      {user, "foo"},
 				      {password, "morot"},
-				      {user_dir, UserDirClient},
+				      {user_dir, UserDir},
+                                      {save_accepted_host, false}, % Ensure no 'known_hosts' disturbs
 				      {user_interaction, false}]),
     ssh:stop_daemon(Pid).
 
@@ -983,9 +952,7 @@ ms_passed(T0) ->
 %%--------------------------------------------------------------------
 ssh_daemon_minimal_remote_max_packet_size_option(Config) ->
     SystemDir = proplists:get_value(data_dir, Config),
-    PrivDir = proplists:get_value(priv_dir, Config), 
-    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
-    file:make_dir(UserDir),
+    UserDir = proplists:get_value(user_dir, Config), 
     
     {Server, Host, Port} = ssh_test_lib:daemon([{system_dir, SystemDir},
 						{user_dir, UserDir},
@@ -1035,6 +1002,19 @@ id_string_own_string_client(Config) ->
     end.
 
 %%--------------------------------------------------------------------
+id_string_own_string_client_trail_space(Config) ->
+    {Server, _Host, Port} = fake_daemon(Config),
+    {error,_} = ssh:connect("localhost", Port, [{id_string,"Pelle "}], 1000),
+    receive
+	{id,Server,"SSH-2.0-Pelle \r\n"} ->
+	    ok;
+	{id,Server,Other} ->
+	    ct:fail("Unexpected id: ~s.",[Other])
+    after 5000 ->
+	    {fail,timeout}
+    end.
+
+%%--------------------------------------------------------------------
 id_string_random_client(Config) ->
     {Server, _Host, Port} = fake_daemon(Config),
     {error,_} = ssh:connect("localhost", Port, [{id_string,random}], 1000),
@@ -1061,6 +1041,12 @@ id_string_own_string_server(Config) ->
     {_Server, Host, Port} = ssh_test_lib:std_daemon(Config, [{id_string,"Olle"}]),
     {ok,S1}=ssh_test_lib:gen_tcp_connect(Host,Port,[{active,false},{packet,line}]),
     {ok,"SSH-2.0-Olle\r\n"} = gen_tcp:recv(S1, 0, 2000).
+
+%%--------------------------------------------------------------------
+id_string_own_string_server_trail_space(Config) ->
+    {_Server, Host, Port} = ssh_test_lib:std_daemon(Config, [{id_string,"Olle "}]),
+    {ok,S1}=ssh_test_lib:gen_tcp_connect(Host,Port,[{active,false},{packet,line}]),
+    {ok,"SSH-2.0-Olle \r\n"} = gen_tcp:recv(S1, 0, 2000).
 
 %%--------------------------------------------------------------------
 id_string_random_server(Config) ->
@@ -1289,6 +1275,33 @@ try_to_connect(Connect, Host, Port, Pid, Tref, N) ->
 		     try_to_connect(Connect, Host, Port, Pid, Tref, N+1)
 	     end
      end.
+
+%%--------------------------------------------------------------------
+save_accepted_host_option(Config) ->
+    UserDir = proplists:get_value(user_dir, Config),
+    KnownHosts = filename:join(UserDir, "known_hosts"),
+    SysDir = proplists:get_value(data_dir, Config),	  
+    {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
+					     {user_dir, UserDir},
+					     {user_passwords, [{"vego", "morot"}]}
+                                            ]),
+    {error,enoent} = file:read_file(KnownHosts),
+
+    {ok,_C1} = ssh:connect(Host, Port, [{silently_accept_hosts, true},
+                                        {user, "vego"},
+                                        {password, "morot"},
+                                        {user_interaction, false},
+                                        {save_accepted_host, false},
+                                        {user_dir, UserDir}]),
+    {error,enoent} = file:read_file(KnownHosts),
+    
+    {ok,_C2} = ssh:connect(Host, Port, [{silently_accept_hosts, true},
+                                        {user, "vego"},
+                                        {password, "morot"},
+                                        {user_interaction, false},
+                                        {user_dir, UserDir}]),
+    {ok,_} = file:read_file(KnownHosts),
+    ssh:stop_daemon(Pid).
 
 %%--------------------------------------------------------------------
 %% Internal functions ------------------------------------------------

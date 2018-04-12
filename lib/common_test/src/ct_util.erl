@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2003-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -65,6 +65,9 @@
 
 -export([warn_duplicates/1]).
 
+-export([mark_process/0, mark_process/1, is_marked/1, is_marked/2,
+         remaining_test_procs/0]).
+
 -export([get_profile_data/0, get_profile_data/1,
 	 get_profile_data/2, open_url/3]).
 
@@ -126,6 +129,7 @@ start(Mode, LogDir, Verbosity) ->
 do_start(Parent, Mode, LogDir, Verbosity) ->
     process_flag(trap_exit,true),
     register(ct_util_server,self()),
+    mark_process(),
     create_table(?conn_table,#conn.handle),
     create_table(?board_table,2),
     create_table(?suite_table,#suite_data.key),
@@ -201,22 +205,14 @@ do_start(Parent, Mode, LogDir, Verbosity) ->
 	ok ->
 	    Parent ! {self(),started};
 	{fail,CTHReason} ->
-	    ErrorInfo = if is_atom(CTHReason) ->
-				io_lib:format("{~p,~p}",
-					      [CTHReason,
-					       erlang:get_stacktrace()]);
-			   true ->
-				CTHReason
-			end,
-	    ct_logs:tc_print('Suite Callback',ErrorInfo,[]),
+	    ct_logs:tc_print('Suite Callback',CTHReason,[]),
 	    self() ! {{stop,{self(),{user_error,CTHReason}}},
 		      {Parent,make_ref()}}
     catch
-	_:CTHReason ->
+	_:CTHReason:StackTrace ->
 	    ErrorInfo = if is_atom(CTHReason) ->
-				io_lib:format("{~p,~p}",
-					      [CTHReason,
-					       erlang:get_stacktrace()]);
+				io_lib:format("{~tp,~tp}",
+					      [CTHReason, StackTrace]);
 			   true ->
 				CTHReason
 			end,
@@ -497,7 +493,7 @@ loop(Mode,TestData,StartDir) ->
 					 ?MAX_IMPORTANCE,
 					 "CT Error Notification",
 					 "Connection process died: "
-					 "Pid: ~w, Address: ~p, "
+					 "Pid: ~w, Address: ~tp, "
 					 "Callback: ~w\n"
 					 "Reason: ~ts\n\n",
 					 [Pid,A,CB,ErrorHtml]),
@@ -508,7 +504,7 @@ loop(Mode,TestData,StartDir) ->
 		_ ->
 		    %% Let process crash in case of error, this shouldn't happen!
 		    io:format("\n\nct_util_server got EXIT "
-			      "from ~w: ~p\n\n", [Pid,Reason]),
+			      "from ~w: ~tp\n\n", [Pid,Reason]),
 		    ok = file:set_cwd(StartDir),
 		    exit(Reason)
 	    end
@@ -802,25 +798,25 @@ parse_table(Data) ->
     {Heading,Lines}.
 
 get_headings(["|" ++ Headings | Rest]) ->
-    {remove_space(string:tokens(Headings, "|"),[]), Rest};
+    {remove_space(string:lexemes(Headings, "|"),[]), Rest};
 get_headings([_ | Rest]) ->
     get_headings(Rest);
 get_headings([]) ->
     {{},[]}.
 
 parse_row(["|" ++ _ = Row | T], Rows, NumCols) when NumCols > 1 ->
-    case string:tokens(Row, "|") of
+    case string:lexemes(Row, "|") of
 	Values when length(Values) =:= NumCols ->
 	    parse_row(T,[remove_space(Values,[])|Rows], NumCols);
 	Values when length(Values) < NumCols ->
 	    parse_row([Row ++"\n"++ hd(T) | tl(T)], Rows, NumCols)
     end;
-parse_row(["|" ++ _ = Row | T], Rows, 1 = NumCols) ->
-    case string:rchr(Row, $|) of
-	1 ->
+parse_row(["|" ++ X = Row | T], Rows, 1 = NumCols) ->
+    case string:find(X, [$|]) of
+	nomatch ->
 	    parse_row([Row ++"\n"++hd(T) | tl(T)], Rows, NumCols);
 	_Else ->
-	    parse_row(T, [remove_space(string:tokens(Row,"|"),[])|Rows],
+	    parse_row(T, [remove_space(string:lexemes(Row,"|"),[])|Rows],
 		      NumCols)
     end;
 parse_row([_Skip | T], Rows, NumCols) ->
@@ -829,7 +825,7 @@ parse_row([], Rows, _NumCols) ->
     lists:reverse(Rows).
 
 remove_space([Str|Rest],Acc) ->
-    remove_space(Rest,[string:strip(string:strip(Str),both,$')|Acc]);
+    remove_space(Rest,[string:trim(string:trim(Str,both,[$\s]),both,[$'])|Acc]);
 remove_space([],Acc) ->
     list_to_tuple(lists:reverse(Acc)).
 
@@ -839,7 +835,7 @@ remove_space([],Acc) ->
 %%%
 %%% @doc
 is_test_dir(Dir) ->
-    lists:last(string:tokens(filename:basename(Dir), "_")) == "test".
+    lists:last(string:lexemes(filename:basename(Dir), "_")) == "test".
 
 %%%-----------------------------------------------------------------
 %%% @spec 
@@ -941,6 +937,70 @@ warn_duplicates(Suites) ->
 %%% @spec
 %%%
 %%% @doc
+mark_process() ->
+    mark_process(system).
+
+mark_process(Type) ->
+    put(ct_process_type, Type).
+
+is_marked(Pid) ->
+    is_marked(Pid, system).
+
+is_marked(Pid, Type) ->
+    case process_info(Pid, dictionary) of
+        {dictionary,List} ->
+            Type == proplists:get_value(ct_process_type, List);
+        undefined ->
+            false
+    end.
+
+remaining_test_procs() ->
+    Procs = processes(),
+    {SharedGL,OtherGLs,Procs2} =
+        lists:foldl(
+          fun(Pid, ProcTypes = {Shared,Other,Procs1}) ->
+                  case is_marked(Pid, group_leader) of
+                      true ->
+                          if not is_pid(Shared) ->
+                                  case test_server_io:get_gl(true) of
+                                      Pid ->
+                                          {Pid,Other,
+                                           lists:delete(Pid,Procs1)};
+                                      _ ->
+                                          {Shared,[Pid|Other],Procs1}
+                                  end;
+                             true ->          % SharedGL already found
+                                  {Shared,[Pid|Other],Procs1}
+                          end;
+                      false ->
+                          case is_marked(Pid) of
+                              true ->
+                                  {Shared,Other,lists:delete(Pid,Procs1)};
+                              false ->
+                                  ProcTypes
+                          end
+                  end
+          end, {undefined,[],Procs}, Procs),
+
+    AllGLs = [SharedGL | OtherGLs],
+    TestProcs =
+        lists:flatmap(fun(Pid) ->
+                              case process_info(Pid, group_leader) of
+                                  {group_leader,GL} ->
+                                      case lists:member(GL, AllGLs) of
+                                          true  -> [{Pid,GL}];
+                                          false -> []
+                                      end;
+                                  undefined ->
+                                      []
+                              end
+                      end, Procs2),
+    {TestProcs, SharedGL, OtherGLs}.
+
+%%%-----------------------------------------------------------------
+%%% @spec
+%%%
+%%% @doc
 get_profile_data() ->
     get_profile_data(all).
 
@@ -984,12 +1044,12 @@ get_profile_data(Profile, Key, StartDir) ->
 	end,
     case Result of
 	{error,enoent} when Profile /= default ->
-	    io:format(?def_gl, "~nERROR! Missing profile file ~p~n", [File]),
+	    io:format(?def_gl, "~nERROR! Missing profile file ~tp~n", [File]),
 	    undefined;
 	{error,enoent} when Profile == default ->
 	    undefined;
 	{error,Reason} ->
-	    io:format(?def_gl,"~nERROR! Error in profile file ~p: ~p~n",
+	    io:format(?def_gl,"~nERROR! Error in profile file ~tp: ~tp~n",
 		      [WhichFile,Reason]),
 	    undefined;
 	{ok,Data} ->
@@ -1000,7 +1060,7 @@ get_profile_data(Profile, Key, StartDir) ->
 			    Data;
 			_ ->
 			    io:format(?def_gl,
-				      "~nERROR! Invalid profile data in ~p~n",
+				      "~nERROR! Invalid profile data in ~tp~n",
 				      [WhichFile]),
 			    []
 		    end,
@@ -1084,7 +1144,7 @@ open_url(iexplore, Args, URL) ->
     _ = case win32reg:values(R) of
 	{ok, Paths} ->
 	    Path = proplists:get_value(default, Paths),
-	    [Cmd | _] = string:tokens(Path, "%"),
+	    [Cmd | _] = string:lexemes(Path, "%"),
 	    Cmd1 = Cmd ++ " " ++ Args ++ " " ++ URL,
 	    io:format(?def_gl, "~nOpening ~ts with command:~n  ~ts~n", [URL,Cmd1]),
 	    open_port({spawn,Cmd1}, []);

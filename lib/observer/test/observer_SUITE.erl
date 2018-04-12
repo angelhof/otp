@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -113,8 +113,14 @@ appup_file(Config) when is_list(Config) ->
 basic(suite) -> [];
 basic(doc) -> [""];
 basic(Config) when is_list(Config) ->
-    timer:send_after(100, "foobar"), %% Otherwise the timer server gets added to procs
+    %% Start these before
+    wx:new(),
+    wx:destroy(),
+    timer:send_after(100, "foobar"),
+    {foo, node@machine} ! dummy_msg,  %% start distribution stuff
+    %% Otherwise ever lasting servers gets added to procs
     ProcsBefore = processes(),
+    ProcInfoBefore = [{P,process_info(P)} || P <- ProcsBefore],
     NumProcsBefore = length(ProcsBefore),
 
     ok = observer:start(),
@@ -145,8 +151,10 @@ basic(Config) when is_list(Config) ->
     ProcsAfter = processes(),
     NumProcsAfter = length(ProcsAfter),
     if NumProcsAfter=/=NumProcsBefore ->
+            BeforeNotAfter = ProcsBefore -- ProcsAfter,
 	    ct:log("Before but not after:~n~p~n",
-		   [[{P,process_info(P)} || P <- ProcsBefore -- ProcsAfter]]),
+		   [[{P,I} || {P,I} <- ProcInfoBefore,
+                              lists:member(P,BeforeNotAfter)]]),
 	    ct:log("After but not before:~n~p~n",
 		   [[{P,process_info(P)} || P <- ProcsAfter -- ProcsBefore]]),
 	    ct:fail("leaking processes");
@@ -304,10 +312,10 @@ table_win(Config) when is_list(Config) ->
 %% Test PR-1296/OTP-14151
 %% Clicking a link to a port before the port tab has been activated the
 %% first time crashes observer.
-port_win_when_tab_not_initiated(Config) ->
+port_win_when_tab_not_initiated(_Config) ->
     {ok,Port} = gen_tcp:listen(0,[]),
     ok = observer:start(),
-    Notebook = setup_whitebox_testing(),
+    _Notebook = setup_whitebox_testing(),
     observer ! {open_link,erlang:port_to_list(Port)},
     timer:sleep(1000),
     observer:stop(),

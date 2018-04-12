@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,15 +36,14 @@ init(_) ->
                  intensity =>   10,
                  period    => 3600
                 },
-    ChildSpecs = [#{id       => Module,
-                    start    => {Module, start_link, []},
-                    restart  => permanent,
-                    shutdown => 4000, %brutal_kill,
-                    type     => supervisor,
-                    modules  => [Module]
+    ChildSpecs = [#{id       => sshd_sup,
+                    start    => {sshd_sup, start_link, []},
+                    type     => supervisor
+                   },
+                  #{id       => sshc_sup,
+                    start    => {sshc_sup, start_link, []},
+                    type     => supervisor
                    }
-                  || Module <- [sshd_sup,
-                                sshc_sup]
                  ],
     {ok, {SupFlags,ChildSpecs}}.
 

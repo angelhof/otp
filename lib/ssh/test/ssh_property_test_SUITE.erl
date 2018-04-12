@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -54,6 +54,9 @@ groups() ->
 %%% First prepare Config and compile the property tests for the found tool:
 init_per_suite(Config) ->
     ct_property_test:init_per_suite(Config).
+
+end_per_suite(Config) ->
+    Config.
 
 %%% One group in this suite happens to support only QuickCheck, so skip it
 %%% if we run proper.

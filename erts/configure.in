@@ -2,7 +2,7 @@ dnl Process this file with autoconf to produce a configure script. -*-m4-*-
 
 dnl %CopyrightBegin%
 dnl
-dnl Copyright Ericsson AB 1997-2016. All Rights Reserved.
+dnl Copyright Ericsson AB 1997-2017. All Rights Reserved.
 dnl
 dnl Licensed under the Apache License, Version 2.0 (the "License");
 dnl you may not use this file except in compliance with the License.
@@ -113,31 +113,13 @@ AS_HELP_STRING([--enable-bootstrap-only],
 	# Disable stuff not necessary in a bootstrap only system in order
 	# to speed up things by reducing the amount of stuff needing to be
 	# built...
-	enable_threads=no
-	enable_smp_support=no
 	with_termcap=no
 	with_ssl=no
 	with_ssl_zlib=no
 	enable_hipe=no
 	enable_sctp=no
-        enable_dirty_schedulers=no
-  fi	
+  fi
 ])
-
-AC_ARG_ENABLE(threads,
-AS_HELP_STRING([--enable-threads], [enable async thread support])
-AS_HELP_STRING([--disable-threads], [disable async thread support]),
-[ case "$enableval" in
-    no) enable_threads=no ;;
-    *)  enable_threads=yes ;;
-  esac ], enable_threads=unknown)
-
-AC_ARG_ENABLE(dirty-schedulers,
-AS_HELP_STRING([--enable-dirty-schedulers], [enable dirty scheduler support]),
-[ case "$enableval" in
-    no) enable_dirty_schedulers=no ;;
-    *)  enable_dirty_schedulers=yes ;;
-  esac ], enable_dirty_schedulers=default)
 
 AC_ARG_ENABLE(dirty-schedulers-test,
 AS_HELP_STRING([--enable-dirty-schedulers-test], [enable dirty scheduler test (for debugging purposes)]),
@@ -145,22 +127,6 @@ AS_HELP_STRING([--enable-dirty-schedulers-test], [enable dirty scheduler test (f
     yes)  enable_dirty_schedulers_test=yes ;;
     *) enable_dirty_schedulers_test=no ;;
   esac ], enable_dirty_schedulers_test=no)
-
-AC_ARG_ENABLE(smp-support,
-AS_HELP_STRING([--enable-smp-support], [enable smp support])
-AS_HELP_STRING([--disable-smp-support], [disable smp support]),
-[ case "$enableval" in
-    no) enable_smp_support=no ;;
-    *)  enable_smp_support=yes ;;
-  esac ], enable_smp_support=unknown)
-
-AC_ARG_ENABLE(plain-emulator,
-AS_HELP_STRING([--enable-plain-emulator], [enable plain emulator])
-AS_HELP_STRING([--disable-plain-emulator], [disable plain emulator]),
-[ case "$enableval" in
-    no) enable_plain_emulator=no ;;
-    *)  enable_plain_emulator=yes ;;
-  esac ], enable_plain_emulator=unknown)
 
 AC_ARG_ENABLE(smp-require-native-atomics,
 	      AS_HELP_STRING([--disable-smp-require-native-atomics],
@@ -580,6 +546,90 @@ AC_SUBST(WFLAGS)
 AC_SUBST(WERRORFLAGS)
 AC_SUBST(CFLAG_RUNTIME_LIBRARY_PATH)
 
+## Check if we can do profile guided optimization of beam_emu
+LM_CHECK_ENABLE_CFLAG([-fprofile-generate -Werror],[PROFILE_GENERATE])
+LM_CHECK_ENABLE_CFLAG([-fprofile-use -Werror],[PROFILE_USE])
+
+## Check if this is clang
+LM_CHECK_ENABLE_CFLAG([-fprofile-instr-generate -Werror],[PROFILE_INSTR_GENERATE])
+if test "X$PROFILE_INSTR_GENERATE" = "Xtrue"; then
+   # It was clang, now we also have to check if we have llvm-profdata and that
+   # we can link programs with -fprofile-instr-use
+   saved_CFLAGS=$CFLAGS;
+   CFLAGS="-fprofile-instr-generate -Werror $saved_CFLAGS"
+   AC_RUN_IFELSE([AC_LANG_PROGRAM([],[])],
+     [AC_CHECK_PROGS([LLVM_PROFDATA], [llvm-profdata])
+      AC_CHECK_PROGS([XCRUN], [xcrun])
+      if test "X$XCRUN" != "X" -a "X$LLVM_PROFDATA" = "X"; then
+        AC_MSG_CHECKING([for $XCRUN llvm-profdata])
+        if $XCRUN llvm-profdata --help 2>& AS_MESSAGE_LOG_FD >& AS_MESSAGE_LOG_FD; then
+          LLVM_PROFDATA="$XCRUN llvm-profdata"
+          AC_MSG_RESULT([yes])
+        else
+          AC_MSG_RESULT([no])
+        fi
+      fi
+      AC_SUBST(LLVM_PROFDATA)
+      if test "X$LLVM_PROFDATA" != "X"; then
+        CFLAGS="-fprofile-instr-use=default.profdata -Werror $saved_CFLAGS";
+        $LLVM_PROFDATA merge -output=default.profdata *.profraw;
+        AC_MSG_CHECKING([whether gcc accepts -fprofile-instr-use=default.profdata -Werror])
+        AC_COMPILE_IFELSE([],
+          [AC_MSG_RESULT([yes])
+           PROFILE_INSTR_USE=true],
+          [AC_MSG_RESULT([no])
+           PROFILE_INSTR_USE=false])
+        rm -f default.profdata
+      fi],
+     [])
+   rm -f *.profraw
+   CFLAGS=$saved_CFLAGS;
+fi
+
+AC_ARG_ENABLE(pgo,
+AS_HELP_STRING([--enable-pgo],
+               [build erts using PGO (profile guided optimization)]),
+[ case "$enableval" in
+    no) enable_pgo=no ;;
+    *)	enable_pgo=yes ;;
+  esac
+],enable_pgo=default)
+
+LM_CHECK_ENABLE_CFLAG([-fprofile-use -fprofile-correction -Werror],[PROFILE_CORRECTION])
+
+USE_PGO=false
+AC_MSG_CHECKING([whether to do PGO of erts])
+if test $enable_pgo = no; then
+  AC_MSG_RESULT([no, disabled by user])
+elif test $CROSS_COMPILING = yes; then
+  if $enable_pgo = yes; then
+    AC_MSG_ERROR(cannot use PGO when cross-compiling)
+  else
+    AC_MSG_RESULT([no, cross compiling])
+  fi
+elif test "X$host" = "Xwin32"; then
+  AC_MSG_RESULT([no, not supported in windows])
+elif test "X$PROFILE_GENERATE" = "Xtrue" -a "X$PROFILE_USE" = "Xtrue" -a "X$PROFILE_CORRECTION" = "Xtrue"; then
+  ## We need -fprofile-generate and -fprofile-correction support to use PGO with
+  ## gcc as multiple threads run within the executed object files
+  USE_PGO=true
+  PROFILE_COMPILER=gcc
+  AC_MSG_RESULT([yes, using -fprofile-generate -fprofile-correction])
+elif test "X$PROFILE_INSTR_GENERATE" = "Xtrue" -a "X$PROFILE_INSTR_USE" = "Xtrue"; then
+  USE_PGO=true
+  PROFILE_COMPILER=clang
+  AC_MSG_RESULT([yes, using -fprofile-instr-generate])
+else
+  if $enable_pgo = yes; then
+    AC_MSG_ERROR(cannot use PGO with this compiler)
+  else
+    AC_MSG_RESULT([no])
+  fi
+fi
+
+AC_SUBST(USE_PGO)
+AC_SUBST(PROFILE_COMPILER)
+
 AC_CHECK_SIZEOF(void *) # Needed for ARCH and smp checks below
 if test "x$ac_cv_sizeof_void_p" = x8; then
   AC_SUBST(EXTERNAL_WORD_SIZE, 64)
@@ -640,6 +690,7 @@ case $chk_arch_ in
     armv7l)	ARCH=arm;;
     armv7hl)	ARCH=arm;;
     tile)	ARCH=tile;;
+    e2k)       ARCH=e2k;;
     *)	 	ARCH=noarch;;
 esac
 
@@ -996,80 +1047,12 @@ dnl are set by ERL_FIND_ETHR_LIB
 ERL_FIND_ETHR_LIB
 
 if test "X$ETHR_LIB_NAME" = "X"; then
-    found_threads=no
-else
-    found_threads=yes
+   AC_MSG_ERROR([cannot build emulator since no thread library was found])
 fi
 
-FLAVORS=
-ERTS_BUILD_SMP_EMU=$enable_smp_support
-AC_MSG_CHECKING(whether an emulator with smp support should be built)
-case $ERTS_BUILD_SMP_EMU in
-    yes)
-	AC_MSG_RESULT(yes; enabled by user)
-	;;
-    no)
-	AC_MSG_RESULT(no; disabled by user)
-	;;
-    unknown)
-	AC_TRY_COMPILE([],[
-			#if __GNUC__ >= 3 || (__GNUC__ == 2 && __GNUC_MINOR__ >= 95)
-			;
-			#else
-			#error old or no gcc
-			#endif
-			],
-			gcc_smp=okgcc,
-			gcc_smp=oldornogcc)
-	ERTS_BUILD_SMP_EMU=yes
-	case "$enable_threads-$gcc_smp-$found_threads-$host_os" in
-
-	    no-*)
-		AC_MSG_RESULT(no; threads disabled by user)
-		ERTS_BUILD_SMP_EMU=no
-		;;
-
-	    *-okgcc-yes-*)
-		AC_MSG_RESULT(yes)
-		ERTS_BUILD_SMP_EMU=yes
-		;;
-
-	    *-win32)
-		AC_MSG_RESULT(yes)
-		ERTS_BUILD_SMP_EMU=yes
-		;;
-
-	    *-oldornogcc-*)
-		AC_MSG_RESULT(no; old gcc or no gcc found)
-		ERTS_BUILD_SMP_EMU=no
-		;;
-
-	    *)
-		AC_MSG_RESULT(no)
-		ERTS_BUILD_SMP_EMU=no
-		;;
-	esac
-	;;
-esac
-
-AC_MSG_CHECKING(whether dirty schedulers should be enabled)
-case $ERTS_BUILD_SMP_EMU-$enable_dirty_schedulers in
-     yes-yes)
-	DIRTY_SCHEDULER_SUPPORT=yes;;
-     yes-default)
-	DIRTY_SCHEDULER_SUPPORT=yes;;
-     no-default)
-	DIRTY_SCHEDULER_SUPPORT=no;;
-     no-yes)
-	AC_MSG_ERROR([No smp emulator will be built, but dirty schedulers requested]);;
-     *)
-	DIRTY_SCHEDULER_SUPPORT=no;;
-esac
-AC_MSG_RESULT($DIRTY_SCHEDULER_SUPPORT)
-AC_SUBST(DIRTY_SCHEDULER_SUPPORT)
+TYPES=opt
 
 DIRTY_SCHEDULER_TEST=$enable_dirty_schedulers_test
-test $DIRTY_SCHEDULER_SUPPORT = yes || DIRTY_SCHEDULER_TEST=no
 AC_SUBST(DIRTY_SCHEDULER_TEST)
 test $DIRTY_SCHEDULER_TEST != yes || {
     test -f "$ERL_TOP/erts/CONF_INFO" || echo "" > "$ERL_TOP/erts/CONF_INFO"
@@ -1084,26 +1067,15 @@ test $DIRTY_SCHEDULER_TEST != yes || {
 EOF
 }
 
-if test $ERTS_BUILD_SMP_EMU = yes; then
+test "X$smp_require_native_atomics" = "Xyes" &&
+     AC_DEFINE(ETHR_SMP_REQUIRE_NATIVE_IMPLS, 1, [Define if you want to enable check for native ethread implementations])
 
-        DEFAULT_FLAVOR=smp
-        FLAVORS="$FLAVORS smp"
-
-	if test $found_threads = no; then
-	    AC_MSG_ERROR([cannot build smp enabled emulator since no thread library was found])
-	fi
-
-	AC_DEFINE(ERTS_HAVE_SMP_EMU, 1, [Define if the smp emulator is built])
-
-	test "X$smp_require_native_atomics" = "Xyes" &&
-	     AC_DEFINE(ETHR_SMP_REQUIRE_NATIVE_IMPLS, 1, [Define if you want to enable check for native ethread implementations])
-
-	case "$ethr_have_native_atomics-$smp_require_native_atomics-$ethr_have_native_spinlock" in
-	  yes-*)
-		if test "$ethr_native_atomic_implementation" = "gcc_sync"; then
-		    test -f "$ERL_TOP/erts/CONF_INFO" ||
-			echo "" > "$ERL_TOP/erts/CONF_INFO"
-		    cat >> $ERL_TOP/erts/CONF_INFO <<EOF
+case "$ethr_have_native_atomics-$smp_require_native_atomics-$ethr_have_native_spinlock" in
+  yes-*)
+	if test "$ethr_native_atomic_implementation" = "gcc_sync"; then
+	    test -f "$ERL_TOP/erts/CONF_INFO" ||
+		echo "" > "$ERL_TOP/erts/CONF_INFO"
+	    cat >> $ERL_TOP/erts/CONF_INFO <<EOF
 
                  WARNING:
                    Only gcc's __sync_* builtins available for
@@ -1120,18 +1092,18 @@ if test $ERTS_BUILD_SMP_EMU = yes; then
                    more information.
 
 EOF
-		fi
-		;;
+	fi
+	;;
 
-	  no-yes-*)
-		AC_MSG_ERROR([No native atomic implementation found. See the \"Atomic Memory Operations and the VM\" chapter of \$ERL_TOP/HOWTO/INSTALL.md for more information.])
-		;;
+  no-yes-*)
+	AC_MSG_ERROR([No native atomic implementation found. See the \"Atomic Memory Operations and the VM\" chapter of \$ERL_TOP/HOWTO/INSTALL.md for more information.])
+	;;
 
-	  no-no-yes)
+  no-no-yes)
 
-		test -f "$ERL_TOP/erts/CONF_INFO" ||
-		    echo "" > "$ERL_TOP/erts/CONF_INFO"
-		cat >> $ERL_TOP/erts/CONF_INFO <<EOF
+	test -f "$ERL_TOP/erts/CONF_INFO" ||
+	    echo "" > "$ERL_TOP/erts/CONF_INFO"
+	cat >> $ERL_TOP/erts/CONF_INFO <<EOF
 
                  No native atomic implementation available.
                  Fallbacks implemented using spinlocks will be
@@ -1140,13 +1112,12 @@ EOF
 		 this.
 
 EOF
-		;;
+	;;
 
-	  no-no-no)
-
-		test -f "$ERL_TOP/erts/CONF_INFO" ||
-		    echo "" > "$ERL_TOP/erts/CONF_INFO"
-		cat >> "$ERL_TOP/erts/CONF_INFO" <<EOF
+  no-no-no)
+	test -f "$ERL_TOP/erts/CONF_INFO" ||
+	    echo "" > "$ERL_TOP/erts/CONF_INFO"
+	cat >> "$ERL_TOP/erts/CONF_INFO" <<EOF
 
                  No native atomic implementation, nor no native
                  spinlock implementation available. Fallbacks
@@ -1155,74 +1126,10 @@ EOF
                  will suffer immensely due to this.
 
 EOF
-		;;
-
-	esac
-
-	enable_threads=force
-fi
-
-AC_SUBST(ERTS_BUILD_SMP_EMU)
-
-ERTS_BUILD_PLAIN_EMU=$enable_plain_emulator
-AC_MSG_CHECKING(whether an emulator without smp support should be built)
-case $ERTS_BUILD_PLAIN_EMU in
-    yes)
-	AC_MSG_RESULT(yes; enabled by user)
 	;;
-    no)
-	AC_MSG_RESULT(no; disabled by user)
-	;;
-    unknown)
-        case "$enable_threads-$ERTS_BUILD_SMP_EMU" in
-            no-*)
-                ERTS_BUILD_PLAIN_EMU=yes
-                AC_MSG_RESULT(yes)
-                ;;
-            *-no)
-                ERTS_BUILD_PLAIN_EMU=yes
-                AC_MSG_RESULT(yes; enabled as smp emulator was disabled)
-                ;;
-            *)
-                ERTS_BUILD_PLAIN_EMU=no
-                AC_MSG_RESULT(no)
-                ;;
-        esac
-        ;;
+
 esac
-
-case $ERTS_BUILD_PLAIN_EMU in
-     yes)
-     	AC_DEFINE(ERTS_HAVE_PLAIN_EMU, 1, [Define if the non-smp emulator is built])
-        FLAVORS="$FLAVORS plain"
-        test -f "$ERL_TOP/erts/CONF_INFO" || echo "" > "$ERL_TOP/erts/CONF_INFO"
-        cat >> $ERL_TOP/erts/CONF_INFO <<EOF
-
-            The PLAIN aka NON-SMP emulator has been enabled.
-            This is a DEPRECATED feature scheduled for removal
-            in a future major release.
-
-EOF
-        ;;
-     no)
-        ;;
-esac
-
-AC_SUBST(ERTS_BUILD_PLAIN_EMU)
-AC_SUBST(FLAVORS)
-
-case "$ERTS_BUILD_PLAIN_EMU-$ERTS_BUILD_SMP_EMU" in
-     no-no)
-          AC_MSG_ERROR([both smp and non-smp emulators have been disabled, one of them has to be enabled])
-          ;;
-     *-no)
-          DEFAULT_FLAVOR=plain
-          ;;
-        *)
-          ;;
-esac
-
-AC_SUBST(DEFAULT_FLAVOR)
+AC_SUBST(TYPES)
 
 AC_CHECK_FUNCS([posix_fadvise closefrom])
 AC_CHECK_HEADERS([linux/falloc.h])
@@ -1283,121 +1190,65 @@ if test $i_cv_posix_fallocate_works = yes; then
 fi
 
 #
-# Figure out if the emulator should use threads. The default is set above
-# in the enable_threads variable. It can have the following values:
-#
-#   no      single-threaded emulator requested
-#   yes     multi-threaded emulator requested
-#   force   multi-threaded emulator required
-#
 # EMU_THR_LIB_NAME, EMU_THR_LIBS, EMU_THR_X_LIBS, and EMU_THR_DEFS is
 # used by the emulator, and can (but should not) be used by applications
 # that only require thread support when the emulator has thread support.
 # Other applications should use ETHR_LIB_NAME, ETHR_LIBS, ETHR_X_LIBS,
 # and ETHR_DEFS.
 #
-AC_MSG_CHECKING(whether the emulator should use threads)
 
 EMU_THR_LIB_NAME=
 EMU_THR_X_LIBS=
 EMU_THR_LIBS=
 EMU_THR_DEFS=
-emu_threads=no
 
-case "$enable_threads"-"$host_os" in
-	*-win32)
-		# The windows erlang emulator can never run without threads.
-		# It has to be enabled or the emulator will crash. Until that
-		# is fixed we force threads on win32.
-		enable_threads=force ;;
-	yes-osf*)
-		# The emulator hang when threads are enabled on osf
-		AC_MSG_ERROR(unresolved problems exist with threads on this platform) ;;
-	*) ;;
-esac
-
-case "$enable_threads"-"$found_threads" in
-    force-yes)
-	emu_threads=yes
-	AC_MSG_RESULT(yes; thread support required and therefore forced) ;;
-    yes-yes)
-	emu_threads=yes
-	AC_MSG_RESULT(yes; enabled by user) ;;
-    unknown-yes)
-	case $host_os in
-	    solaris*|linux*|darwin*|win32)
-		emu_threads=yes
-		AC_MSG_RESULT(yes; default on this platform)
-		;;
-	    *)
-		AC_MSG_RESULT(no; default on this platform)
-		;;
-	esac
-	;;
-    no-yes)
-	AC_MSG_RESULT(no; thread support found but disabled by user) ;;
-    unknown-no|no-no)
-	AC_MSG_RESULT(no) ;;
-    force-no)
-	AC_MSG_ERROR(thread support required but not found) ;;
-    yes-no)
-	AC_MSG_ERROR(thread support enabled by user but not found) ;;
-    *)
-	AC_MSG_ERROR(internal error) ;;
-esac
-
-if test $emu_threads != yes; then
-	enable_lock_check=no
-	enable_lock_count=no
-else
-	# Threads enabled for emulator
-	EMU_THR_LIB_NAME=$ETHR_LIB_NAME
-	EMU_THR_X_LIBS=$ETHR_X_LIBS
-	EMU_THR_LIBS=$ETHR_LIBS
-	EMU_THR_DEFS=$ETHR_DEFS
-	ENABLE_ALLOC_TYPE_VARS="$ENABLE_ALLOC_TYPE_VARS threads"
-	AC_MSG_CHECKING(whether lock checking should be enabled)
-	AC_MSG_RESULT($enable_lock_check)
-	if test "x$enable_lock_check" != "xno"; then
-	    EMU_THR_DEFS="$EMU_THR_DEFS -DERTS_ENABLE_LOCK_CHECK"
-	fi
-
-	AC_MSG_CHECKING(whether lock counters should be enabled)
-	AC_MSG_RESULT($enable_lock_count)
-	if test "x$enable_lock_count" != "xno"; then
-	    EMU_THR_DEFS="$EMU_THR_DEFS -DERTS_ENABLE_LOCK_COUNT"
-	fi
-
-	case $host_os in
-	    linux*)
-		AC_MSG_CHECKING([whether dlopen() needs to be called before first call to dlerror()])
-		if test "x$ETHR_THR_LIB_BASE_TYPE" != "xposix_nptl"; then
-		    AC_DEFINE(ERTS_NEED_DLOPEN_BEFORE_DLERROR,[1],
-			[Define if dlopen() needs to be called before first call to dlerror()])
-			AC_MSG_RESULT(yes)
-		else
-			AC_MSG_RESULT(no)
-		fi
-		;;
-	    *)
-		;;
-	esac
-
-	# Remove -D_WIN32_WINNT*, -DWINVER* and -D_GNU_SOURCE from EMU_THR_DEFS
-	# (defined in CFLAGS). Note that we want to keep these flags
-	# in ETHR_DEFS, but not in EMU_THR_DEFS.
-	new_emu_thr_defs=
-	for thr_def in $EMU_THR_DEFS; do
-	    case $thr_def in
-		-D_GNU_SOURCE*|-D_WIN32_WINNT*|-DWINVER*)
-		    ;;
-		*)
-		    new_emu_thr_defs="$new_emu_thr_defs $thr_def"
-		    ;;
-	    esac
-	done
-	EMU_THR_DEFS=$new_emu_thr_defs
+# Threads enabled for emulator
+EMU_THR_LIB_NAME=$ETHR_LIB_NAME
+EMU_THR_X_LIBS=$ETHR_X_LIBS
+EMU_THR_LIBS=$ETHR_LIBS
+EMU_THR_DEFS=$ETHR_DEFS
+ENABLE_ALLOC_TYPE_VARS="$ENABLE_ALLOC_TYPE_VARS threads"
+AC_MSG_CHECKING(whether lock checking should be enabled)
+AC_MSG_RESULT($enable_lock_check)
+if test "x$enable_lock_check" != "xno"; then
+    EMU_THR_DEFS="$EMU_THR_DEFS -DERTS_ENABLE_LOCK_CHECK"
 fi
+
+AC_MSG_CHECKING(whether lock counters should be enabled)
+AC_MSG_RESULT($enable_lock_count)
+if test "x$enable_lock_count" != "xno"; then
+    TYPES="$TYPES lcnt"
+fi
+
+case $host_os in
+    linux*)
+	AC_MSG_CHECKING([whether dlopen() needs to be called before first call to dlerror()])
+	if test "x$ETHR_THR_LIB_BASE_TYPE" != "xposix_nptl"; then
+	    AC_DEFINE(ERTS_NEED_DLOPEN_BEFORE_DLERROR,[1],
+		[Define if dlopen() needs to be called before first call to dlerror()])
+		AC_MSG_RESULT(yes)
+	else
+		AC_MSG_RESULT(no)
+	fi
+	;;
+    *)
+	;;
+esac
+
+# Remove -D_WIN32_WINNT*, -DWINVER* and -D_GNU_SOURCE from EMU_THR_DEFS
+# (defined in CFLAGS). Note that we want to keep these flags
+# in ETHR_DEFS, but not in EMU_THR_DEFS.
+new_emu_thr_defs=
+for thr_def in $EMU_THR_DEFS; do
+    case $thr_def in
+	-D_GNU_SOURCE*|-D_WIN32_WINNT*|-DWINVER*)
+	    ;;
+	*)
+	    new_emu_thr_defs="$new_emu_thr_defs $thr_def"
+	    ;;
+    esac
+done
+EMU_THR_DEFS=$new_emu_thr_defs
 
 AC_SUBST(EMU_THR_LIB_NAME)
 AC_SUBST(EMU_THR_X_LIBS)
@@ -1505,12 +1356,16 @@ error
 ],[
  AC_MSG_RESULT(no)
 ])
+
+if test "$Z_LIB" != ""; then
+  AC_MSG_CHECKING(for zlib inflateGetDictionary presence)
+  AC_SEARCH_LIBS(inflateGetDictionary, [z],
+                 AC_DEFINE(HAVE_ZLIB_INFLATEGETDICTIONARY, 1,
+                           [Define if your zlib version defines inflateGetDictionary.]))
+fi
+
 LIBS=$zlib_save_LIBS
 
-AC_MSG_CHECKING(for zlib inflateGetDictionary presence)
-AC_SEARCH_LIBS(inflateGetDictionary, [z],
-               AC_DEFINE(HAVE_ZLIB_INFLATEGETDICTIONARY, 1,
-                         [Define if your zlib version defines inflateGetDictionary.]))
 fi
 AC_SUBST(Z_LIB)
 
@@ -1782,6 +1637,8 @@ AC_CHECK_HEADER(sys/resource.h,
 		[#include <sys/resource.h>])],
 	[],[])
 
+AC_CHECK_FUNCS([getrusage])
+
 dnl Check if we have kernel poll support
 have_kernel_poll=no
 AC_CHECK_HEADER(sys/event.h, have_kernel_poll=kqueue)
@@ -1903,6 +1760,25 @@ if test $ac_cv_sizeof_void_p = 8; then
 fi
 AC_SUBST(BITS64)
 
+AC_MSG_CHECKING([for C compiler 'restrict' support])
+restrict_keyword=""
+for x in restrict __restrict; do
+    AC_TRY_COMPILE([int * $x foo(int * $x arg);
+		    int * $x foo(int * $x arg)
+		        { int * $x var=arg; return var;}
+		   ],[],
+		   [restrict_keyword=$x],[])
+    if test "x$restrict_keyword" != "x"; then
+	break
+    fi
+done
+AC_DEFINE_UNQUOTED(ERTS_RESTRICT,[$restrict_keyword],[Type qualifier restrict])
+if test "x$restrict_keyword" != "x"; then
+   AC_MSG_RESULT(yes)
+else
+   AC_MSG_RESULT(no)
+fi
+
 if test "x$ac_compiler_gnu" = "xyes"; then
 AC_MSG_CHECKING([if we should add -fno-tree-copyrename to CFLAGS for computed gotos to work properly])
 AC_TRY_COMPILE([],[
@@ -1921,8 +1797,6 @@ if test "x$no_tree_copyrename" = "xyes"; then
 else
 	AC_MSG_RESULT(no)
 fi
-
-
 
 AC_MSG_CHECKING([for broken gcc-4.3.0 compiler])
 AC_TRY_RUN([
@@ -2447,9 +2321,6 @@ extern char end;
 #elif defined(HAVE__END_SYMBOL)
 extern char _end;
 #endif
-#ifndef USE_THREADS
-#undef ETHR_PTHREADS
-#endif
 
 #ifdef ETHR_PTHREADS
 #  ifdef ETHR_HAVE_PTHREAD_H
@@ -2683,10 +2554,6 @@ extern char _end;
 #  error no 'end' nor '_end'
 #endif
 
-#ifndef USE_THREADS
-#undef ETHR_PTHREADS
-#endif
-
 #ifdef ETHR_PTHREADS
 #  ifdef ETHR_HAVE_PTHREAD_H
 #    include <pthread.h>
@@ -2854,6 +2721,13 @@ LIBS=$saved_libs
 dnl restore CPPFLAGS
 CPPFLAGS=$saved_cppflags
 
+case $ARCH in
+     x86|amd64)
+	AC_DEFINE(ERTS_STRUCTURE_ALIGNED_ALLOC, 1, [Define if structure alignment is enough for allocators. If not defined, 64-bit alignment will be forced.]);;
+     *)
+	;;
+esac
+
 LM_SYS_IPV6
 LM_SYS_MULTICAST
 ERL_TIME_CORRECTION
@@ -2899,23 +2773,20 @@ if test "$cross_compiling" != "yes" && test X${enable_hipe} != Xno; then
   fi
 fi
 
-dnl Check to disable -fPIE and friends for HiPE on amd64
-if test X${enable_hipe} = Xyes && test X$ARCH = Xamd64; then
-   AC_TRY_COMPILE(, [#if defined(__pie__) || defined(__PIE__)
-		     #error -fPIE is enabled by default
-		     #endif],
-		    [AC_MSG_NOTICE([No -fPIE enabled by default])],
-		    [AC_MSG_WARN([Security feature -fPIE will be disabled for HiPE])
-		     STATIC_CFLAGS="-fno-PIE $STATIC_CFLAGS"
-		     saved_LDFLAGS=$LDFLAGS
-		     LDFLAGS="-no-pie $LDFLAGS"
-		     AC_TRY_LINK(,, [],
-			[LDFLAGS="-fno-PIE $saved_LDFLAGS"
-			 AC_TRY_LINK(,, [],
-			    [AC_MSG_WARN([Linked does not accept option -no-pie nor -fno-PIE])
-			     LDFLAGS=$saved_LDFLAGS])])])
+if test X${enable_hipe} = Xyes; then
+   case $OPSYS in
+	linux)
+		ppcBEAMLDFLAGS="-Wl,-m,elf32ppc"
+		ppc64BEAMLDFLAGS="-Wl,-m,elf64ppc,-T,hipe/elf64ppc.x"
+		;;
+	darwin)
+		amd64BEAMLDFLAGS="-pagezero_size 0x10000000"
+		;;
+   esac
+   archVarName="${ARCH}BEAMLDFLAGS"
+   eval HIPEBEAMLDFLAGS=\$$archVarName
 fi
-
+AC_SUBST(HIPEBEAMLDFLAGS)
 
 if test X${enable_fp_exceptions} = Xauto ; then
    case $host_os in
@@ -3479,10 +3350,7 @@ esac
     fi
 fi	
 
-	
-	 
-		
-
+AC_SUBST(FPE)
 
 
 dnl
@@ -3616,62 +3484,24 @@ case $poll_works-$host_os in
 esac
 
 #
-# If kqueue() found, check that it can be selected or polled on...
+# If kqueue() found
 #
 if test $have_kernel_poll = kqueue; then
-	if test $poll_works = yes; then
-		kqueue_with=poll
-	else
-		kqueue_with=select
-	fi
-	AC_MSG_CHECKING([whether kqueue() fd can be ${kqueue_with}()ed on])
-	AC_TRY_RUN([
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/event.h>
-#include <sys/time.h>
-#ifdef ERTS_USE_POLL
-#include <poll.h>
-#else
-#include <unistd.h>
-#endif
-int main(void) {
-    int kq = kqueue();
-    if (kq < 0) return 2;
-    {
-#ifdef ERTS_USE_POLL
-	struct pollfd pfds = {kq, POLLIN, 0};
-	if (poll(&pfds, 1, 0) < 0) return 1;
-#else
-	struct timeval tv = {0, 0};
-	fd_set set; FD_ZERO(&set); FD_SET(kq, &set);
-	if (select(kq+1, &set, NULL, NULL, &tv) < 0) return 1;
-#endif
-    }
-    return 0;
-}
-	],
-	ok_kqueue=yes,
-	ok_kqueue=no,
-	[
-	case X$erl_xcomp_kqueue in
-	    X) ok_kqueue=cross;;
-	    Xyes|Xno) ok_kqueue=$erl_xcomp_kqueue;;
-	    *) AC_MSG_ERROR([Bad erl_xcomp_kqueue value: $erl_xcomp_kqueue]);;
-	esac
-	])
-	AC_MSG_RESULT($ok_kqueue);
-	case $ok_kqueue in
-	    yes)
-		;;
-	    cross)
-		have_kernel_poll=no
-		AC_MSG_WARN([result no guessed because of cross compilation]);;
-	    *)
-		have_kernel_poll=no;;
-	esac
+## Some OS X kernel version seems to have bugs in them with regards to kqueue
+## Disable kernel poll on those versions
+   AC_MSG_CHECKING([whether host os has known kqueue bugs])
+   case $host_os in
+     # Any OS X version < 16 has known problems with using kqueue
+     # so we don't use it there. See erl_poll.c for details.
+     darwin[[0-9]].*|darwin1[[0-5]].*)
+        AC_MSG_RESULT([yes, disabling kernel poll])
+        have_kernel_poll=no
+        ;;
+     *)
+        AC_MSG_RESULT([no])
+        ;;
+   esac
 fi
-
 #
 # If epoll() found, check that it is level triggered.
 #
@@ -3698,6 +3528,7 @@ fi
 #
 AC_MSG_CHECKING(whether kernel poll support should be enabled)
 ERTS_ENABLE_KERNEL_POLL=no
+ERTS_BUILD_FALLBACK_POLL=no
 case $enable_kernel_poll-$have_kernel_poll in
     no-*)
 	AC_MSG_RESULT(no; disabled by user);;
@@ -3708,11 +3539,16 @@ case $enable_kernel_poll-$have_kernel_poll in
     *)
 	case $have_kernel_poll in
 	    epoll)
-		AC_DEFINE(HAVE_SYS_EPOLL_H, 1, [Define if you have the <sys/epoll.h> header file.]);;
+		AC_DEFINE(HAVE_SYS_EPOLL_H, 1, [Define if you have the <sys/epoll.h> header file.])
+                ERTS_BUILD_FALLBACK_POLL=yes
+                ;;
 	    /dev/poll)
-		AC_DEFINE(HAVE_SYS_DEVPOLL_H, 1, [Define if you have <sys/devpoll.h> header file.]);;
+		AC_DEFINE(HAVE_SYS_DEVPOLL_H, 1, [Define if you have <sys/devpoll.h> header file.])
+                ;;
 	    kqueue)
-		AC_DEFINE(HAVE_SYS_EVENT_H, 1, [Define if you have <sys/event.h> header file.]);;
+		AC_DEFINE(HAVE_SYS_EVENT_H, 1, [Define if you have <sys/event.h> header file.])
+                ERTS_BUILD_FALLBACK_POLL=yes
+                ;;
 	    *)
 		AC_MSG_ERROR(configure.in need to be updated);;
 	esac
@@ -3720,7 +3556,7 @@ case $enable_kernel_poll-$have_kernel_poll in
 	AC_DEFINE(ERTS_ENABLE_KERNEL_POLL, 1, [Define if you have kernel poll and want to use it])
 	AC_MSG_RESULT([yes; $have_kernel_poll]);;
 esac
-AC_SUBST(ERTS_ENABLE_KERNEL_POLL)
+AC_SUBST(ERTS_BUILD_FALLBACK_POLL)
 
 AC_MSG_CHECKING([whether putenv() stores a copy of the key-value pair])
 AC_TRY_RUN([
@@ -3853,7 +3689,7 @@ case $host_os in
 	darwin*)
 		# Mach-O linker: a shared lib and a loadable
 		# object file is not the same thing.
-		DED_LDFLAGS="-bundle -flat_namespace -undefined suppress"
+		DED_LDFLAGS="-bundle -bundle_loader ${ERL_TOP}/bin/$host/beam.smp"
 		case $ARCH in
 			amd64)
 				DED_LDFLAGS="-m64 $DED_LDFLAGS"
@@ -3943,6 +3779,39 @@ dnl to be optimized
 dnl
 
 LM_FIND_EMU_CC
+
+dnl
+dnl Test whether code pointers are always short (32 bits).
+dnl
+
+AC_MSG_CHECKING([whether the code model is small])
+saved_LDFLAGS="$LDFLAGS"
+LDFLAGS="$LDFLAGS $HIPEBEAMLDFLAGS"
+AC_TRY_RUN([
+   #include <stdlib.h>
+   int main() {
+    if ((unsigned long long)&main < (1ull << 32)) {
+       exit(0);
+    }
+    exit(1);
+   }
+],
+erl_code_model_small=yes,
+erl_code_model_small=no,
+erl_code_model_small=no)
+AC_MSG_RESULT([$erl_code_model_small])
+LDFLAGS="$saved_LDFLAGS"
+case $erl_code_model_small in
+     yes)
+        AC_DEFINE(CODE_MODEL_SMALL,[1],
+	[Define if the code model is small (code fits below 2Gb)])
+	CODE_MODEL=small
+	;;
+     no)
+	CODE_MODEL=unknown
+        ;;
+esac
+AC_SUBST(CODE_MODEL)
 
 dnl
 dnl DTrace & LTTNG
@@ -4978,7 +4847,7 @@ AH_BOTTOM([
 # endif
 #endif
 
-#if defined(DEBUG) && defined(USE_THREADS) && !defined(ERTS_ENABLE_LOCK_CHECK)
+#if defined(DEBUG) && !defined(ERTS_ENABLE_LOCK_CHECK)
 #define ERTS_ENABLE_LOCK_CHECK 1
 #endif
 ])

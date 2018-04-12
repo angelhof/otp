@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2010-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2010-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -580,7 +580,7 @@ end_per_testcase(_Case, _Config) ->
     ok.
 
 make_dirs(Root, Suffix) ->
-    do_make_dirs(Root, string:tokens(Suffix, [$/])).
+    do_make_dirs(Root, string:lexemes(Suffix, [$/])).
 
 do_make_dirs(_Root, []) ->
     "";
@@ -709,4 +709,4 @@ join("") ->
 join([""|Ds]) ->
     join(Ds);
 join([D|Ds]) ->
-    "/" ++ string:strip(D, both, $/) ++ join(Ds).
+    "/" ++ string:trim(D, both, [$/]) ++ join(Ds).

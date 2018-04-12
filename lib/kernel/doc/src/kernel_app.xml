@@ -4,7 +4,7 @@
 <appref>
   <header>
     <copyright>
-      <year>1996</year><year>2016</year>
+      <year>1996</year><year>2018</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -58,6 +58,7 @@
   </section>
 
   <section>
+      <marker id="erl_signal_server"/>
       <title>OS Signal Event Handler</title>
       <p>Asynchronous OS signals may be subscribed to via the Kernel applications event manager
           (see <seealso marker="doc/design_principles:des_princ">OTP Design Principles</seealso> and
@@ -185,7 +186,7 @@
           <tag><c>{file, FileName}</c></tag>
           <item><p>Installs the standard event handler, which prints error
            reports to file <c>FileName</c>, where <c>FileName</c>
-           is a string.</p></item>
+           is a string. The file is opened with encoding UTF-8.</p></item>
           <tag><c>false</c></tag>
           <item>
             <p>No standard event handler is installed, but
@@ -419,6 +420,29 @@ MaxT = TickTime + TickTime / 4</code>
 	  using this service.</p>
         <p>Defaults to <c>false</c>.</p>
       </item>
+      <tag><c>shell_history = enabled | disabled </c></tag>
+      <item>
+        <p>Specifies whether shell history should be logged to disk
+           between usages of <c>erl</c>.</p>
+      </item>
+      <tag><c>shell_history_drop = [string()]</c></tag>
+      <item>
+        <p>Specific log lines that should not be persisted. For
+           example <c>["q().", "init:stop()."]</c> will allow to
+           ignore commands that shut the node down. Defaults to
+           <c>[]</c>.</p>
+      </item>
+      <tag><c>shell_history_file_bytes = integer()</c></tag>
+      <item>
+        <p>how many bytes the shell should remember. By default, the
+           value is set to 512kb, and the minimal value is 50kb.</p>
+      </item>
+      <tag><c>shell_history_path = string()</c></tag>
+      <item>
+        <p>Specifies where the shell history files will be stored.
+           defaults to the user's cache directory as returned by
+           <c>filename:basedir(user_cache, "erlang-history")</c>.</p>
+      </item>
       <tag><c>shutdown_func = {Mod, Func}</c></tag>
       <item>
         <p>Where:</p>
@@ -445,8 +469,12 @@ MaxT = TickTime + TickTime / 4</code>
           <item><c>ObjSuffix = string()</c></item>
           <item><c>SrcSuffix = string()</c></item>
         </list>
-        <p>Specifies a list of rules for use by <c>filelib:find_file/2</c> and
-          <c>filelib:find_source/2</c>. If this is set to some other value
+        <p>Specifies a list of rules for use by
+	  <seealso marker="stdlib:filelib#find_file/2">
+	  <c>filelib:find_file/2</c></seealso>
+	  <seealso marker="stdlib:filelib#find_source/2">
+	  <c>filelib:find_source/2</c></seealso>
+          If this is set to some other value
           than the empty list, it replaces the default rules. Rules can be
           simple pairs of directory suffixes, such as <c>{"ebin",
           "src"}</c>, which are used by <c>filelib:find_file/2</c>, or
@@ -454,6 +482,16 @@ MaxT = TickTime + TickTime / 4</code>
           file name extensions, for example <c>[{".beam", ".erl", [{"ebin",
           "src"}]}</c>, which are used by <c>filelib:find_source/2</c>. Both
           kinds of rules can be mixed in the list.</p>
+	  <p>The interpretation of <c>ObjDirSuffix</c> and <c>SrcDirSuffix</c>
+	  is as follows: if the end of the directory name where an
+	  object is located matches <c>ObjDirSuffix</c>, then the
+	  name created by replacing <c>ObjDirSuffix</c> with
+	  <c>SrcDirSuffix</c> is expanded by calling
+	  <seealso marker="stdlib:filelib#wildcard/1">
+	  <c>filelib:wildcard/1</c></seealso>, and the first regular
+	  file found among the matches is the source file.
+	</p>
+
       </item>
     </taglist>
   </section>

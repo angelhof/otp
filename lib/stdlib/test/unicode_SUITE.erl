@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -998,6 +998,30 @@ normalize(_) ->
 
     true = unicode:characters_to_nfkc_list("ホンダ") =:= unicode:characters_to_nfkc_list("ﾎﾝﾀﾞ"),
     true = unicode:characters_to_nfkd_list("32") =:= unicode:characters_to_nfkd_list("３２"),
+
+    {error, [0], <<128>>} = unicode:characters_to_nfc_list(<<0, 128>>),
+    {error, [0], <<128>>} = unicode:characters_to_nfkc_list(<<0, 128>>),
+    {error, [0], <<128>>} = unicode:characters_to_nfd_list(<<0, 128>>),
+    {error, [0], <<128>>} = unicode:characters_to_nfkd_list(<<0, 128>>),
+
+    {error, <<0>>, <<128>>} = unicode:characters_to_nfc_binary(<<0, 128>>),
+    {error, <<0>>, <<128>>} = unicode:characters_to_nfkc_binary(<<0, 128>>),
+    {error, <<0>>, <<128>>} = unicode:characters_to_nfd_binary(<<0, 128>>),
+    {error, <<0>>, <<128>>} = unicode:characters_to_nfkd_binary(<<0, 128>>),
+
+    LargeBin = binary:copy(<<"abcde">>, 50),
+    LargeList = binary_to_list(LargeBin),
+
+    {error, LargeList, <<128>>} = unicode:characters_to_nfc_list(<<LargeBin/binary, 128>>),
+    {error, LargeList, <<128>>} = unicode:characters_to_nfkc_list(<<LargeBin/binary, 128>>),
+    {error, LargeList, <<128>>} = unicode:characters_to_nfd_list(<<LargeBin/binary, 128>>),
+    {error, LargeList, <<128>>} = unicode:characters_to_nfkd_list(<<LargeBin/binary, 128>>),
+
+    {error, LargeBin, <<128>>} = unicode:characters_to_nfc_binary(<<LargeBin/binary, 128>>),
+    {error, LargeBin, <<128>>} = unicode:characters_to_nfkc_binary(<<LargeBin/binary, 128>>),
+    {error, LargeBin, <<128>>} = unicode:characters_to_nfd_binary(<<LargeBin/binary, 128>>),
+    {error, LargeBin, <<128>>} = unicode:characters_to_nfkd_binary(<<LargeBin/binary, 128>>),
+
     ok.
 
 

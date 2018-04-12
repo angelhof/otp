@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2016-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2016-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 
 -export([send/3, listen/3, accept/3, connect/4, socket/4, setopts/3, getopts/3, getstat/3, 
 	 peername/2, sockname/2, port/2, close/2]).
--export([emulated_options/0, internal_inet_values/0, default_inet_values/0, default_cb_info/0]).
+-export([emulated_options/0, emulated_options/1, internal_inet_values/0, default_inet_values/0, default_cb_info/0]).
 
 send(Transport, {{IP,Port},Socket}, Data) ->
     Transport:send(Socket, IP, Port, Data).
@@ -79,30 +79,31 @@ socket(Pid, Transport, Socket, ConnectionCb) ->
     #sslsocket{pid = Pid, 
 	       %% "The name "fd" is keept for backwards compatibility
 	       fd = {Transport, Socket, ConnectionCb}}.
-%% Vad göra med emulerade
-setopts(gen_udp, #sslsocket{pid = {Socket, _}}, Options) ->
-    {SockOpts, _} = tls_socket:split_options(Options),
-    inet:setopts(Socket, SockOpts);
-setopts(_, #sslsocket{pid = {ListenSocket, #config{transport_info = {Transport,_,_,_}}}}, Options) ->
-    {SockOpts, _} = tls_socket:split_options(Options),
-    Transport:setopts(ListenSocket, SockOpts);
+setopts(_, #sslsocket{pid = {udp, #config{udp_handler = {ListenPid, _}}}}, Options) ->
+    SplitOpts = tls_socket:split_options(Options),
+    dtls_udp_listener:set_sock_opts(ListenPid, SplitOpts);
 %%% Following clauses will not be called for emulated options, they are  handled in the connection process
 setopts(gen_udp, Socket, Options) ->
     inet:setopts(Socket, Options);
 setopts(Transport, Socket, Options) ->
     Transport:setopts(Socket, Options).
 
+getopts(_, #sslsocket{pid = {udp, #config{udp_handler = {ListenPid, _}}}}, Options) ->
+    SplitOpts = tls_socket:split_options(Options),
+    dtls_udp_listener:get_sock_opts(ListenPid, SplitOpts);
 getopts(gen_udp,  #sslsocket{pid = {Socket, #config{emulated = EmOpts}}}, Options) ->
     {SockOptNames, EmulatedOptNames} = tls_socket:split_options(Options),
     EmulatedOpts = get_emulated_opts(EmOpts, EmulatedOptNames),
     SocketOpts = tls_socket:get_socket_opts(Socket, SockOptNames, inet),
     {ok, EmulatedOpts ++ SocketOpts}; 
-getopts(Transport,  #sslsocket{pid = {ListenSocket, #config{emulated = EmOpts}}}, Options) ->
+getopts(_Transport,  #sslsocket{pid = {Socket, #config{emulated = EmOpts}}}, Options) ->
     {SockOptNames, EmulatedOptNames} = tls_socket:split_options(Options),
     EmulatedOpts = get_emulated_opts(EmOpts, EmulatedOptNames),
-    SocketOpts = tls_socket:get_socket_opts(ListenSocket, SockOptNames, Transport),
+    SocketOpts = tls_socket:get_socket_opts(Socket, SockOptNames, inet),
     {ok, EmulatedOpts ++ SocketOpts}; 
 %%% Following clauses will not be called for emulated options, they are  handled in the connection process
+getopts(gen_udp, {_,{{_, _},Socket}}, Options) ->
+    inet:getopts(Socket, Options);
 getopts(gen_udp, {_,Socket}, Options) ->
     inet:getopts(Socket, Options);
 getopts(Transport, Socket, Options) ->
@@ -132,11 +133,14 @@ port(Transport, Socket) ->
 emulated_options() ->
     [mode, active,  packet, packet_size].
 
+emulated_options(Opts) ->
+      emulated_options(Opts, internal_inet_values(), default_inet_values()).
+
 internal_inet_values() ->
     [{active, false}, {mode,binary}].
 
 default_inet_values() ->
-    [{active, true}, {mode, list}].
+    [{active, true}, {mode, list}, {packet, 0}, {packet_size, 0}].
 
 default_cb_info() ->
     {gen_udp, udp, udp_closed, udp_error}.
@@ -148,8 +152,38 @@ get_emulated_opts(EmOpts, EmOptNames) ->
 
 emulated_socket_options(InetValues, #socket_options{
 				       mode   = Mode,
+                                       packet = Packet,
+                                       packet_size = PacketSize,
 				       active = Active}) ->
     #socket_options{
        mode   = proplists:get_value(mode, InetValues, Mode),
+       packet = proplists:get_value(packet, InetValues, Packet),
+       packet_size = proplists:get_value(packet_size, InetValues, PacketSize),
        active = proplists:get_value(active, InetValues, Active)
       }.
+
+emulated_options([{mode, Value} = Opt |Opts], Inet, Emulated) ->
+    validate_inet_option(mode, Value),
+    emulated_options(Opts, Inet, [Opt | proplists:delete(mode, Emulated)]);
+emulated_options([{header, _} = Opt | _], _, _) ->
+    throw({error, {options, {not_supported, Opt}}});
+emulated_options([{active, Value} = Opt |Opts], Inet, Emulated) ->
+    validate_inet_option(active, Value),
+    emulated_options(Opts, Inet, [Opt | proplists:delete(active, Emulated)]);
+emulated_options([{packet, _} = Opt | _], _, _) ->
+    throw({error, {options, {not_supported, Opt}}});
+emulated_options([{packet_size, _} = Opt | _], _, _) ->
+    throw({error, {options, {not_supported, Opt}}});
+emulated_options([Opt|Opts], Inet, Emulated) ->
+    emulated_options(Opts, [Opt|Inet], Emulated);
+emulated_options([], Inet,Emulated) ->
+    {Inet, Emulated}.
+
+validate_inet_option(mode, Value)
+  when Value =/= list, Value =/= binary ->
+    throw({error, {options, {mode,Value}}});
+validate_inet_option(active, Value)
+  when Value =/= true, Value =/= false, Value =/= once ->
+    throw({error, {options, {active,Value}}});
+validate_inet_option(_, _) ->
+    ok.

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2005-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,6 +37,8 @@
 -export([subsystem_spec/1]).
 
 -export([init/1, handle_ssh_msg/2, handle_msg/2, terminate/2]).
+
+-export([dbg_trace/3]).
 
 -record(state, {
 	  xf,   			% [{channel,ssh_xfer states}...]
@@ -360,10 +362,12 @@ handle_op(?SSH_FXP_REMOVE, ReqId, <<?UINT32(PLen), BPath:PLen/binary>>,
     case IsDir of %% This version 6 we still have ver 5
 	true when Vsn > 5 ->
 	    ssh_xfer:xf_send_status(State0#state.xf, ReqId,
-				    ?SSH_FX_FILE_IS_A_DIRECTORY, "File is a directory"); 
+				    ?SSH_FX_FILE_IS_A_DIRECTORY, "File is a directory"),
+            State0;
 	true ->
 	    ssh_xfer:xf_send_status(State0#state.xf, ReqId,
-				    ?SSH_FX_FAILURE, "File is a directory"); 
+				    ?SSH_FX_FAILURE, "File is a directory"),
+            State0;
 	false ->
 	    {Status, FS1} = FileMod:delete(Path, FS0),
 	    State1 = State0#state{file_state = FS1},
@@ -947,3 +951,20 @@ maybe_increase_recv_window(ConnectionManager, ChannelId, Options) ->
 	Increment =< 0 ->
 	    do_nothing
     end.
+
+%%%################################################################
+%%%#
+%%%# Tracing
+%%%#
+
+dbg_trace(points,         _,  _) -> [terminate];
+
+dbg_trace(flags,  terminate,  _) -> [c];
+dbg_trace(on,     terminate,  _) -> dbg:tp(?MODULE,  terminate, 2, x);
+dbg_trace(off,    terminate,  _) -> dbg:ctpg(?MODULE, terminate, 2);
+dbg_trace(format, terminate, {call, {?MODULE,terminate, [Reason, State]}}) ->
+    ["SftpD Terminating:\n",
+     io_lib:format("Reason: ~p,~nState:~n~s", [Reason, wr_record(State)])
+    ].
+
+?wr_record(state).

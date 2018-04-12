@@ -342,8 +342,10 @@
 	 typed_record_field_body/1,
          typed_record_field_type/1,
 	 class_qualifier/2,
+	 class_qualifier/3,
 	 class_qualifier_argument/1,
 	 class_qualifier_body/1,
+	 class_qualifier_stacktrace/1,
 	 tuple/1,
 	 tuple_elements/1,
 	 tuple_size/1,
@@ -3884,7 +3886,7 @@ fold_try_clause({clause, Pos, [P], Guard, Body}) ->
 	     class_qualifier ->
 		 {tuple, Pos, [class_qualifier_argument(P),
 			       class_qualifier_body(P),
-			       {var, Pos, '_'}]};
+			       class_qualifier_stacktrace(P)]};
 	     _ ->
 		 {tuple, Pos, [{atom, Pos, throw}, P, {var, Pos, '_'}]}
 	 end,
@@ -3893,12 +3895,14 @@ fold_try_clause({clause, Pos, [P], Guard, Body}) ->
 unfold_try_clauses(Cs) ->
     [unfold_try_clause(C) || C <- Cs].
 
-unfold_try_clause({clause, Pos, [{tuple, _, [{atom, _, throw}, V, _]}],
+unfold_try_clause({clause, Pos, [{tuple, _, [{atom, _, throw},
+                                             V,
+                                             [{var, _, '_'}]]}],
 		   Guard, Body}) ->
     {clause, Pos, [V], Guard, Body};
-unfold_try_clause({clause, Pos, [{tuple, _, [C, V, _]}],
+unfold_try_clause({clause, Pos, [{tuple, _, [C, V, Stacktrace]}],
 		   Guard, Body}) ->
-    {clause, Pos, [class_qualifier(C, V)], Guard, Body}.
+    {clause, Pos, [class_qualifier(C, V, Stacktrace)], Guard, Body}.
 
 
 %% =====================================================================
@@ -6725,9 +6729,12 @@ try_expr_after(Node) ->
 %%
 %% @see class_qualifier_argument/1
 %% @see class_qualifier_body/1
+%% @see class_qualifier_stacktrace/1
 %% @see try_expr/4
 
--record(class_qualifier, {class :: syntaxTree(), body :: syntaxTree()}).
+-record(class_qualifier, {class :: syntaxTree(),
+                          body :: syntaxTree(),
+                          stacktrace :: syntaxTree()}).
 
 %% type(Node) = class_qualifier
 %% data(Node) = #class_qualifier{class :: Class, body :: Body}
@@ -6737,8 +6744,27 @@ try_expr_after(Node) ->
 -spec class_qualifier(syntaxTree(), syntaxTree()) -> syntaxTree().
 
 class_qualifier(Class, Body) ->
+    Underscore = {var, get_pos(Body), '_'},
     tree(class_qualifier,
-	 #class_qualifier{class = Class, body = Body}).
+	 #class_qualifier{class = Class, body = Body,
+                          stacktrace = Underscore}).
+
+%% =====================================================================
+%% @doc Creates an abstract class qualifier. The result represents
+%% "<code><em>Class</em>:<em>Body</em>:<em>Stacktrace</em></code>".
+%%
+%% @see class_qualifier_argument/1
+%% @see class_qualifier_body/1
+%% @see try_expr/4
+
+-spec class_qualifier(syntaxTree(), syntaxTree(), syntaxTree()) ->
+                             syntaxTree().
+
+class_qualifier(Class, Body, Stacktrace) ->
+    tree(class_qualifier,
+	 #class_qualifier{class = Class,
+                          body = Body,
+                          stacktrace = Stacktrace}).
 
 
 %% =====================================================================
@@ -6762,6 +6788,16 @@ class_qualifier_argument(Node) ->
 
 class_qualifier_body(Node) ->
     (data(Node))#class_qualifier.body.
+
+%% =====================================================================
+%% @doc Returns the stacktrace subtree of a `class_qualifier' node.
+%%
+%% @see class_qualifier/2
+
+-spec class_qualifier_stacktrace(syntaxTree()) -> syntaxTree().
+
+class_qualifier_stacktrace(Node) ->
+    (data(Node))#class_qualifier.stacktrace.
 
 
 %% =====================================================================
@@ -7727,8 +7763,9 @@ subtrees(T) ->
 		catch_expr ->
 		    [[catch_expr_body(T)]];
 		class_qualifier ->
-		    [[class_qualifier_argument(T)],
-		     [class_qualifier_body(T)]];
+                    [[class_qualifier_argument(T)],
+                     [class_qualifier_body(T)],
+                     [class_qualifier_stacktrace(T)]];
 		clause ->
 		    case clause_guard(T) of
 			none ->
@@ -7949,6 +7986,7 @@ make_tree(block_expr, [B]) -> block_expr(B);
 make_tree(case_expr, [[A], C]) -> case_expr(A, C);
 make_tree(catch_expr, [[B]]) -> catch_expr(B);
 make_tree(class_qualifier, [[A], [B]]) -> class_qualifier(A, B);
+make_tree(class_qualifier, [[A], [B], [C]]) -> class_qualifier(A, B, C);
 make_tree(clause, [P, B]) -> clause(P, none, B);
 make_tree(clause, [P, [G], B]) -> clause(P, G, B);
 make_tree(cond_expr, [C]) -> cond_expr(C);

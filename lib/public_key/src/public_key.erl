@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 	 decrypt_public/2, decrypt_public/3,
 	 dh_gex_group/4,
 	 dh_gex_group_sizes/0,
-	 sign/3, verify/4,
+	 sign/3, sign/4, verify/4, verify/5,
 	 generate_key/1,
 	 compute_key/2, compute_key/3,
 	 pkix_sign/2, pkix_verify/2,	 
@@ -58,11 +58,14 @@
 	 pkix_match_dist_point/2,
 	 pkix_crl_verify/2,
 	 pkix_crl_issuer/1,
-	 short_name_hash/1
+	 short_name_hash/1,
+         pkix_test_data/1,
+         pkix_test_root_cert/2
 	]).
 
 -export_type([public_key/0, private_key/0, pem_entry/0,
-	      pki_asn1_type/0, asn1_type/0, ssh_file/0, der_encoded/0]).
+	      pki_asn1_type/0, asn1_type/0, ssh_file/0, der_encoded/0,
+              key_params/0, digest_type/0]).
 
 -type public_key()           ::  rsa_public_key() | dsa_public_key() | ec_public_key().
 -type private_key()          ::  rsa_private_key() | dsa_private_key() | ec_private_key().
@@ -71,8 +74,12 @@
 -type rsa_private_key()      ::  #'RSAPrivateKey'{}.
 -type dsa_private_key()      ::  #'DSAPrivateKey'{}.
 -type dsa_public_key()       :: {integer(), #'Dss-Parms'{}}.
--type ec_public_key()        :: {#'ECPoint'{},{namedCurve, Oid::tuple()} | #'ECParameters'{}}.
+-type ecpk_parameters() :: {ecParameters, #'ECParameters'{}} | {namedCurve, Oid::tuple()}.
+-type ecpk_parameters_api() :: ecpk_parameters() | #'ECParameters'{} | {namedCurve, Name::atom()}.
+-type ec_public_key()        :: {#'ECPoint'{}, ecpk_parameters_api()}.
 -type ec_private_key()       :: #'ECPrivateKey'{}.
+-type key_params()           :: #'DHParameter'{} | {namedCurve, oid()} | #'ECParameters'{} | 
+                                {rsa, Size::integer(), PubExp::integer()}. 
 -type der_encoded()          :: binary().
 -type pki_asn1_type()        ::  'Certificate' | 'RSAPrivateKey' | 'RSAPublicKey'
 			       | 'DSAPrivateKey' | 'DSAPublicKey' | 'DHParameter'
@@ -90,14 +97,17 @@
 				auth_keys.
 -type rsa_padding()          :: 'rsa_pkcs1_padding' | 'rsa_pkcs1_oaep_padding' 
 			      | 'rsa_no_padding'.
+-type rsa_sign_padding()     :: 'rsa_pkcs1_padding' | 'rsa_pkcs1_pss_padding'.
 -type public_crypt_options() :: [{rsa_pad, rsa_padding()}].
--type rsa_digest_type()      :: 'md5' | 'sha'| 'sha224' | 'sha256' | 'sha384' | 'sha512'.
--type dss_digest_type()      :: 'none' | 'sha'. %% None is for backwards compatibility
--type ecdsa_digest_type()    :: 'sha'| 'sha224' | 'sha256' | 'sha384' | 'sha512'.
+-type rsa_digest_type()      :: 'md5' | 'ripemd160' | 'sha' | 'sha224' | 'sha256' | 'sha384' | 'sha512'.
+-type dss_digest_type()      :: 'none' | 'sha' | 'sha224' | 'sha256' | 'sha384' | 'sha512'. %% None is for backwards compatibility
+-type ecdsa_digest_type()    :: 'sha' | 'sha224' | 'sha256' | 'sha384' | 'sha512'.
+-type public_sign_options()  :: [{rsa_pad, rsa_sign_padding()} | {rsa_pss_saltlen, integer()}].
 -type digest_type()          :: rsa_digest_type() |  dss_digest_type() | ecdsa_digest_type().
 -type crl_reason()           ::  unspecified | keyCompromise | cACompromise | affiliationChanged | superseded
 			       | cessationOfOperation | certificateHold | privilegeWithdrawn |  aACompromise.
 -type oid()                  :: tuple().
+-type chain_type()           :: server_chain | client_chain.
 
 -define(UINT32(X), X:32/unsigned-big-integer).
 -define(DER_NULL, <<5, 0>>).
@@ -397,9 +407,7 @@ dh_gex_group(Min, N, Max, Groups) ->
 %%--------------------------------------------------------------------
 -spec generate_key(#'DHParameter'{}) ->
                           {Public::binary(), Private::binary()};
-                  ({namedCurve, Name ::oid()}) ->
-                          #'ECPrivateKey'{};
-                  (#'ECParameters'{}) ->
+                  (ecpk_parameters_api()) ->
                           #'ECPrivateKey'{};
                   ({rsa, Size::pos_integer(), PubExp::pos_integer()}) ->
                           #'RSAPrivateKey'{}.
@@ -410,6 +418,8 @@ generate_key(#'DHParameter'{prime = P, base = G}) ->
     crypto:generate_key(dh, [P, G]);
 generate_key({namedCurve, _} = Params) ->
     ec_generate_key(Params);
+generate_key({ecParameters, _} = Params) ->
+    ec_generate_key(Params);
 generate_key(#'ECParameters'{} = Params) ->
     ec_generate_key(Params);
 generate_key({rsa, ModulusSize, PublicExponent}) ->
@@ -417,7 +427,7 @@ generate_key({rsa, ModulusSize, PublicExponent}) ->
         {[E, N], [E, N, D, P, Q, D_mod_P_1, D_mod_Q_1, InvQ_mod_P]} ->
             Nint = crypto:bytes_to_integer(N),
             Eint = crypto:bytes_to_integer(E),
-            #'RSAPrivateKey'{version = 0, % Two-factor (I guess since otherPrimeInfos is not given)
+            #'RSAPrivateKey'{version = 'two-prime', % Two-factor (I guess since otherPrimeInfos is not given)
                              modulus = Nint,
                              publicExponent = Eint,
                              privateExponent = crypto:bytes_to_integer(D),
@@ -435,7 +445,7 @@ generate_key({rsa, ModulusSize, PublicExponent}) ->
                                %   1976.
             Nint = crypto:bytes_to_integer(N),
             Eint = crypto:bytes_to_integer(E),
-            #'RSAPrivateKey'{version = 0, % Two-factor (I guess since otherPrimeInfos is not given)
+            #'RSAPrivateKey'{version = 'two-prime', % Two-factor (I guess since otherPrimeInfos is not given)
                               modulus = Nint,
                               publicExponent = Eint,
                               privateExponent = crypto:bytes_to_integer(D),
@@ -498,35 +508,67 @@ pkix_sign_types(?'ecdsa-with-SHA512') ->
     {sha512, ecdsa}.
 
 %%--------------------------------------------------------------------
--spec sign(binary() | {digest, binary()},  rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
-	   rsa_private_key() |
-	   dsa_private_key() | ec_private_key()) -> Signature :: binary().
+-spec sign(binary() | {digest, binary()},
+           rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
+	   rsa_private_key() | dsa_private_key() | ec_private_key()
+          ) -> Signature :: binary().
+
+-spec sign(binary() | {digest, binary()},
+           rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
+	   rsa_private_key() | dsa_private_key() | ec_private_key(),
+           public_sign_options()
+          ) -> Signature :: binary().
+
 %% Description: Create digital signature.
 %%--------------------------------------------------------------------
-sign(DigestOrPlainText, DigestType, Key = #'RSAPrivateKey'{}) ->
-    crypto:sign(rsa, DigestType, DigestOrPlainText, format_rsa_private_key(Key));
-
-sign(DigestOrPlainText, sha, #'DSAPrivateKey'{p = P, q = Q, g = G, x = X}) ->
-    crypto:sign(dss, sha, DigestOrPlainText, [P, Q, G, X]);
-
-sign(DigestOrPlainText, DigestType, #'ECPrivateKey'{privateKey = PrivKey,
-						    parameters = Param}) ->
-    ECCurve = ec_curve_spec(Param),
-    crypto:sign(ecdsa, DigestType, DigestOrPlainText, [PrivKey, ECCurve]);
+sign(DigestOrPlainText, DigestType, Key) ->
+    sign(DigestOrPlainText, DigestType, Key, []).
 
 %% Backwards compatible
-sign(Digest, none, #'DSAPrivateKey'{} = Key) ->
-    sign({digest,Digest}, sha, Key).
+sign(Digest, none, Key = #'DSAPrivateKey'{}, Options) when is_binary(Digest) ->
+    sign({digest, Digest}, sha, Key, Options);
+sign(DigestOrPlainText, DigestType, Key, Options) ->
+    case format_sign_key(Key) of
+	badarg ->
+	    erlang:error(badarg, [DigestOrPlainText, DigestType, Key, Options]);
+	{Algorithm, CryptoKey} ->
+	    crypto:sign(Algorithm, DigestType, DigestOrPlainText, CryptoKey, Options)
+    end.
 
 %%--------------------------------------------------------------------
--spec verify(binary() | {digest, binary()}, rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
-	     Signature :: binary(), rsa_public_key()
-	     | dsa_public_key() | ec_public_key()) -> boolean().
+-spec verify(binary() | {digest, binary()},
+             rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
+	     Signature :: binary(),
+             rsa_public_key() | dsa_public_key() | ec_public_key()
+               |  rsa_private_key() | dsa_private_key() | ec_private_key()
+            ) -> boolean().
+
+-spec verify(binary() | {digest, binary()},
+             rsa_digest_type() | dss_digest_type() | ecdsa_digest_type(),
+	     Signature :: binary(),
+             rsa_public_key() | dsa_public_key() | ec_public_key()
+               |  rsa_private_key() | dsa_private_key() | ec_private_key(),
+             public_sign_options()
+            ) -> boolean().
+
 %% Description: Verifies a digital signature.
 %%--------------------------------------------------------------------
-verify(DigestOrPlainText, DigestType, Signature, Key) when is_binary(Signature) ->
-    do_verify(DigestOrPlainText, DigestType, Signature, Key);
-verify(_,_,_,_) -> 
+verify(DigestOrPlainText, DigestType, Signature, Key) ->
+    verify(DigestOrPlainText, DigestType, Signature, Key, []).
+
+%% Backwards compatible
+verify(Digest, none, Signature, Key = {_, #'Dss-Parms'{}}, Options) when is_binary(Digest) ->
+    verify({digest, Digest}, sha, Signature, Key, Options);
+verify(Digest, none, Signature, Key = #'DSAPrivateKey'{}, Options) when is_binary(Digest) ->
+    verify({digest, Digest}, sha, Signature, Key, Options);
+verify(DigestOrPlainText, DigestType, Signature, Key, Options) when is_binary(Signature) ->
+    case format_verify_key(Key) of
+	badarg ->
+	    erlang:error(badarg, [DigestOrPlainText, DigestType, Signature, Key, Options]);
+	{Algorithm, CryptoKey} ->
+	    crypto:verify(Algorithm, DigestType, DigestOrPlainText, Signature, CryptoKey, Options)
+    end;
+verify(_,_,_,_,_) ->
     %% If Signature is a bitstring and not a binary we know already at this
     %% point that the signature is invalid.
     false.
@@ -789,8 +831,9 @@ pkix_path_validation(#'OTPCertificate'{} = TrustedCert, CertChain, Options)
 %--------------------------------------------------------------------
 -spec pkix_crls_validate(#'OTPCertificate'{},
 			 [{DP::#'DistributionPoint'{}, {DerCRL::binary(), CRL::#'CertificateList'{}}}],
-			 Options :: proplists:proplist()) -> valid | {bad_cert, revocation_status_undetermined}
-								| {bad_cert, {revoked, crl_reason()}}.
+			 Options :: proplists:proplist()) -> valid | {bad_cert, revocation_status_undetermined} |
+                                                             {bad_cert, {revocation_status_undetermined, Reason::term()}} |
+                                                             {bad_cert, {revoked, crl_reason()}}.
 
 %% Description: Performs a CRL validation according to RFC 5280.
 %%--------------------------------------------------------------------
@@ -808,10 +851,10 @@ pkix_crls_validate(OtpCert, DPAndCRLs0, Options) ->
 
 %--------------------------------------------------------------------
 -spec pkix_verify_hostname(Cert :: #'OTPCertificate'{} | binary(),
-			   ReferenceIDs :: [{uri_id | dns_id | oid(),  string()}]) -> boolean().
+			   ReferenceIDs :: [{uri_id | dns_id | ip | srv_id | oid(),  string()}]) -> boolean().
 
 -spec pkix_verify_hostname(Cert :: #'OTPCertificate'{} | binary(),
-			   ReferenceIDs :: [{uri_id | dns_id | oid(),  string()}],
+			   ReferenceIDs :: [{uri_id | dns_id | ip | srv_id | oid(),  string()}],
 			   Options :: proplists:proplist()) -> boolean().
 
 %% Description: Validates a hostname to RFC 6125
@@ -869,7 +912,7 @@ pkix_verify_hostname(Cert = #'OTPCertificate'{tbsCertificate = TbsCert}, Referen
 		false ->
 		    %% Try to extract DNS-IDs from URIs etc
 		    DNS_ReferenceIDs =
-			[{dns_is,X} || X <- verify_hostname_fqnds(ReferenceIDs, FqdnFun)],
+			[{dns_id,X} || X <- verify_hostname_fqnds(ReferenceIDs, FqdnFun)],
 		    verify_hostname_match_loop(DNS_ReferenceIDs, PresentedIDs,
 					       MatchFun, FailCB, Cert);
 		true ->
@@ -900,7 +943,6 @@ ssh_decode(SshBin, Type) when is_binary(SshBin),
 %%--------------------------------------------------------------------
 -spec ssh_encode([{public_key(), Attributes::list()}], ssh_file()) -> binary()
 	      ; (public_key(), ssh2_pubkey) -> binary()
-	      ; ({public_key(),atom()}, ssh2_pubkey) -> binary()
 	      .
 %%
 %% Description: Encodes a list of ssh file entries (public keys and
@@ -990,25 +1032,67 @@ short_name_hash({rdnSequence, _Attributes} = Name) ->
     <<HashValue:32/little, _/binary>> = crypto:hash(sha, HashThis),
     string:to_lower(string:right(integer_to_list(HashValue, 16), 8, $0)).
 
+
+%%--------------------------------------------------------------------
+-spec pkix_test_data(#{chain_type() := pubkey_cert:chain_opts()} |
+                     pubkey_cert:chain_opts()) ->
+                            pubkey_cert:test_config() |
+                            [pubkey_cert:conf_opt()].
+
+%% Description: Generates cert(s) and ssl configuration
+%%--------------------------------------------------------------------
+
+pkix_test_data(#{client_chain := ClientChain0,
+                 server_chain := ServerChain0}) ->
+    Default = #{intermediates => []},
+    ClientChain = maps:merge(Default, ClientChain0),
+    ServerChain = maps:merge(Default, ServerChain0),
+    pubkey_cert:gen_test_certs(#{client_chain => ClientChain,
+                                 server_chain => ServerChain});
+pkix_test_data(#{} = Chain) ->
+    Default = #{intermediates => []},
+    pubkey_cert:gen_test_certs(maps:merge(Default, Chain)).
+
+%%--------------------------------------------------------------------
+-spec pkix_test_root_cert(
+        Name :: string(), Opts :: [pubkey_cert:cert_opt()]) ->
+                                 pubkey_cert:test_root_cert().
+
+%% Description: Generates a root cert suitable for pkix_test_data/1
+%%--------------------------------------------------------------------
+
+pkix_test_root_cert(Name, Opts) ->
+    pubkey_cert:root_cert(Name, Opts).
+
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
-do_verify(DigestOrPlainText, DigestType, Signature,
-       #'RSAPublicKey'{modulus = Mod, publicExponent = Exp}) ->
-    crypto:verify(rsa, DigestType, DigestOrPlainText, Signature,
-		  [Exp, Mod]);
+format_sign_key(Key = #'RSAPrivateKey'{}) ->
+    {rsa, format_rsa_private_key(Key)};
+format_sign_key(#'DSAPrivateKey'{p = P, q = Q, g = G, x = X}) ->
+    {dss, [P, Q, G, X]};
+format_sign_key(#'ECPrivateKey'{privateKey = PrivKey, parameters = Param}) ->
+    {ecdsa, [PrivKey, ec_curve_spec(Param)]};
+format_sign_key(_) ->
+    badarg.
 
-do_verify(DigestOrPlaintext, DigestType, Signature, {#'ECPoint'{point = Point}, Param}) ->
-    ECCurve = ec_curve_spec(Param),
-    crypto:verify(ecdsa, DigestType, DigestOrPlaintext, Signature, [Point, ECCurve]);
-
-%% Backwards compatibility
-do_verify(Digest, none, Signature, {_,  #'Dss-Parms'{}} = Key ) ->
-    verify({digest,Digest}, sha, Signature, Key);
-
-do_verify(DigestOrPlainText, sha = DigestType, Signature, {Key,  #'Dss-Parms'{p = P, q = Q, g = G}})
-  when is_integer(Key), is_binary(Signature) ->
-    crypto:verify(dss, DigestType, DigestOrPlainText, Signature, [P, Q, G, Key]).
+format_verify_key(#'RSAPublicKey'{modulus = Mod, publicExponent = Exp}) ->
+    {rsa, [Exp, Mod]};
+format_verify_key({#'ECPoint'{point = Point}, Param}) ->
+    {ecdsa, [Point, ec_curve_spec(Param)]};
+format_verify_key({Key,  #'Dss-Parms'{p = P, q = Q, g = G}}) ->
+    {dss, [P, Q, G, Key]};
+%% Convert private keys to public keys
+format_verify_key(#'RSAPrivateKey'{modulus = Mod, publicExponent = Exp}) ->
+    format_verify_key(#'RSAPublicKey'{modulus = Mod, publicExponent = Exp});
+format_verify_key(#'ECPrivateKey'{parameters = Param, publicKey = {_, Point}}) ->
+    format_verify_key({#'ECPoint'{point = Point}, Param});
+format_verify_key(#'ECPrivateKey'{parameters = Param, publicKey = Point}) ->
+    format_verify_key({#'ECPoint'{point = Point}, Param});
+format_verify_key(#'DSAPrivateKey'{y=Y, p=P, q=Q, g=G}) ->
+    format_verify_key({Y, #'Dss-Parms'{p=P, q=Q, g=G}});
+format_verify_key(_) ->
+    badarg.
 
 do_pem_entry_encode(Asn1Type, Entity, CipherInfo, Password) ->
     Der = der_encode(Asn1Type, Entity),
@@ -1121,8 +1205,13 @@ der_cert(#'OTPCertificate'{} = Cert) ->
 der_cert(Der) when is_binary(Der) ->
     Der.
 
-pkix_crls_validate(_, [],_, _, _) ->
-    {bad_cert, revocation_status_undetermined};
+pkix_crls_validate(_, [],_, Options, #revoke_state{details = Details}) ->
+     case proplists:get_value(undetermined_details, Options, false) of
+         false ->
+             {bad_cert, revocation_status_undetermined};
+         true ->
+             {bad_cert, {revocation_status_undetermined, {bad_crls, format_details(Details)}}}
+     end;
 pkix_crls_validate(OtpCert, [{DP, CRL, DeltaCRL} | Rest],  All, Options, RevokedState0) ->
     CallBack = proplists:get_value(update_crl, Options, fun(_, CurrCRL) ->
 							       CurrCRL
@@ -1142,9 +1231,14 @@ pkix_crls_validate(OtpCert, [{DP, CRL, DeltaCRL} | Rest],  All, Options, Revoked
 do_pkix_crls_validate(OtpCert, [{DP, CRL, DeltaCRL} | Rest],  All, Options, RevokedState0) ->
     OtherDPCRLs = All -- [{DP, CRL, DeltaCRL}],
     case pubkey_crl:validate(OtpCert, OtherDPCRLs, DP, CRL, DeltaCRL, Options, RevokedState0) of
-	{undetermined, _, _} when Rest == []->
-	    {bad_cert, revocation_status_undetermined};
-	{undetermined, _, RevokedState} when Rest =/= []->
+	{undetermined, unrevoked, #revoke_state{details = Details}} when Rest == []->
+            case proplists:get_value(undetermined_details, Options, false) of
+                false ->
+                    {bad_cert, revocation_status_undetermined};
+                true ->
+                    {bad_cert, {revocation_status_undetermined, {bad_crls, Details}}}
+            end;
+	{undetermined, unrevoked, RevokedState} when Rest =/= []->
 	    pkix_crls_validate(OtpCert, Rest, All, Options, RevokedState);
 	{finished, unrevoked} ->
 	    valid;
@@ -1231,22 +1325,54 @@ format_rsa_private_key(#'RSAPrivateKey'{modulus = N, publicExponent = E,
 								   is_integer(D) ->
    [E, N, D].
 
+-spec ec_generate_key(ecpk_parameters_api()) -> #'ECPrivateKey'{}.
 ec_generate_key(Params) ->
     Curve = ec_curve_spec(Params),
     Term = crypto:generate_key(ecdh, Curve),
-    ec_key(Term, Params).
+    NormParams = ec_normalize_params(Params),
+    ec_key(Term, NormParams).
 
-ec_curve_spec( #'ECParameters'{fieldID = FieldId, curve = PCurve, base = Base, order = Order, cofactor = CoFactor }) ->
-    Field = {pubkey_cert_records:supportedCurvesTypes(FieldId#'FieldID'.fieldType),
-	     FieldId#'FieldID'.parameters},
+-spec ec_normalize_params(ecpk_parameters_api()) -> ecpk_parameters().
+ec_normalize_params({namedCurve, Name}) when is_atom(Name) ->
+	{namedCurve, pubkey_cert_records:namedCurves(Name)};
+ec_normalize_params(#'ECParameters'{} = ECParams) ->
+	{ecParameters, ECParams};
+ec_normalize_params(Other) -> Other.
+
+-spec ec_curve_spec(ecpk_parameters_api()) -> term().
+ec_curve_spec( #'ECParameters'{fieldID = #'FieldID'{fieldType = Type,
+                                                    parameters = Params}, curve = PCurve, base = Base, order = Order, cofactor = CoFactor }) ->
+    Field = format_field(pubkey_cert_records:supportedCurvesTypes(Type), Params),
     Curve = {PCurve#'Curve'.a, PCurve#'Curve'.b, none},
     {Field, Curve, Base, Order, CoFactor};
+ec_curve_spec({ecParameters, ECParams}) ->
+	ec_curve_spec(ECParams);
 ec_curve_spec({namedCurve, OID}) when is_tuple(OID), is_integer(element(1,OID)) ->
     ec_curve_spec({namedCurve,  pubkey_cert_records:namedCurves(OID)});
 ec_curve_spec({namedCurve, Name}) when is_atom(Name) ->
     crypto:ec_curve(Name).
 
+format_field(characteristic_two_field = Type, Params0) ->
+    #'Characteristic-two'{
+       m = M,
+       basis = BasisOid,
+       parameters = Params} = der_decode('Characteristic-two', Params0),
+    {Type, M, field_param_decode(BasisOid, Params)};
+format_field(prime_field, Params0) ->
+    Prime = der_decode('Prime-p', Params0),
+    {prime_field, Prime}.
 
+field_param_decode(?'ppBasis', Params) ->
+    #'Pentanomial'{k1 = K1, k2 = K2, k3 = K3} =
+        der_decode('Pentanomial', Params),
+    {ppbasis, K1, K2, K3};
+field_param_decode(?'tpBasis', Params) ->
+    K = der_decode('Trinomial', Params),
+    {tpbasis, K};
+field_param_decode(?'gnBasis', _) ->
+    onbasis.
+        
+-spec ec_key({PubKey::term(), PrivateKey::term()}, Params::ecpk_parameters()) -> #'ECPrivateKey'{}.
 ec_key({PubKey, PrivateKey}, Params) ->
     #'ECPrivateKey'{version = 1,
 		    privateKey = PrivateKey,
@@ -1330,7 +1456,7 @@ ascii_to_lower(String) ->
 verify_hostname_extract_fqdn_default({dns_id,S}) ->
     S;
 verify_hostname_extract_fqdn_default({uri_id,URI}) ->
-    {ok,{https,_,Host,_,_,_}} = http_uri:parse(URI),
+    #{scheme := "https", host := Host} = uri_string:normalize(URI, [return_map]),
     Host.
 
 
@@ -1364,13 +1490,43 @@ verify_hostname_match_default0({dns_id,R}, {dNSName,P}) ->
     R==P;
 verify_hostname_match_default0({uri_id,R}, {uniformResourceIdentifier,P}) ->
     R==P;
-verify_hostname_match_default0({srv_id,R}, {T,P}) when T == srvName ;
-                                                       T == ?srvName_OID ->
+verify_hostname_match_default0({ip,R}, {iPAddress,P}) when length(P) == 4 ->
+    %% IPv4
+    try
+        list_to_tuple(P)
+            == if is_tuple(R), size(R)==4 -> R;
+                  is_list(R) -> ok(inet:parse_ipv4strict_address(R))
+               end
+    catch
+        _:_ ->
+            false
+    end;
+
+verify_hostname_match_default0({ip,R}, {iPAddress,P}) when length(P) == 16 ->
+    %% IPv6. The length 16 is due to the certificate specification.
+    try
+        l16_to_tup(P)
+            == if is_tuple(R), size(R)==8 -> R;
+                  is_list(R) -> ok(inet:parse_ipv6strict_address(R))
+               end
+    catch
+        _:_ ->
+            false
+    end;
+verify_hostname_match_default0({srv_id,R}, {srvName,P}) ->
+    R==P;
+verify_hostname_match_default0({srv_id,R}, {?srvName_OID,P}) ->
     R==P;
 verify_hostname_match_default0(_, _) ->
     false.
 
+ok({ok,X}) -> X.
 
+l16_to_tup(L) -> list_to_tuple(l16_to_tup(L, [])).
+%%
+l16_to_tup([A,B|T], Acc) -> l16_to_tup(T, [(A bsl 8) bor B | Acc]);
+l16_to_tup([], Acc) -> lists:reverse(Acc).
+    
 match_wild(A,     [$*|B]) -> match_wild_suffixes(A, B);
 match_wild([C|A], [ C|B]) -> match_wild(A, B);
 match_wild([],        []) -> true;
@@ -1409,11 +1565,18 @@ verify_hostname_match_loop(Refs, Pres, MatchFun, FailCB, Cert) ->
       Refs).
 
 
+to_lower_ascii({ip,_}=X) -> X;
+to_lower_ascii({iPAddress,_}=X) -> X;
 to_lower_ascii(S) when is_list(S) -> lists:map(fun to_lower_ascii/1, S);
 to_lower_ascii({T,S}) -> {T, to_lower_ascii(S)};
 to_lower_ascii(C) when $A =< C,C =< $Z -> C + ($a-$A);
 to_lower_ascii(C) -> C.
 
 to_string(S) when is_list(S) -> S;
-to_string(B) when is_binary(B) -> binary_to_list(B).
+to_string(B) when is_binary(B) -> binary_to_list(B);
+to_string(X) -> X.
 
+format_details([]) ->
+    no_relevant_crls;
+format_details(Details) ->
+    Details.

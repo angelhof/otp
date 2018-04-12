@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2016 All Rights Reserved.
+%% Copyright Ericsson AB 2007-2017 All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -125,7 +125,7 @@ file_to_crls(File, DbHandle) ->
 %% Description:  Validates ssl/tls specific extensions
 %%--------------------------------------------------------------------
 validate(_,{extension, #'Extension'{extnID = ?'id-ce-extKeyUsage',
-				    extnValue = KeyUse}}, UserState = {Role, _,_, _, _}) ->
+				    extnValue = KeyUse}}, UserState = {Role, _,_, _, _, _}) ->
     case is_valid_extkey_usage(KeyUse, Role) of
 	true ->
 	    {valid, UserState};
@@ -138,8 +138,10 @@ validate(_, {bad_cert, _} = Reason, _) ->
     {fail, Reason};
 validate(_, valid, UserState) ->
     {valid, UserState};
-validate(_, valid_peer, UserState) ->
-    {valid, UserState}.
+validate(Cert, valid_peer, UserState = {client, _,_, Hostname, _, _}) when Hostname =/= disable ->
+    verify_hostname(Hostname, Cert, UserState);  
+validate(_, valid_peer, UserState) ->    
+   {valid, UserState}.
 
 %%--------------------------------------------------------------------
 -spec is_valid_key_usage(list(), term()) -> boolean().
@@ -330,3 +332,32 @@ new_trusteded_chain(DerCert, [_ | Rest]) ->
     new_trusteded_chain(DerCert, Rest);
 new_trusteded_chain(_, []) ->
     unknown_ca.
+
+verify_hostname({fallback, Hostname}, Cert, UserState) when is_list(Hostname) ->
+    case public_key:pkix_verify_hostname(Cert, [{dns_id, Hostname}]) of
+        true ->
+            {valid, UserState};
+        false ->
+            case public_key:pkix_verify_hostname(Cert, [{ip, Hostname}]) of
+                true ->
+                    {valid, UserState};
+                false ->
+                    {fail, {bad_cert, hostname_check_failed}}
+            end
+    end;
+
+verify_hostname({fallback, Hostname}, Cert, UserState) ->
+    case public_key:pkix_verify_hostname(Cert, [{ip, Hostname}]) of
+        true ->
+            {valid, UserState};
+        false ->
+            {fail, {bad_cert, hostname_check_failed}}
+    end;
+
+verify_hostname(Hostname, Cert, UserState) ->
+    case public_key:pkix_verify_hostname(Cert, [{dns_id, Hostname}]) of
+        true ->
+            {valid, UserState};
+        false ->
+            {fail, {bad_cert, hostname_check_failed}}
+    end.

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2005-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -308,9 +308,9 @@ memory_test(_Config) ->
 
     mem_workers_call(MWs,
 		     fun () ->
-			     list_to_atom("an ugly atom "++integer_to_list(erlang:system_info(scheduler_id))),
-			     list_to_atom("another ugly atom "++integer_to_list(erlang:system_info(scheduler_id))),
-			     list_to_atom("yet another ugly atom "++integer_to_list(erlang:system_info(scheduler_id)))
+			     _ = list_to_atom("an ugly atom "++integer_to_list(erlang:system_info(scheduler_id))),
+			     _ = list_to_atom("another ugly atom "++integer_to_list(erlang:system_info(scheduler_id))),
+			     _ = list_to_atom("yet another ugly atom "++integer_to_list(erlang:system_info(scheduler_id)))
 		     end, []),
     cmp_memory(MWs, "new atoms"),
 
@@ -362,11 +362,6 @@ mem_workers_call(MWs, Fun, Args) ->
                               Res
                       end
               end, MWs).
-
-mem_workers_cast(MWs, Fun, Args) ->
-    lists:foreach(fun (MW) ->
-			  MW ! {cast, self(), Fun, Args}
-		  end, MWs).
 
 spawn_mem_workers() ->
     spawn_mem_workers(erlang:system_info(schedulers_online)).

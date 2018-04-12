@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>1996</year><year>2016</year>
+      <year>1996</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -111,8 +111,8 @@
     <c>unicode:chardata()</c></seealso> and operate on grapheme
     clusters. The <seealso marker="#oldapi"> <c>old
     functions</c></seealso> that only work on Latin-1 lists as input
-    are still available but should not be
-    used. They will be deprecated in Erlang/OTP 21.
+    are still available but should not be used, they will be
+    deprecated in a future release.
     </p>
   </description>
 
@@ -311,7 +311,9 @@ true</pre>
       <desc>
         <p>
 	  Returns the first codepoint in <c><anno>String</anno></c>
-	  and the rest of <c><anno>String</anno></c> in the tail.
+	  and the rest of <c><anno>String</anno></c> in the tail. Returns
+	  an empty list if <c><anno>String</anno></c> is empty or an
+	  <c>{error, String}</c> tuple if the next byte is invalid.
 	</p>
 	<p><em>Example:</em></p>
 	<pre>
@@ -326,7 +328,9 @@ true</pre>
       <desc>
         <p>
 	  Returns the first grapheme cluster in <c><anno>String</anno></c>
-	  and the rest of <c><anno>String</anno></c> in the tail.
+	  and the rest of <c><anno>String</anno></c> in the tail. Returns
+	  an empty list if <c><anno>String</anno></c> is empty or an
+	  <c>{error, String}</c> tuple if the next byte is invalid.
 	</p>
 	<p><em>Example:</em></p>
 	<pre>
@@ -590,7 +594,7 @@ ÖÄÅ</pre>
 	  or <c>both</c>, indicates from which direction characters
 	  are to be removed.
 	</p>
-	<p> Default <c><anno>Characters</anno></c> are the set of
+	<p> Default <c><anno>Characters</anno></c> is the set of
 	nonbreakable whitespace codepoints, defined as
 	Pattern_White_Space in
 	<url href="http://unicode.org/reports/tr31/">Unicode Standard Annex #31</url>.

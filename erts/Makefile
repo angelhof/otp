@@ -1,7 +1,7 @@
 # 
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2006-2016. All Rights Reserved.
+# Copyright Ericsson AB 2006-2017. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,29 +34,26 @@ ERTSDIRS += start_scripts
 endif
 
 .PHONY: all
-all: $(FLAVORS)
+all: smp
 
 .PHONY: docs
 docs:
 	$(V_at)( cd doc/src && $(MAKE) $@ )
 
-.PHONY: debug opt clean
-debug opt clean:
+.PHONY: debug opt lcnt clean
+debug opt lcnt clean:
 	$(V_at)for d in emulator $(ERTSDIRS); do \
 		if test -d $$d; then \
-			( cd $$d && $(MAKE) $@ FLAVOR=$(FLAVOR) ) || exit $$? ; \
+			( cd $$d && $(MAKE) $@ ) || exit $$?; \
 		fi ; \
 	done
 	(cd preloaded/src && $(MAKE) ../ebin/erts.app)
 
-# ----------------------------------------------------------------------
-# These are "convenience targets", provided as shortcuts for developers
-# - don't use them in scripts or assume they will always stay like this!
-#
-
-.PHONY: $(FLAVORS)
-$(FLAVORS):
-	$(V_at)( $(MAKE) opt FLAVOR=$@ )
+.PHONY: smp
+smp:
+	$(V_at)for type in $(TYPES); do \
+		( $(MAKE) $$type ) || exit $$?; \
+	done
 
 # Make erl script and erlc in $(ERL_TOP)/bin which runs the compiled version
 # Note that erlc is not a script and requires extra handling on cygwin.
@@ -110,6 +107,11 @@ local_setup:
 		$(ERL_TOP)/bin/start_clean.script \
 		$(ERL_TOP)/bin/no_dot_erlang.script
 
+# ----------------------------------------------------------------------
+# These are "convenience targets", provided as shortcuts for developers
+# - don't use them in scripts or assume they will always stay like this!
+#
+
 # Run the configure script
 .PHONY: configure
 configure:
@@ -127,8 +129,8 @@ makefiles:
 
 .PHONY: release
 release:
-	$(V_at)for f in $(FLAVORS); do \
-		( cd emulator && $(MAKE) release FLAVOR=$$f ) \
+	for t in $(TYPES); do \
+	  ( cd emulator && $(MAKE) release TYPE=$$t ) || exit $$?; \
 	done
 	$(V_at)for d in $(ERTSDIRS) $(XINSTDIRS); do \
 		if test -d $$d; then \
@@ -143,3 +145,7 @@ release:
 .PHONY: release_docs
 release_docs:
 	$(V_at)( cd doc/src && $(MAKE) $@ )
+
+.PHONY: xmllint
+xmllint:
+	$(MAKE) -C doc/src $@

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2001-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2001-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -147,6 +147,7 @@ groups() ->
        testImport,
        testDER,
        testDEFAULT,
+       testExtensionDefault,
        testMvrasn6,
        testContextSwitchingTypes,
        testOpenTypeImplicitTag,
@@ -265,7 +266,7 @@ replace_path(PathA, PathB) ->
     true = code:add_patha(PathB).
 
 join(Rule, Opts) ->
-    string:join([atom_to_list(Rule)|lists:map(fun atom_to_list/1, Opts)], "_").
+    lists:join("_", [atom_to_list(Rule)|lists:map(fun atom_to_list/1, Opts)]).
 
 %%------------------------------------------------------------------------------
 %% Test cases
@@ -443,6 +444,12 @@ testDEFAULT(Config, Rule, Opts) ->
 			      [legacy_erlang_types,Rule|Opts]),
     testDef:main(Rule),
     testSeqSetDefaultVal:main(Rule, Opts).
+
+testExtensionDefault(Config) ->
+    test(Config, fun testExtensionDefault/3).
+testExtensionDefault(Config, Rule, Opts) ->
+    asn1_test_lib:compile_all(["ExtensionDefault"], Config, [Rule|Opts]),
+    testExtensionDefault:main(Rule).
 
 testMaps(Config) ->
     test(Config, fun testMaps/3,
@@ -1198,14 +1205,14 @@ testComment(Config) ->
 
 testName2Number(Config) ->
     N2NOptions0 = [{n2n,Type} ||
-                     Type <- ['CauseMisc', 'CauseProtocol',
-                              'CauseRadioNetwork',
-                              'CauseTransport','CauseNas']],
+                     Type <- ['Cause-Misc', 'CauseProtocol']],
     N2NOptions = [?NO_MAPS_MODULE|N2NOptions0],
-    asn1_test_lib:compile("S1AP-IEs", Config, N2NOptions),
+    asn1_test_lib:compile("EnumN2N", Config, N2NOptions),
 
-    0 = 'S1AP-IEs':name2num_CauseMisc('control-processing-overload'),
-    'unknown-PLMN' = 'S1AP-IEs':num2name_CauseMisc(5),
+    0 = 'EnumN2N':'name2num_Cause-Misc'('control-processing-overload'),
+    'unknown-PLMN' = 'EnumN2N':'num2name_Cause-Misc'(5),
+    4 = 'EnumN2N':name2num_CauseProtocol('semantic-error'),
+    'transfer-syntax-error' = 'EnumN2N':num2name_CauseProtocol(0),
 
     %% OTP-10144
     %% Test that n2n option generates name2num and num2name functions supporting
@@ -1348,8 +1355,8 @@ xref_export_all(_Config) ->
         [] ->
             ok;
         [_|_] ->
-            S = [io_lib:format("~p:~p/~p\n", [M,F,A]) || {M,F,A} <- Unused],
-            io:format("There are unused functions:\n\n~s\n", [S]),
+            Msg = [io_lib:format("~p:~p/~p\n", [M,F,A]) || {M,F,A} <- Unused],
+            io:format("There are unused functions:\n\n~s\n", [Msg]),
             ?t:fail(unused_functions)
     end.
 

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@
 -define(PASSWD, "Sesame").
 -define(XFER_PACKET_SIZE, 32768).
 -define(XFER_WINDOW_SIZE, 4*?XFER_PACKET_SIZE).
--define(TIMEOUT, 10000).
+-define(SSH_TIMEOUT, 10000).
 -define(REG_ATTERS, <<0,0,0,0,1>>).
 -define(UNIX_EPOCH,  62167219200).
 
@@ -161,9 +161,9 @@ init_per_testcase(TestCase, Config) ->
 			       {silently_accept_hosts, true}]),
     {ok, Channel} =
 	ssh_connection:session_channel(Cm, ?XFER_WINDOW_SIZE,
-				       ?XFER_PACKET_SIZE, ?TIMEOUT),
+				       ?XFER_PACKET_SIZE, ?SSH_TIMEOUT),
     
-    success = ssh_connection:subsystem(Cm, Channel, "sftp", ?TIMEOUT),
+    success = ssh_connection:subsystem(Cm, Channel, "sftp", ?SSH_TIMEOUT),
 
     ProtocolVer = case atom_to_list(TestCase) of
 		      "ver3_" ++ _ ->

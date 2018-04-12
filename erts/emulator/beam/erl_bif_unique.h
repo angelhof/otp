@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2014-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2014-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -307,7 +307,7 @@ erts_iref_storage_clean(ErtsIRefStorage *iref)
     if (iref->is_magic && erts_refc_dectest(&iref->u.mb->intern.refc, 0) == 0)
 	erts_ref_bin_free(iref->u.mb);
 #ifdef DEBUG
-    memset((void *) iref, 0xf, sizeof(ErtsIRefStorage));
+    sys_memset((void *) iref, 0xf, sizeof(ErtsIRefStorage));
 #endif
 }
 
@@ -342,7 +342,7 @@ erts_iref_storage_make_ref(ErtsIRefStorage *iref,
 
 #ifdef DEBUG
     if (clean_storage)
-	memset((void *) iref, 0xf, sizeof(ErtsIRefStorage));
+	sys_memset((void *) iref, 0xf, sizeof(ErtsIRefStorage));
 #endif
 
     return make_internal_ref(hp);

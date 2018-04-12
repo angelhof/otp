@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2018. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -93,7 +93,7 @@ do {									\
 
 #define BUMP_REDS(p, gc) do {			   \
      ASSERT(p);		 			   \
-     ERTS_SMP_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(p));\
+     ERTS_LC_ASSERT(ERTS_PROC_LOCK_MAIN & erts_proc_lc_my_proc_locks(p));\
      (p)->fcalls -= (gc); 			   \
      if ((p)->fcalls < 0) { 			   \
 	if (!ERTS_PROC_GET_SAVED_CALLS_BUF((p)))   \
@@ -306,7 +306,7 @@ do {							\
     (Proc)->freason = TRAP;				\
 } while (0)
 
-#define BIF_TRAP0(p, Trap_) do {		\
+#define BIF_TRAP0(Trap_, p) do {                  \
       (p)->arity = 0;				\
       (p)->i = (BeamInstr*) ((Trap_)->addressv[erts_active_code_ix()]);	\
       (p)->freason = TRAP;			\
@@ -404,7 +404,7 @@ do {									\
 #define ERTS_BIF_YIELD0(TRP, P)						\
 do {									\
     ERTS_VBUMP_ALL_REDS((P));						\
-    BIF_TRAP0((TRP), (P));						\
+    BIF_TRAP0((TRP), (P));                                              \
 } while (0)
 
 #define ERTS_BIF_YIELD1(TRP, P, A0)					\
@@ -428,7 +428,7 @@ do {									\
 #define ERTS_BIF_EXITED(PROC)		\
 do {					\
     KILL_CATCHES((PROC));		\
-    BIF_ERROR((PROC), EXC_EXIT);	\
+    BIF_ERROR((PROC), EXTAG_EXIT);	\
 } while (0)
 
 #define ERTS_BIF_CHK_EXITED(PROC)	\
@@ -437,71 +437,8 @@ do {					\
 	ERTS_BIF_EXITED((PROC));	\
 } while (0)
 
-/*
- * The ERTS_BIF_*_AWAIT_X_*_TRAP makros either exits the caller, or
- * sets up a trap to erlang:await_proc_exit/3.
- *
- * The caller is acquired to hold the 'main' lock on C_P. No other locks
- * are allowed to be held.
- */
-
-#define ERTS_BIF_PREP_AWAIT_X_DATA_TRAP(RET, C_P, PID, DATA)		\
-do {									\
-    erts_bif_prep_await_proc_exit_data_trap((C_P), (PID), (DATA));	\
-    (RET) = THE_NON_VALUE;						\
-} while (0)
-
-#define ERTS_BIF_PREP_AWAIT_X_REASON_TRAP(RET, C_P, PID)		\
-do {									\
-    erts_bif_prep_await_proc_exit_reason_trap((C_P), (PID));		\
-    (RET) = THE_NON_VALUE;						\
-} while (0)
-
-#define ERTS_BIF_PREP_AWAIT_X_APPLY_TRAP(RET, C_P, PID, M, F, A, AN)	\
-do {									\
-    erts_bif_prep_await_proc_exit_apply_trap((C_P), (PID),		\
-					     (M), (F), (A), (AN));	\
-    (RET) = THE_NON_VALUE;						\
-} while (0)
-
-#define ERTS_BIF_AWAIT_X_DATA_TRAP(C_P, PID, DATA)			\
-do {									\
-    erts_bif_prep_await_proc_exit_data_trap((C_P), (PID), (DATA));	\
-    return THE_NON_VALUE;						\
-} while (0)
-
-#define ERTS_BIF_AWAIT_X_REASON_TRAP(C_P, PID)				\
-do {									\
-    erts_bif_prep_await_proc_exit_reason_trap((C_P), (PID));		\
-    return THE_NON_VALUE;						\
-} while (0)
-
-#define ERTS_BIF_AWAIT_X_APPLY_TRAP(C_P, PID, M, F, A, AN)		\
-do {									\
-    erts_bif_prep_await_proc_exit_apply_trap((C_P), (PID),		\
-					     (M), (F), (A), (AN));	\
-    return THE_NON_VALUE;						\
-} while (0)
-
-void
-erts_bif_prep_await_proc_exit_data_trap(Process *c_p,
-					Eterm pid,
-					Eterm data);
-void
-erts_bif_prep_await_proc_exit_reason_trap(Process *c_p,
-					  Eterm pid);
-void
-erts_bif_prep_await_proc_exit_apply_trap(Process *c_p,
-					 Eterm pid,
-					 Eterm module,
-					 Eterm function,
-					 Eterm args[],
-					 int nargs);
-
-#ifdef ERTS_DIRTY_SCHEDULERS
 int erts_call_dirty_bif(ErtsSchedulerData *esdp, Process *c_p,
 			BeamInstr *I, Eterm *reg);
-#endif
 
 BIF_RETTYPE
 erts_schedule_bif(Process *proc,

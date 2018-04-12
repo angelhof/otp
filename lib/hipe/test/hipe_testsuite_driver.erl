@@ -29,13 +29,9 @@ get_suites(SuitesWithSuiteSuffix) ->
     [S || {yes, S} <- Prefixes].
 
 suffix(String, Suffix) ->
-    case string:rstr(String, Suffix) of
-	0 -> no;
-	Index ->
-	    case string:substr(String, Index) =:= Suffix of
-		true -> {yes, string:sub_string(String, 1, Index-1)};
-		false -> no
-	    end
+    case string:split(String, Suffix, trailing) of
+	[Prefix,[]] -> {yes, Prefix};
+        _ -> no
     end.
 
 -spec file_type(file:filename()) -> {ok, file_type()} | {error, ext_posix()}.
@@ -165,7 +161,8 @@ run(TestCase, Dir, _OutDir) ->
     %% 		  end, DataFiles),
     %% try
     ok = TestCase:test(),
-    HiPEOpts = try TestCase:hipe_options() catch error:undef -> [] end,
+    HiPEOpts0 = try TestCase:hipe_options() catch error:undef -> [] end,
+    HiPEOpts = HiPEOpts0 ++ hipe_options(),
     {ok, TestCase} = hipe:c(TestCase, HiPEOpts),
     ok = TestCase:test(),
     {ok, TestCase} = hipe:c(TestCase, [o1|HiPEOpts]),
@@ -183,3 +180,6 @@ run(TestCase, Dir, _OutDir) ->
     %% 	lists:foreach(fun (DF) -> ok end, % = file:delete(DF) end,
     %% 		      [filename:join(OutDir, D) || D <- DataFiles])
     %% end.
+
+hipe_options() ->
+    [verify_gcsafe].

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,7 +27,8 @@
 	 extract_from_binary_compressed/1, extract_filtered/1,
 	 extract_from_open_file/1, symlinks/1, open_add_close/1, cooked_compressed/1,
 	 memory/1,unicode/1,read_other_implementations/1,
-         sparse/1, init/1, leading_slash/1, dotdot/1]).
+         sparse/1, init/1, leading_slash/1, dotdot/1,
+         roundtrip_metadata/1, apply_file_info_opts/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -41,7 +42,8 @@ all() ->
      extract_filtered,
      symlinks, open_add_close, cooked_compressed, memory, unicode,
      read_other_implementations,
-     sparse,init,leading_slash,dotdot].
+     sparse,init,leading_slash,dotdot,roundtrip_metadata,
+     apply_file_info_opts].
 
 groups() -> 
     [].
@@ -950,6 +952,67 @@ dotdot(Config) ->
     {error,{_,unsafe_path=Error}} = erl_tar:extract(Tar, [{cwd,Dir}]),
     false = filelib:is_regular(filename:join(PrivDir, "some_file")),
     io:format("~s\n", [erl_tar:format_error(Error)]),
+
+    ok.
+
+roundtrip_metadata(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    Dir = filename:join(PrivDir, ?FUNCTION_NAME),
+    ok = file:make_dir(Dir),
+
+    do_roundtrip_metadata(Dir, "name-does-not-matter"),
+    ok.
+
+do_roundtrip_metadata(Dir, File) ->
+    Tar = filename:join(Dir, atom_to_list(?FUNCTION_NAME)++".tar"),
+    BeamFile = code:which(compile),
+    {ok,Fd} = erl_tar:open(Tar, [write]),
+    ok = erl_tar:add(Fd, BeamFile, File, []),
+    ok = erl_tar:close(Fd),
+
+    ok = erl_tar:extract(Tar, [{cwd,Dir}]),
+
+    %% Make sure that size and modification times are the same
+    %% on all platforms.
+    {ok,OrigInfo} = file:read_file_info(BeamFile),
+    ExtractedFile = filename:join(Dir, File),
+    {ok,ExtractedInfo} = file:read_file_info(ExtractedFile),
+    #file_info{size=Size,mtime=Mtime,type=regular} = OrigInfo,
+    #file_info{size=Size,mtime=Mtime,type=regular} = ExtractedInfo,
+
+    %% On Unix platforms more fields are expected to be the same.
+    case os:type() of
+        {unix,_} ->
+            #file_info{access=Access,mode=Mode} = OrigInfo,
+            #file_info{access=Access,mode=Mode} = ExtractedInfo,
+            ok;
+        _ ->
+            ok
+    end.
+
+apply_file_info_opts(Config) when is_list(Config) ->
+    ok = file:set_cwd(proplists:get_value(priv_dir, Config)),
+
+    ok = file:make_dir("empty_directory"),
+    ok = file:write_file("file", "contents"),
+
+    Opts = [{atime, 0}, {mtime, 0}, {ctime, 0}, {uid, 0}, {gid, 0}],
+    TarFile = "reproducible.tar",
+    {ok, Tar} = erl_tar:open(TarFile, [write]),
+    ok = erl_tar:add(Tar, "file", Opts),
+    ok = erl_tar:add(Tar, "empty_directory", Opts),
+    ok = erl_tar:add(Tar, <<"contents">>, "memory_file", Opts),
+    erl_tar:close(Tar),
+
+    ok = file:make_dir("extracted"),
+    erl_tar:extract(TarFile, [{cwd, "extracted"}]),
+
+    {ok, #file_info{mtime=0}} =
+        file:read_file_info("extracted/empty_directory", [{time, posix}]),
+    {ok, #file_info{mtime=0}} =
+        file:read_file_info("extracted/file", [{time, posix}]),
+    {ok, #file_info{mtime=0}} =
+        file:read_file_info("extracted/memory_file", [{time, posix}]),
 
     ok.
 

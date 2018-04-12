@@ -1,7 +1,7 @@
 %
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@
 	 daemon/1, daemon/2, daemon/3,
 	 daemon_info/1,
 	 default_algorithms/0,
+         chk_algos_opts/1,
 	 stop_listener/1, stop_listener/2,  stop_listener/3,
 	 stop_daemon/1, stop_daemon/2, stop_daemon/3,
 	 shell/1, shell/2, shell/3
@@ -183,10 +184,10 @@ channel_info(ConnectionRef, ChannelId, Options) ->
 daemon(Port) ->
     daemon(Port, []).
 
-
 daemon(Socket, UserOptions) when is_port(Socket) ->
     try
         #{} = Options = ssh_options:handle_options(server, UserOptions),
+
         case valid_socket_to_use(Socket, ?GET_OPT(transport,Options)) of
             ok ->
                 {ok, {IP,Port}} = inet:sockname(Socket),
@@ -264,8 +265,6 @@ daemon(Host0, Port0, UserOptions0) when 0 =< Port0, Port0 =< 65535,
 
 daemon(_, _, _) ->
     {error, badarg}.
-
-
 
 %%--------------------------------------------------------------------
 -spec daemon_info(daemon_ref()) -> ok_error( [{atom(), term()}] ).
@@ -381,6 +380,27 @@ default_algorithms() ->
     ssh_transport:default_algorithms().
 
 %%--------------------------------------------------------------------
+-spec chk_algos_opts(list(any())) -> algs_list() .
+%%--------------------------------------------------------------------
+chk_algos_opts(Opts) ->
+    case lists:foldl(
+           fun({preferred_algorithms,_}, Acc) -> Acc;
+              ({modify_algorithms,_}, Acc) -> Acc;
+              (KV, Acc) -> [KV|Acc]
+           end, [], Opts)
+    of
+        [] ->
+            case ssh_options:handle_options(client, Opts) of
+                M when is_map(M) ->
+                    maps:get(preferred_algorithms, M);
+                Others ->
+                    Others
+            end;
+        OtherOps ->
+            {error, {non_algo_opts_found,OtherOps}}
+    end.
+
+%%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
 %% The handle_daemon_args/2 function basically only sets the ip-option in Opts
@@ -439,6 +459,9 @@ open_listen_socket(_Host0, Port0, Options0) ->
 %%%----------------------------------------------------------------
 finalize_start(Host, Port, Profile, Options0, F) ->
     try
+        %% throws error:Error if no usable hostkey is found
+        ssh_connection_handler:available_hkey_algorithms(server, Options0),
+
         sshd_sup:start_child(Host, Port, Profile, Options0)
     of
         {error, {already_started, _}} ->
@@ -448,6 +471,8 @@ finalize_start(Host, Port, Profile, Options0, F) ->
         Result = {ok,_} ->
             F(Options0, Result)
     catch
+        error:{shutdown,Err} ->
+            {error,Err};
         exit:{noproc, _} ->
             {error, ssh_not_started}
     end.

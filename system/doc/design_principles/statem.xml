@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>2016</year><year>2017</year>
+      <year>2016</year><year>2018</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -410,14 +410,6 @@ StateName(EventType, EventContent, Data) ->
   <section>
     <marker id="Example" />
     <title>Example</title>
-    <p>
-      This example starts off as equivalent to the example in section
-      <seealso marker="fsm"><c>gen_fsm</c>&nbsp;Behavior</seealso>.
-      In later sections, additions and tweaks are made
-      using features in <c>gen_statem</c> that <c>gen_fsm</c> does not have.
-      The end of this chapter provides the example again
-      with all the added features.
-    </p>
     <p>
       A door with a code lock can be seen as a state machine.
       Initially, the door is locked. When someone presses a button,
@@ -1582,10 +1574,12 @@ format_status(Opt, [_PDict,State,Data]) ->
       for example, a complex state term like a tuple.
     </p>
     <p>
-      One reason to use this is when you have
-      a state item that affects the event handling,
-      in particular in combination with postponing events.
-      We complicate the previous example
+      One reason to use this is when you have a state item
+      that when changed should cancel the
+      <seealso marker="#State Time-Outs">state time-out</seealso>,
+      or one that affects the event handling
+      in combination with postponing events.
+      We will complicate the previous example
       by introducing a configurable lock button
       (this is the state item in question),
       which in the <c>open</c> state immediately locks the door,
@@ -1685,8 +1679,8 @@ handle_event(
 		    {next_state, {open,LockButton}, Data,
 		     [{reply,From,ok}]};
 		[Digit|Rest] -> % Incomplete
-		    {keep_state, Data#{remaining := Rest, 30000},
-		     [{reply,From,ok}]};
+		    {keep_state, Data#{remaining := Rest},
+		     [{reply,From,ok}, 30000]};
 		[_|_] -> % Wrong
 		    {keep_state, Data#{remaining := Code},
 		     [{reply,From,ok}]}

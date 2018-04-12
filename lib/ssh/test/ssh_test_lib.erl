@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,9 +28,7 @@
 -include_lib("public_key/include/public_key.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("ssh/src/ssh_transport.hrl").
-
-
--define(TIMEOUT, 50000).
+-include("ssh_test_lib.hrl").
 
 %%%----------------------------------------------------------------
 connect(Port, Options) when is_integer(Port) ->
@@ -58,7 +56,9 @@ daemon(Host, Port, Options) ->
     ct:log("~p:~p Calling ssh:daemon(~p, ~p, ~p)",[?MODULE,?LINE,Host,Port,Options]),
     case ssh:daemon(Host, Port, Options) of
 	{ok, Pid} ->
-            {ok,L} = ssh:daemon_info(Pid),
+            R = ssh:daemon_info(Pid),
+            ct:log("~p:~p ssh:daemon_info(~p) ->~n ~p",[?MODULE,?LINE,Pid,R]),
+            {ok,L} = R,
             ListenPort = proplists:get_value(port, L),
             ListenIP = proplists:get_value(ip, L),
 	    {Pid, ListenIP, ListenPort};
@@ -201,15 +201,17 @@ init_io_server(TestCase) ->
 
 loop_io_server(TestCase, Buff0) ->
      receive
-	 {input, TestCase, Line} ->
+	 {input, TestCase, Line} = _INP ->
+             %%ct:log("io_server ~p:~p ~p got ~p",[?MODULE,?LINE,self(),_INP]),
 	     loop_io_server(TestCase, Buff0 ++ [Line]);
-	 {io_request, From, ReplyAs, Request} ->
+	 {io_request, From, ReplyAs, Request} = _REQ->
+             %%ct:log("io_server ~p:~p ~p got ~p",[?MODULE,?LINE,self(),_REQ]),
 	     {ok, Reply, Buff} = io_request(Request, TestCase, From,
 					    ReplyAs, Buff0),
 	     io_reply(From, ReplyAs, Reply),
 	     loop_io_server(TestCase, Buff);
 	 {'EXIT',_, _} = _Exit ->
-%%	     ct:log("ssh_test_lib:loop_io_server/2 got ~p",[_Exit]),
+	     ct:log("ssh_test_lib:loop_io_server/2 got ~p",[_Exit]),
 	     ok
     after 
 	30000 -> ct:fail("timeout ~p:~p",[?MODULE,?LINE])
@@ -404,7 +406,7 @@ setup_ecdsa(Size, DataDir, UserDir) ->
     file:copy(filename:join(DataDir, "ssh_host_ecdsa_key"++Size++".pub"), filename:join(System, "ssh_host_ecdsa_key.pub")),
 ct:log("DataDir ~p:~n ~p~n~nSystDir ~p:~n ~p~n~nUserDir ~p:~n ~p",[DataDir, file:list_dir(DataDir), System, file:list_dir(System), UserDir, file:list_dir(UserDir)]),
     setup_ecdsa_known_host(Size, System, UserDir),
-    setup_ecdsa_auth_keys(Size, UserDir, UserDir).
+    setup_ecdsa_auth_keys(Size, DataDir, UserDir).
 
 clean_dsa(UserDir) ->
     del_dirs(filename:join(UserDir, "system")),
@@ -437,6 +439,29 @@ setup_rsa_pass_pharse(DataDir, UserDir, Phrase) ->
     file:copy(filename:join(DataDir, "ssh_host_rsa_key.pub"), filename:join(System, "ssh_host_rsa_key.pub")),
     setup_rsa_known_host(DataDir, UserDir),
     setup_rsa_auth_keys(DataDir, UserDir).
+
+setup_ecdsa_pass_phrase(Size, DataDir, UserDir, Phrase) ->
+    try
+        {ok, KeyBin} = 
+            case file:read_file(F=filename:join(DataDir, "id_ecdsa"++Size)) of
+                {error,E} ->
+                    ct:log("Failed (~p) to read ~p~nFiles: ~p", [E,F,file:list_dir(DataDir)]),
+                    file:read_file(filename:join(DataDir, "id_ecdsa"));
+                Other ->
+                    Other
+            end,
+        setup_pass_pharse(KeyBin, filename:join(UserDir, "id_ecdsa"), Phrase),
+        System = filename:join(UserDir, "system"),
+        file:make_dir(System),
+        file:copy(filename:join(DataDir, "ssh_host_ecdsa_key"++Size), filename:join(System, "ssh_host_ecdsa_key")),
+        file:copy(filename:join(DataDir, "ssh_host_ecdsa_key"++Size++".pub"), filename:join(System, "ssh_host_ecdsa_key.pub")),
+        setup_ecdsa_known_host(Size, System, UserDir),
+        setup_ecdsa_auth_keys(Size, DataDir, UserDir)
+    of 
+        _ -> true
+    catch
+        _:_ -> false
+    end.
 
 setup_pass_pharse(KeyBin, OutFile, Phrase) ->
     [{KeyType, _,_} = Entry0] = public_key:pem_decode(KeyBin),
@@ -489,8 +514,15 @@ setup_rsa_auth_keys(Dir, UserDir) ->
     PKey = #'RSAPublicKey'{publicExponent = E, modulus = N},
     setup_auth_keys([{ PKey, [{comment, "Test"}]}], UserDir).
 
-setup_ecdsa_auth_keys(_Size, Dir, UserDir) ->
-    {ok, Pem} = file:read_file(filename:join(Dir, "id_ecdsa")),
+setup_ecdsa_auth_keys(Size, Dir, UserDir) ->
+    {ok, Pem} =
+        case file:read_file(F=filename:join(Dir, "id_ecdsa"++Size)) of
+            {error,E} ->
+                ct:log("Failed (~p) to read ~p~nFiles: ~p", [E,F,file:list_dir(Dir)]),
+                file:read_file(filename:join(Dir, "id_ecdsa"));
+            Other ->
+                Other
+        end,
     ECDSA = public_key:pem_entry_decode(hd(public_key:pem_decode(Pem))),
     #'ECPrivateKey'{publicKey = Q,
 		    parameters = Param = {namedCurve,_Id0}} = ECDSA,
@@ -500,8 +532,12 @@ setup_ecdsa_auth_keys(_Size, Dir, UserDir) ->
 setup_auth_keys(Keys, Dir) ->
     AuthKeys = public_key:ssh_encode(Keys, auth_keys),
     AuthKeysFile = filename:join(Dir, "authorized_keys"),
-    file:write_file(AuthKeysFile, AuthKeys).
+    ok = file:write_file(AuthKeysFile, AuthKeys),
+    AuthKeys.
 
+write_auth_keys(Keys, Dir) ->
+    AuthKeysFile = filename:join(Dir, "authorized_keys"),
+    file:write_file(AuthKeysFile, Keys).
 
 del_dirs(Dir) ->
     case file:list_dir(Dir) of
@@ -566,9 +602,9 @@ check_ssh_client_support2(P) ->
 	{P, {data, _A}} ->
 	    check_ssh_client_support2(P);
 	{P, {exit_status, E}} ->
+            ct:log("~p:~p exit_status:~n~p",[?MODULE,?LINE,E]),
 	    E
     after 5000 ->
-
 	    ct:log("Openssh command timed out ~n"),
 	    -1
     end.
@@ -618,14 +654,14 @@ default_algorithms(sshc, DaemonOptions) ->
 	{hostport,Srvr,{_Host,Port}} ->
 	    spawn(fun()-> os:cmd(lists:concat(["ssh -o \"StrictHostKeyChecking no\" -p ",Port," localhost"])) end)
     after ?TIMEOUT ->
-	    ct:fail("No server respons 1")
+	    ct:fail("No server respons (timeout) 1")
     end,
 
     receive
 	{result,Srvr,L} ->
 	    L
     after ?TIMEOUT ->
-	    ct:fail("No server respons 2")
+	    ct:fail("No server respons (timeout) 2")
     end.
 
 run_fake_ssh({ok,InitialState}) ->
@@ -739,12 +775,12 @@ ssh_type1() ->
 		not_found;
 	    Path ->
 		ct:log("~p:~p Found \"ssh\" at ~p",[?MODULE,?LINE,Path]),
-		case os:cmd("ssh -V") of
+                case installed_ssh_version(timeout) of
 		    Version = "OpenSSH" ++ _ ->
                         ct:log("~p:~p Found OpenSSH  ~p",[?MODULE,?LINE,Version]),
 			openSSH;
-		    Str -> 
-			ct:log("ssh client ~p is unknown",[Str]),
+                    Other ->
+			ct:log("ssh client ~p is unknown",[Other]),
 			unknown
 		end
 	end
@@ -753,6 +789,20 @@ ssh_type1() ->
 	    ct:log("~p:~p Exception ~p:~p",[?MODULE,?LINE,Class,Exception]),
 	    not_found
     end.
+
+installed_ssh_version(TimeoutReturn) ->
+    Parent = self(),
+    Pid = spawn(fun() ->
+                        Parent ! {open_ssh_version, os:cmd("ssh -V")}
+                end),
+    receive
+        {open_ssh_version, V} ->
+            V
+    after ?TIMEOUT ->
+            exit(Pid, kill),
+            TimeoutReturn
+    end.
+
 
 		   
 

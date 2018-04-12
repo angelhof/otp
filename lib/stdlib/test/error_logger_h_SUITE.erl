@@ -162,7 +162,7 @@ tty_log_open(Log) ->
 		{ok,D} -> D;
 		_ -> unlimited
 	    end,
-    error_logger:add_report_handler(?MODULE, {Fd,Depth}),
+    error_logger:add_report_handler(?MODULE, {Fd,Depth,latin1}),
     Fd.
 
 tty_log_close() ->
@@ -257,8 +257,7 @@ match_output([Item|T], Lines0, AtNode, Depth) ->
 	Lines ->
 	    match_output(T, Lines, AtNode, Depth)
     catch
-	C:E ->
-	    Stk = erlang:get_stacktrace(),
+	C:E:Stk ->
 	    io:format("ITEM: ~p", [Item]),
 	    io:format("LINES: ~p", [Lines0]),
 	    erlang:raise(C, E, Stk)
@@ -393,11 +392,11 @@ dl_format_1([], [], _, Facc, Aacc) ->
 %%% calling error_logger_tty_h:write_event/2.
 %%%
 
-init({_,_}=St) ->
+init({_,_,_}=St) ->
     {ok,St}.
 
-handle_event(Event, {Fd,Depth}=St) ->
-    case error_logger_tty_h:write_event(tag_event(Event), io_lib, Depth) of
+handle_event(Event, {Fd,Depth,Enc}=St) ->
+    case error_logger_tty_h:write_event(tag_event(Event), io_lib, {Depth,Enc}) of
 	ok ->
 	    ok;
 	Str when is_list(Str) ->
@@ -405,7 +404,7 @@ handle_event(Event, {Fd,Depth}=St) ->
     end,
     {ok,St}.
 
-terminate(_Reason, {Fd,_}) ->
+terminate(_Reason, {Fd,_,_}) ->
     ok = file:close(Fd),
     [].
 

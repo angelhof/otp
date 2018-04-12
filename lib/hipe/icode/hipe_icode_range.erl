@@ -1161,6 +1161,8 @@ basic_type(#gc_test{}) -> not_analysed;
 %% Message handling
 basic_type(check_get_msg) -> not_analysed;
 basic_type(next_msg) -> not_analysed;
+basic_type(recv_mark) -> not_analysed;
+basic_type(recv_set) -> not_analysed;
 basic_type(select_msg) -> not_analysed;
 basic_type(suspend_msg) -> not_analysed;
 %% Functions
@@ -1185,7 +1187,9 @@ basic_type(unsafe_hd) -> not_analysed;
 basic_type(unsafe_tl) -> not_int;
 basic_type(#element{}) -> not_analysed;
 basic_type(#unsafe_element{}) -> not_analysed;
-basic_type(#unsafe_update_element{}) -> not_analysed.
+basic_type(#unsafe_update_element{}) -> not_analysed;
+basic_type(build_stacktrace) -> not_int;
+basic_type(raw_raise) -> not_int.
 
 -spec analyse_bs_get_integer(integer(), integer(), boolean()) -> range_tuple().
 

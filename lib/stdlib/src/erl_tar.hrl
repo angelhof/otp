@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2017. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -21,7 +21,12 @@
 -record(add_opts, {
 	 read_info,          %% Fun to use for read file/link info.
 	 chunk_size = 0,     %% For file reading when sending to sftp. 0=do not chunk
-         verbose = false}).  %% Verbose on/off.
+         verbose = false,    %% Verbose on/off.
+         atime = undefined,
+         mtime = undefined,
+         ctime = undefined,
+         uid = 0,
+         gid = 0}).
 -type add_opts() :: #add_opts{}.
 
 %% Options used when reading a tar archive.
@@ -36,7 +41,12 @@
 
 -type add_opt() :: dereference |
                    verbose |
-                   {chunks, pos_integer()}.
+                   {chunks, pos_integer()} |
+                   {atime, non_neg_integer()} |
+                   {mtime, non_neg_integer()} |
+                   {ctime, non_neg_integer()} |
+                   {uid, non_neg_integer()} |
+                   {gid, non_neg_integer()}.
 
 -type extract_opt() :: {cwd, string()} |
                        {files, [string()]} |
@@ -55,6 +65,8 @@
                      {string(), binary()} |
                      {string(), file:filename()}].
 
+-type tar_time() :: non_neg_integer().
+
 %% The tar header, once fully parsed.
 -record(tar_header, {
           name = "" :: string(),                %% name of header file entry
@@ -62,15 +74,15 @@
           uid = 0 :: non_neg_integer(),         %% user id of owner
           gid = 0 :: non_neg_integer(),         %% group id of owner
           size = 0 :: non_neg_integer(),        %% length in bytes
-          mtime :: calendar:datetime(),         %% modified time
+          mtime :: tar_time(),                  %% modified time
           typeflag :: char(),                   %% type of header entry
           linkname = "" :: string(),            %% target name of link
           uname = "" :: string(),               %% user name of owner
           gname = "" :: string(),               %% group name of owner
           devmajor = 0 :: non_neg_integer(),    %% major number of character or block device
           devminor = 0 :: non_neg_integer(),    %% minor number of character or block device
-          atime :: calendar:datetime(),         %% access time
-          ctime :: calendar:datetime()          %% status change time
+          atime :: tar_time(),                  %% access time
+          ctime :: tar_time()                   %% status change time
          }).
 -type tar_header() :: #tar_header{}.
 

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
-     {timetrap, {seconds, 30}}].
+     {timetrap, {minutes, 2}}].
 
 all() ->
     Common = [errors, on_load],
@@ -60,7 +60,7 @@ all() ->
 init_per_testcase(Func, Config) when is_atom(Func), is_list(Config) ->
     Config.
 
-end_per_testcase(_Func, Config) ->
+end_per_testcase(_Func, _Config) ->
     %% Reloading the module will clear all trace patterns, and
     %% in a debug-compiled emulator run assertions of the counters
     %% for the number of traced exported functions in this module.
@@ -1116,8 +1116,8 @@ get_deep_4_loc(Arg) ->
         deep_4(Arg),
         ct:fail(should_not_return_to_here)
     catch
-        _:_ ->
-            [{?MODULE,deep_4,1,Loc0}|_] = erlang:get_stacktrace(),
+        _:_:Stk ->
+            [{?MODULE,deep_4,1,Loc0}|_] = Stk,
             Loc0
     end.
 

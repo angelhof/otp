@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@
 -export([vsn/0]).
 
 %% observer stuff
--export([sys_info/0, get_port_list/0,
+-export([sys_info/0, get_port_list/0, procs_info/1,
 	 get_table/3, get_table_list/2, fetch_stats/2]).
 
 %% etop stuff
@@ -36,6 +36,7 @@
 	 ttb_write_binary/2,
 	 ttb_stop/1,
 	 ttb_fetch/2,
+	 ttb_fetch/3,
          ttb_resume_trace/0,
 	 ttb_get_filenames/1]).
 -define(CHUNKSIZE,8191). % 8 kbytes - 1 byte
@@ -63,9 +64,7 @@ sys_info() ->
 			  end,
 
     {{_,Input},{_,Output}} = erlang:statistics(io),
-    [{process_count, erlang:system_info(process_count)},
-     {process_limit, erlang:system_info(process_limit)},
-     {uptime, element(1, erlang:statistics(wall_clock))},
+    [{uptime, element(1, erlang:statistics(wall_clock))},
      {run_queue, erlang:statistics(run_queue)},
      {io_input, Input},
      {io_output,  Output},
@@ -86,7 +85,17 @@ sys_info() ->
      {thread_pool_size, erlang:system_info(thread_pool_size)},
      {wordsize_internal, erlang:system_info({wordsize, internal})},
      {wordsize_external, erlang:system_info({wordsize, external})},
-     {alloc_info, alloc_info()}
+     {alloc_info, alloc_info()},
+     {process_count, erlang:system_info(process_count)},
+     {atom_limit,  erlang:system_info(atom_limit)},
+     {atom_count, erlang:system_info(atom_count)},
+     {process_limit, erlang:system_info(process_limit)},
+     {process_count, erlang:system_info(process_count)},
+     {port_limit, erlang:system_info(port_limit)},
+     {port_count, erlang:system_info(port_count)},
+     {ets_limit,  erlang:system_info(ets_limit)},
+     {ets_count, length(ets:all())},
+     {dist_buf_busy_limit, erlang:system_info(dist_buf_busy_limit)}
      | MemInfo].
 
 alloc_info() ->
@@ -270,7 +279,7 @@ get_table_list(mnesia, Opts) ->
 			     end,
 		       [Tab|Acc]
 		   catch _:_What ->
-			   %% io:format("Skipped ~p: ~p ~p ~n",[Id, _What, erlang:get_stacktrace()]),
+			   %% io:format("Skipped ~p: ~p ~p ~n",[Id, _What, Stacktrace]),
 			   Acc
 		   end
 	   end,
@@ -284,7 +293,7 @@ fetch_stats_loop(Parent, Time) ->
     erlang:system_flag(scheduler_wall_time, true),
     receive
 	_Msg ->
-	    %% erlang:system_flag(scheduler_wall_time, false)
+	    erlang:system_flag(scheduler_wall_time, false),
 	    ok
     after Time ->
 	    _M = Parent ! {stats, 1,
@@ -293,6 +302,23 @@ fetch_stats_loop(Parent, Time) ->
 			   try erlang:memory() catch _:_ -> [] end},
 	    fetch_stats_loop(Parent, Time)
     end.
+
+%%
+%% Chunk sending process info to etop/observer
+%%
+procs_info(Collector) ->
+    All = processes(),
+    Send = fun Send (Pids) ->
+                   try lists:split(10000, Pids) of
+                       {First, Rest} ->
+                           Collector ! {procs_info, self(), etop_collect(First, [])},
+                           Send(Rest)
+                   catch _:_ ->
+                           Collector ! {procs_info, self(), etop_collect(Pids, [])}
+                   end
+           end,
+    Send(All).
+
 %%
 %% etop backend
 %%
@@ -314,7 +340,6 @@ etop_collect(Collector) ->
 
     case SchedulerWallTime of
 	undefined ->
-            erlang:system_flag(scheduler_wall_time,true),
             spawn(fun() -> flag_holder_proc(Collector) end),
             ok;
 	_ ->
@@ -322,10 +347,11 @@ etop_collect(Collector) ->
     end.
 
 flag_holder_proc(Collector) ->
+    erlang:system_flag(scheduler_wall_time,true),
     Ref = erlang:monitor(process,Collector),
     receive
 	{'DOWN',Ref,_,_,_} ->
-	    %% erlang:system_flag(scheduler_wall_time,false)
+	    erlang:system_flag(scheduler_wall_time,false),
 	    ok
     end.
 
@@ -633,21 +659,41 @@ stop_seq_trace() ->
 
 %% Fetch ttb logs from remote node
 ttb_fetch(MetaFile,{Port,Host}) ->
+    ttb_fetch(MetaFile,{Port,Host},undefined).
+ttb_fetch(MetaFile,{Port,Host},MasterEnc) ->
     erlang:process_flag(priority,low),
     Files = ttb_get_filenames(MetaFile),
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 2}]),
-    send_files({Sock,Host},Files),
+    send_files({Sock,Host},Files,MasterEnc,file:native_name_encoding()),
     ok = gen_tcp:close(Sock).
 
 
-send_files({Sock,Host},[File|Files]) ->
+send_files({Sock,Host},[File|Files],MasterEnc,MyEnc) ->
     {ok,Fd} = file:open(File,[raw,read,binary]),
-    ok = gen_tcp:send(Sock,<<1,(list_to_binary(filename:basename(File)))/binary>>),
+    Basename = filename:basename(File),
+    {Code,FilenameBin} = encode_filename(Basename,MasterEnc,MyEnc),
+    ok = gen_tcp:send(Sock,<<Code,FilenameBin/binary>>),
     send_chunks(Sock,Fd),
     ok = file:delete(File),
-    send_files({Sock,Host},Files);
-send_files({_Sock,_Host},[]) ->
+    send_files({Sock,Host},Files,MasterEnc,MyEnc);
+send_files({_Sock,_Host},[],_MasterEnc,_MyEnc) ->
     done.
+
+encode_filename(Basename,undefined,MyEnc) ->
+    %% Compatible with old version of ttb.erl, but no longer crashing
+    %% for code points > 255.
+    {1,unicode:characters_to_binary(Basename,MyEnc,MyEnc)};
+encode_filename(Basename,MasterEnc,MyEnc) ->
+    case unicode:characters_to_binary(Basename,MyEnc,MasterEnc) of
+        Bin when is_binary(Bin) ->
+            %% Encoding succeeded
+            {2,Bin};
+        _ ->
+            %% Can't convert Basename from my encoding to the master
+            %% node's encoding. Doing my best and hoping that master
+            %% node can fix it...
+            {3,unicode:characters_to_binary(Basename,MyEnc,MyEnc)}
+    end.
 
 send_chunks(Sock,Fd) ->
     case file:read(Fd,?CHUNKSIZE) of

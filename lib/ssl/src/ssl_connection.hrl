@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2013-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2013-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -57,6 +57,7 @@
 	  session_cache_cb      :: atom(),
 	  crl_db                :: term(), 
           negotiated_version    :: ssl_record:ssl_version() | 'undefined',
+          client_hello_version  :: ssl_record:ssl_version() | 'undefined',
           client_certificate_requested = false :: boolean(),
 	  key_algorithm         :: ssl_cipher:key_algo(),
 	  hashsign_algorithm = {undefined, undefined},

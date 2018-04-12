@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2001-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2001-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -2414,8 +2414,8 @@ do_analyse_to_file1(Module, OutFile, ErlFile, HTML) ->
 	{ok, InFd} ->
 	    case file:open(OutFile, [write,raw,delayed_write]) of
 		{ok, OutFd} ->
+                    Enc = encoding(ErlFile),
 		    if HTML -> 
-                           Encoding = encoding(ErlFile),
                            Header =
                                ["<!DOCTYPE HTML PUBLIC "
                                 "\"-//W3C//DTD HTML 3.2 Final//EN\">\n"
@@ -2423,13 +2423,14 @@ do_analyse_to_file1(Module, OutFile, ErlFile, HTML) ->
                                 "<head>\n"
                                 "<meta http-equiv=\"Content-Type\""
                                 " content=\"text/html; charset=",
-                                Encoding,"\"/>\n"
+                                html_encoding(Enc),"\"/>\n"
                                 "<title>",OutFile,"</title>\n"
                                 "</head>"
                                 "<body style='background-color: white;"
                                 " color: black'>\n"
                                 "<pre>\n"],
-                           ok = file:write(OutFd,Header);
+                            H1Bin = unicode:characters_to_binary(Header,Enc,Enc),
+                            ok = file:write(OutFd,H1Bin);
 		       true -> ok
 		    end,
 		    
@@ -2438,21 +2439,26 @@ do_analyse_to_file1(Module, OutFile, ErlFile, HTML) ->
                    Timestamp =
                        io_lib:format("~p-~s-~s at ~s:~s:~s",
                                      [Y,
-                                      string:right(integer_to_list(Mo), 2, $0),
-                                      string:right(integer_to_list(D),  2, $0),
-                                      string:right(integer_to_list(H),  2, $0),
-                                      string:right(integer_to_list(Mi), 2, $0),
-                                      string:right(integer_to_list(S),  2, $0)]),
-                    ok = file:write(OutFd,
-                               ["File generated from ",ErlFile," by COVER ",
+                                      string:pad(integer_to_list(Mo), 2, leading, $0),
+                                      string:pad(integer_to_list(D),  2, leading, $0),
+                                      string:pad(integer_to_list(H),  2, leading, $0),
+                                      string:pad(integer_to_list(Mi), 2, leading, $0),
+                                      string:pad(integer_to_list(S),  2, leading, $0)]),
+
+                    H2Bin = unicode:characters_to_binary(
+                              ["File generated from ",ErlFile," by COVER ",
                                 Timestamp,"\n\n"
                                 "**************************************"
                                 "**************************************"
-                                "\n\n"]),
+                                "\n\n"],
+                              Enc, Enc),
+                    ok = file:write(OutFd, H2Bin),
 
 		    Pattern = {#bump{module=Module,line='$1',_='_'},'$2'},
 		    MS = [{Pattern,[{is_integer,'$1'},{'>','$1',0}],[{{'$1','$2'}}]}],
-		    CovLines = lists:keysort(1,ets:select(?COLLECTION_TABLE, MS)),
+                    CovLines0 =
+                        lists:keysort(1, ets:select(?COLLECTION_TABLE, MS)),
+                    CovLines = merge_dup_lines(CovLines0),
 		    print_lines(Module, CovLines, InFd, OutFd, 1, HTML),
 		    
 		    if HTML ->
@@ -2473,28 +2479,32 @@ do_analyse_to_file1(Module, OutFile, ErlFile, HTML) ->
 	    {error, {file, ErlFile, Reason}}
     end.
 
+merge_dup_lines(CovLines) ->
+    merge_dup_lines(CovLines, []).
+merge_dup_lines([{L, N}|T], [{L, NAcc}|TAcc]) ->
+    merge_dup_lines(T, [{L, NAcc + N}|TAcc]);
+merge_dup_lines([{L, N}|T], Acc) ->
+    merge_dup_lines(T, [{L, N}|Acc]);
+merge_dup_lines([], Acc) ->
+    lists:reverse(Acc).
 
 print_lines(Module, CovLines, InFd, OutFd, L, HTML) ->
     case file:read_line(InFd) of
 	eof ->
 	    ignore;
-	{ok,"%"++_=Line} ->		 %Comment line - not executed.
-	    ok = file:write(OutFd, [tab(),escape_lt_and_gt(Line, HTML)]),
-	    print_lines(Module, CovLines, InFd, OutFd, L+1, HTML);
 	{ok,RawLine} ->
 	    Line = escape_lt_and_gt(RawLine,HTML),
 	    case CovLines of
 	       [{L,N}|CovLines1] ->
-		    %% N = lists:foldl(fun([Ni], Nacc) -> Nacc+Ni end, 0, Ns),
                     if N=:=0, HTML=:=true ->
                            LineNoNL = Line -- "\n",
                            Str = "     0",
-                           %%Str = string:right("0", 6, 32),
+                           %%Str = string:pad("0", 6, leading, $\s),
                            RedLine = ["<font color=red>",Str,fill1(),
                                       LineNoNL,"</font>\n"],
                            ok = file:write(OutFd, RedLine);
                        N < 1000000 ->
-                           Str = string:right(integer_to_list(N), 6, 32),
+                           Str = string:pad(integer_to_list(N), 6, leading, $\s),
                            ok = file:write(OutFd, [Str,fill1(),Line]);
                        N < 10000000 ->
                            Str = integer_to_list(N),
@@ -2504,7 +2514,7 @@ print_lines(Module, CovLines, InFd, OutFd, L, HTML) ->
                            ok = file:write(OutFd, [Str,fill3(),Line])
                     end,
 		    print_lines(Module, CovLines1, InFd, OutFd, L+1, HTML);
-		_ ->
+		_ ->                            %Including comment lines
 		    ok = file:write(OutFd, [tab(),Line]),
 		    print_lines(Module, CovLines, InFd, OutFd, L+1, HTML)
 	    end
@@ -2752,16 +2762,22 @@ pmap_collect(Mons,Acc) ->
     end.
 
 %%%-----------------------------------------------------------------
-%%% Read encoding from source file
+%%% Decide which encoding to use when analyzing to file.
+%%% The target file contains the file path, so if either the file name
+%%% encoding or the encoding of the source file is utf8, then we need
+%%% to use utf8.
 encoding(File) ->
-    Encoding =
-       case epp:read_encoding(File) of
-           none ->
-               epp:default_encoding();
-           E ->
-               E
-       end,
-    html_encoding(Encoding).
+    case file:native_name_encoding() of
+        latin1 ->
+            case epp:read_encoding(File) of
+                none ->
+                    epp:default_encoding();
+                E ->
+                    E
+            end;
+        utf8 ->
+            utf8
+    end.
 
 html_encoding(latin1) ->
     "iso-8859-1";

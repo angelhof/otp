@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
 {application, kernel,
  [
   {description, "ERTS  CXC 138 10"},
-  {vsn, "5.2"},
+  {vsn, "5.4.3"},
   {modules, [application,
 	     application_controller,
 	     application_master,
@@ -44,6 +44,7 @@
 	     global_group,
 	     global_search,
 	     group,
+	     group_history,
 	     heart,
 	     hipe_unified_loader,
 	     inet6_tcp,
@@ -56,6 +57,7 @@
 	     inet_tcp_dist,
 	     kernel,
 	     kernel_config,
+	     kernel_refc,
 	     local_tcp,
 	     local_udp,
 	     net,
@@ -87,6 +89,13 @@
              inet_udp,
 	     inet_sctp,
              pg2,
+             raw_file_io,
+             raw_file_io_compressed,
+             raw_file_io_deflate,
+             raw_file_io_delayed,
+             raw_file_io_inflate,
+             raw_file_io_list,
+             raw_file_io_raw,
 	     seq_trace,
 	     standard_error,
 	     wrap_log_reader]},
@@ -106,6 +115,7 @@
 		heart,
 		init,
 		kernel_config,
+		kernel_refc,
 		kernel_sup,
 		net_kernel,
 		net_sup,
@@ -119,6 +129,6 @@
   {applications, []},
   {env, [{error_logger, tty}]},
   {mod, {kernel, []}},
-  {runtime_dependencies, ["erts-9.0", "stdlib-3.0", "sasl-3.0"]}
+  {runtime_dependencies, ["erts-10.0", "stdlib-3.5", "sasl-3.0"]}
  ]
 }.

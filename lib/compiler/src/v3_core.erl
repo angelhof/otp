@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -922,8 +922,9 @@ try_exception(Ecs0, St0) ->
     %% Note that Tag is not needed for rethrow - it is already in Info.
     {Evs,St1} = new_vars(3, St0), % Tag, Value, Info
     {Ecs1,Ceps,St2} = clauses(Ecs0, St1),
+    Ecs2 = try_build_stacktrace(Ecs1, hd(Evs)),
     [_,Value,Info] = Evs,
-    LA = case Ecs1 of
+    LA = case Ecs2 of
 	     [] -> [];
 	     [C|_] -> get_lineno_anno(C)
 	 end,
@@ -932,7 +933,7 @@ try_exception(Ecs0, St0) ->
 		  body=[#iprimop{anno=#a{},       %Must have an #a{}
 				 name=#c_literal{val=raise},
 				 args=[Info,Value]}]},
-    Hs = [#icase{anno=#a{anno=LA},args=[c_tuple(Evs)],clauses=Ecs1,fc=Ec}],
+    Hs = [#icase{anno=#a{anno=LA},args=[c_tuple(Evs)],clauses=Ecs2,fc=Ec}],
     {Evs,Ceps++Hs,St2}.
 
 try_after(As, St0) ->
@@ -947,6 +948,25 @@ try_after(As, St0) ->
 		  body=B},
     Hs = [#icase{anno=#a{},args=[c_tuple(Evs)],clauses=[],fc=Ec}],
     {Evs,Hs,St1}.
+
+try_build_stacktrace([#iclause{pats=Ps0,body=B0}=C0|Cs], RawStk) ->
+    [#c_tuple{es=[Class,Exc,Stk]}=Tup] = Ps0,
+    case Stk of
+        #c_var{name='_'} ->
+            %% Stacktrace variable is not used. Nothing to do.
+            [C0|try_build_stacktrace(Cs, RawStk)];
+        _ ->
+            %% Add code to build the stacktrace.
+            Ps = [Tup#c_tuple{es=[Class,Exc,RawStk]}],
+            Call = #iprimop{anno=#a{},
+                            name=#c_literal{val=build_stacktrace},
+                            args=[RawStk]},
+            Iset = #iset{var=Stk,arg=Call},
+            B = [Iset|B0],
+            C = C0#iclause{pats=Ps,body=B},
+            [C|try_build_stacktrace(Cs, RawStk)]
+    end;
+try_build_stacktrace([], _) -> [].
 
 %% expr_bin([ArgExpr], St) -> {[Arg],[PreExpr],St}.
 %%  Flatten the arguments of a bin. Do this straight left to right!
@@ -1134,7 +1154,7 @@ fun_tq(Cs0, L, St0, NameInfo) ->
 %% lc_tq(Line, Exp, [Qualifier], Mc, State) -> {LetRec,[PreExp],State}.
 %%  This TQ from Simon PJ pp 127-138.  
 
-lc_tq(Line, E, [#igen{anno=GAnno,ceps=Ceps,
+lc_tq(Line, E, [#igen{anno=#a{anno=GA}=GAnno,ceps=Ceps,
 		      acc_pat=AccPat,acc_guard=AccGuard,
                       skip_pat=SkipPat,tail=Tail,tail_pat=TailPat,
                       arg={Pre,Arg}}|Qs], Mc, St0) ->
@@ -1144,7 +1164,7 @@ lc_tq(Line, E, [#igen{anno=GAnno,ceps=Ceps,
     F = #c_var{anno=LA,name={Name,1}},
     Nc = #iapply{anno=GAnno,op=F,args=[Tail]},
     {Var,St2} = new_var(St1),
-    Fc = function_clause([Var], LA, {Name,1}),
+    Fc = function_clause([Var], GA, {Name,1}),
     TailClause = #iclause{anno=LAnno,pats=[TailPat],guard=[],body=[Mc]},
     Cs0 = case {AccPat,AccGuard} of
               {SkipPat,[]} ->
@@ -1167,9 +1187,9 @@ lc_tq(Line, E, [#igen{anno=GAnno,ceps=Ceps,
                                   body=Lps ++ [Lc]}|Cs0],
                         St3}
                end,
-    Fun = #ifun{anno=LAnno,id=[],vars=[Var],clauses=Cs,fc=Fc},
-    {#iletrec{anno=LAnno#a{anno=[list_comprehension|LA]},defs=[{{Name,1},Fun}],
-              body=Pre ++ [#iapply{anno=LAnno,op=F,args=[Arg]}]},
+    Fun = #ifun{anno=GAnno,id=[],vars=[Var],clauses=Cs,fc=Fc},
+    {#iletrec{anno=GAnno#a{anno=[list_comprehension|GA]},defs=[{{Name,1},Fun}],
+              body=Pre ++ [#iapply{anno=GAnno,op=F,args=[Arg]}]},
      Ceps,St4};
 lc_tq(Line, E, [#ifilter{}=Filter|Qs], Mc, St) ->
     filter_tq(Line, E, Filter, Mc, St, Qs, fun lc_tq/5);
@@ -1987,7 +2007,7 @@ new_fun_name(Type, #core{fcount=C}=St) ->
 %% new_var_name(State) -> {VarName,State}.
 
 new_var_name(#core{vcount=C}=St) ->
-    {list_to_atom("@c" ++ integer_to_list(C)),St#core{vcount=C + 1}}.
+    {C,St#core{vcount=C + 1}}.
 
 %% new_var(State) -> {{var,Name},State}.
 %% new_var(LineAnno, State) -> {{var,Name},State}.
@@ -2483,9 +2503,11 @@ cexpr(#icase{anno=A,args=Largs,clauses=Lcs,fc=Lfc}, As, St0) ->
 cexpr(#ireceive1{anno=A,clauses=Lcs}, As, St0) ->
     Exp = intersection(A#a.ns, As),		%Exports
     {Ccs,St1} = cclauses(Lcs, Exp, St0),
+    True = #c_literal{val=true},
+    Action = core_lib:make_values(lists:duplicate(1+length(Exp), True)),
     {#c_receive{anno=A#a.anno,
 		clauses=Ccs,
-		timeout=#c_literal{val=infinity},action=#c_literal{val=true}},
+		timeout=#c_literal{val=infinity},action=Action},
      Exp,A#a.us,St1};
 cexpr(#ireceive2{anno=A,clauses=Lcs,timeout=Lto,action=Les}, As, St0) ->
     Exp = intersection(A#a.ns, As),		%Exports
@@ -2526,8 +2548,46 @@ cexpr(#ifun{anno=#a{us=Us0}=A0,name={named,Name},fc=#iclause{pats=Ps}}=Fun0,
     end;
 cexpr(#iapply{anno=A,op=Op,args=Args}, _As, St) ->
     {#c_apply{anno=A#a.anno,op=Op,args=Args},[],A#a.us,St};
-cexpr(#icall{anno=A,module=Mod,name=Name,args=Args}, _As, St) ->
-    {#c_call{anno=A#a.anno,module=Mod,name=Name,args=Args},[],A#a.us,St};
+cexpr(#icall{anno=A,module=Mod,name=Name,args=Args}, _As, St0) ->
+    Anno = A#a.anno,
+    case (not cerl:is_c_atom(Mod)) andalso member(tuple_calls, St0#core.opts) of
+	true ->
+	    GenAnno = [compiler_generated|Anno],
+
+	    %% Generate the clause that matches on the tuple
+	    {TupleVar,St1} = new_var(GenAnno, St0),
+	    {TupleSizeVar, St2} = new_var(GenAnno, St1),
+	    {TupleModVar, St3} = new_var(GenAnno, St2),
+	    {TupleArgsVar, St4} = new_var(GenAnno, St3),
+	    TryVar = cerl:c_var('Try'),
+
+	    TupleGuardExpr =
+		cerl:c_let([TupleSizeVar],
+			   c_call_erl(tuple_size, [TupleVar]),
+			   c_call_erl('>', [TupleSizeVar, cerl:c_int(0)])),
+
+	    TupleGuard =
+		cerl:c_try(TupleGuardExpr, [TryVar], TryVar,
+			   [cerl:c_var('T'),cerl:c_var('R')], cerl:c_atom(false)),
+
+	    TupleApply =
+		cerl:c_let([TupleModVar],
+			   c_call_erl(element, [cerl:c_int(1),TupleVar]),
+			   cerl:c_let([TupleArgsVar],
+				      cerl:make_list(Args ++ [TupleVar]),
+				      c_call_erl(apply, [TupleModVar,Name,TupleArgsVar]))),
+
+	    TupleClause = cerl:ann_c_clause(GenAnno, [TupleVar], TupleGuard, TupleApply),
+
+	    %% Generate the fallback clause
+	    {OtherVar,St5} = new_var(GenAnno, St4),
+	    OtherApply = cerl:ann_c_call(GenAnno, OtherVar, Name, Args),
+	    OtherClause = cerl:ann_c_clause(GenAnno, [OtherVar], OtherApply),
+
+	    {cerl:ann_c_case(GenAnno, Mod, [TupleClause,OtherClause]),[],A#a.us,St5};
+	false ->
+	    {#c_call{anno=Anno,module=Mod,name=Name,args=Args},[],A#a.us,St0}
+    end;
 cexpr(#iprimop{anno=A,name=Name,args=Args}, _As, St) ->
     {#c_primop{anno=A#a.anno,name=Name,args=Args},[],A#a.us,St};
 cexpr(#iprotect{anno=A,body=Es}, _As, St0) ->
@@ -2557,6 +2617,9 @@ cfun(#ifun{anno=A,id=Id,vars=Args,clauses=Lcs,fc=Lfc}, _As, St0) ->
                          arg=set_anno(core_lib:make_values(Args), Anno),
                          clauses=Ccs ++ [Cfc]}},
      [],A#a.us,St3}.
+
+c_call_erl(Fun, Args) ->
+    cerl:c_call(cerl:c_atom(erlang), cerl:c_atom(Fun), Args).
 
 %% lit_vars(Literal) -> [Var].
 

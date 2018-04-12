@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2012-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2012-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@
 -export([await_port_send_result/3]).
 -export([cmp_term/2]).
 -export([map_to_tuple_keys/1, term_type/1, map_hashmap_children/1,
-         maps_to_list/2]).
+         map_next/3]).
 -export([open_port/2, port_command/3, port_connect/2, port_close/1,
 	 port_control/3, port_call/3, port_info/1, port_info/2]).
 
@@ -45,6 +45,8 @@
 -export([check_process_code/3]).
 -export([check_dirty_process_code/2]).
 -export([is_process_executing_dirty/1]).
+-export([dirty_process_handle_signals/1]).
+
 -export([release_literal_area_switch/0]).
 -export([purge_module/2]).
 
@@ -61,8 +63,22 @@
 
 -export([trace/3, trace_pattern/3]).
 
+-export([dist_ctrl_put_data/2]).
+
+-export([get_dflags/0]).
+-export([new_connection/1]).
+-export([abort_connection/2]).
+
+-export([scheduler_wall_time/1, system_flag_scheduler_wall_time/1,
+         gather_sched_wall_time_result/1,
+	 await_sched_wall_time_modifications/2]).
+
+-export([group_leader/2, group_leader/3]).
+
 %% Auto import name clash
 -export([check_process_code/1]).
+
+-export([is_process_alive/1, is_process_alive/2]).
 
 %%
 %% Await result of send to port
@@ -296,6 +312,13 @@ check_dirty_process_code(_Pid,_Module) ->
 is_process_executing_dirty(_Pid) ->
     erlang:nif_error(undefined).
 
+-spec dirty_process_handle_signals(Pid) -> Res when
+      Pid :: pid(),
+      Res :: 'false' | 'true' | 'noproc' | 'normal' | 'more' | 'ok'.
+
+dirty_process_handle_signals(_Pid) ->
+    erlang:nif_error(undefined).
+
 -spec release_literal_area_switch() -> 'true' | 'false'.
 
 release_literal_area_switch() ->
@@ -365,19 +388,22 @@ term_type(_T) ->
 map_hashmap_children(_M) ->
     erlang:nif_error(undefined).
 
+%% return the next assoc in the iterator and a new iterator
+-spec map_next(I, M, A) -> {K,V,NI} | list() when
+      I :: non_neg_integer(),
+      M :: map(),
+      K :: term(),
+      V :: term(),
+      A :: iterator | list(),
+      NI :: maps:iterator().
+
+map_next(_I, _M, _A) ->
+    erlang:nif_error(undefined).
+
 -spec erts_internal:flush_monitor_messages(Ref, Multi, Res) -> term() when
       Ref :: reference(),
       Multi :: boolean(),
       Res :: term().
-
-%% return a list of key value pairs, at most of length N
--spec maps_to_list(M,N) -> Pairs when
-    M :: map(),
-    N :: integer(),
-    Pairs :: list().
-
-maps_to_list(_M, _N) ->
-    erlang:nif_error(undefined).
 
 %% erlang:demonitor(Ref, [flush]) traps to
 %% erts_internal:flush_monitor_messages(Ref, Res) when
@@ -461,3 +487,137 @@ trace(_PidSpec, _How, _FlagList) ->
       FlagList :: [ ].
 trace_pattern(_MFA, _MatchSpec, _FlagList) ->
     erlang:nif_error(undefined).
+
+-spec dist_ctrl_put_data(DHandle, Data) -> 'ok' when
+      DHandle :: erlang:dist_handle(),
+      Data :: iolist().
+
+dist_ctrl_put_data(DHandle, IoList) ->
+    %%
+    %% Helper for erlang:dist_ctrl_put_data/2
+    %%
+    %% erlang:dist_ctrl_put_data/2 traps to
+    %% this function if second argument is
+    %% a list...
+    %%
+    try
+        Binary = erlang:iolist_to_binary(IoList),
+        %% Restart erlang:dist_ctrl_put_data/2
+        %% with the iolist converted to a binary...
+        erlang:dist_ctrl_put_data(DHandle, Binary)
+    catch
+        Class : Reason ->
+            %% Throw exception as if thrown from
+            %% erlang:dist_ctrl_put_data/2 ...
+            RootST = try erlang:error(Reason)
+                     catch
+                         error:Reason:ST ->
+                             case ST of
+                                 [] -> [];
+                                 [_|T] -> T
+                             end
+                     end,
+	    StackTrace = [{erlang, dist_ctrl_put_data,
+                           [DHandle, IoList], []}
+                          | RootST],
+	    erlang:raise(Class, Reason, StackTrace)
+    end.
+
+
+-spec erts_internal:get_dflags() -> {erts_dflags, integer(), integer(),
+                                     integer(), integer(), integer()}.
+get_dflags() ->
+    erlang:nif_error(undefined).
+
+-spec erts_internal:new_connection(Node) -> ConnId when
+      Node :: atom(),
+      ConnId :: {integer(), erlang:dist_handle()}.
+new_connection(_Node) ->
+    erlang:nif_error(undefined).
+
+-spec erts_internal:abort_connection(Node, ConnId) -> boolean() when
+      Node :: atom(),
+      ConnId :: {integer(), erlang:dist_handle()}.
+abort_connection(_Node, _ConnId) ->
+    erlang:nif_error(undefined).
+
+%% Scheduler wall time
+
+-spec erts_internal:system_flag_scheduler_wall_time(Enable) -> boolean() when
+      Enable :: boolean().
+
+system_flag_scheduler_wall_time(Bool) ->
+    kernel_refc:scheduler_wall_time(Bool).
+
+
+-spec erts_internal:await_sched_wall_time_modifications(Ref, Result) -> boolean() when
+      Ref :: reference(),
+      Result :: boolean().
+
+-spec erts_internal:scheduler_wall_time(Enable) -> boolean() when
+      Enable :: boolean().
+
+scheduler_wall_time(_Enable) ->
+    erlang:nif_error(undefined).
+
+await_sched_wall_time_modifications(Ref, Result) ->
+    sched_wall_time(Ref, erlang:system_info(schedulers)),
+    Result.
+
+-spec erts_internal:gather_sched_wall_time_result(Ref) -> [{pos_integer(),
+						     non_neg_integer(),
+						     non_neg_integer()}] when
+      Ref :: reference().
+
+gather_sched_wall_time_result(Ref) when erlang:is_reference(Ref) ->
+    sched_wall_time(Ref, erlang:system_info(schedulers), []).
+
+sched_wall_time(_Ref, 0) ->
+    ok;
+sched_wall_time(Ref, N) ->
+    receive Ref -> sched_wall_time(Ref, N-1) end.
+
+sched_wall_time(_Ref, 0, Acc) ->
+    Acc;
+sched_wall_time(Ref, N, undefined) ->
+    receive {Ref, _} -> sched_wall_time(Ref, N-1, undefined) end;
+sched_wall_time(Ref, N, Acc) ->
+    receive
+	{Ref, undefined} -> sched_wall_time(Ref, N-1, undefined);
+	{Ref, SWTL} when erlang:is_list(SWTL) -> sched_wall_time(Ref, N-1, Acc ++ SWTL);
+	{Ref, SWT} -> sched_wall_time(Ref, N-1, [SWT|Acc])
+    end.
+
+-spec erts_internal:group_leader(GL, Pid) -> true | false | badarg when
+      GL :: pid(),
+      Pid :: pid().
+
+group_leader(_GL, _Pid) ->
+    erlang:nif_error(undefined).
+
+-spec erts_internal:group_leader(GL, Pid, Ref) -> ok when
+      GL :: pid(),
+      Pid :: pid(),
+      Ref :: reference().
+
+group_leader(_GL, _Pid, _Ref) ->
+    erlang:nif_error(undefined).
+
+-spec erts_internal:is_process_alive(Pid, Ref) -> 'ok' when
+      Pid :: pid(),
+      Ref :: reference().
+
+is_process_alive(_Pid, _Ref) ->
+    erlang:nif_error(undefined).    
+
+-spec erts_internal:is_process_alive(Pid) -> boolean() when
+      Pid :: pid().
+
+is_process_alive(Pid) ->
+    Ref = make_ref(),
+    erts_internal:is_process_alive(Pid, Ref),
+    receive
+        {Ref, Res} ->
+            Res
+    end.
+

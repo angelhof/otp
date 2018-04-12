@@ -66,14 +66,14 @@ Export *export_get(Export*);
 void export_start_staging(void);
 void export_end_staging(int commit);
 
-extern erts_smp_mtx_t export_staging_lock;
-#define export_staging_lock()	erts_smp_mtx_lock(&export_staging_lock)
-#define export_staging_unlock()	erts_smp_mtx_unlock(&export_staging_lock)
+extern erts_mtx_t export_staging_lock;
+#define export_staging_lock()	erts_mtx_lock(&export_staging_lock)
+#define export_staging_unlock()	erts_mtx_unlock(&export_staging_lock)
 
 #include "beam_load.h" /* For em_* extern declarations */ 
 #define ExportIsBuiltIn(EntryPtr) 			\
 (((EntryPtr)->addressv[erts_active_code_ix()] == (EntryPtr)->beam) && \
- ((EntryPtr)->beam[0] == (BeamInstr) em_apply_bif))
+ (BeamIsOpCode((EntryPtr)->beam[0], op_apply_bif)))
 
 #if ERTS_GLB_INLINE_INCL_FUNC_DEF
 

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2015-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2015-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -42,7 +42,9 @@ suite() ->
 
 all() -> 
     [default_tree, sshc_subtree, sshd_subtree, sshd_subtree_profile,
-     killed_acceptor_restarts].
+     killed_acceptor_restarts,
+     shell_channel_tree
+    ].
 
 groups() -> 
     [].
@@ -199,8 +201,6 @@ killed_acceptor_restarts(Config) ->
     Port2 = ssh_test_lib:daemon_port(DaemonPid2),
     true = (Port /= Port2),
 
-    ct:pal("~s",[lists:flatten(ssh_info:string())]),
-
     {ok,[{AccPid,ListenAddr,Port}]} = acceptor_pid(DaemonPid),
     {ok,[{AccPid2,ListenAddr,Port2}]} = acceptor_pid(DaemonPid2),
 
@@ -214,37 +214,143 @@ killed_acceptor_restarts(Config) ->
                                               {user_dir, UserDir}]),
     [{client_version,_}] = ssh:connection_info(C1,[client_version]),
 
+    ct:log("~s",[lists:flatten(ssh_info:string())]),
+
     %% Make acceptor restart:
     exit(AccPid, kill),
+    ?wait_match(undefined, process_info(AccPid)),
 
-    %% Check it is a new acceptor:
-    {ok,[{AccPid1,ListenAddr,Port}]} = acceptor_pid(DaemonPid),
-    true = (AccPid /= AccPid1),
-    true = (AccPid2 /= AccPid1),
+    %% Check it is a new acceptor and wait if it is not:
+    ?wait_match({ok,[{AccPid1,ListenAddr,Port}]}, AccPid1=/=AccPid,
+                acceptor_pid(DaemonPid),
+                AccPid1,
+                500, 30),
+
+    true = (AccPid1 =/= AccPid2),
 
     %% Connect second client and check it is alive:
-    {ok,C2} = ssh:connect("localhost", Port, [{silently_accept_hosts, true},
-                                              {user_interaction, false},
-                                              {user, ?USER},
-                                              {password, ?PASSWD},
-                                              {user_dir, UserDir}]),
+    C2 =
+        case ssh:connect("localhost", Port, [{silently_accept_hosts, true},
+                                             {user_interaction, false},
+                                             {user, ?USER},
+                                             {password, ?PASSWD},
+                                             {user_dir, UserDir}]) of
+            {ok,_C2} ->
+                _C2;
+            _Other ->
+                ct:log("new connect failed: ~p~n~n~s",[_Other,lists:flatten(ssh_info:string())]),
+                ct:fail("Re-connect failed!", [])
+        end,
+
     [{client_version,_}] = ssh:connection_info(C2,[client_version]),
     
-    ct:pal("~s",[lists:flatten(ssh_info:string())]),
+    ct:log("~s",[lists:flatten(ssh_info:string())]),
 
     %% Check first client is still alive:
     [{client_version,_}] = ssh:connection_info(C1,[client_version]),
     
     ok = ssh:stop_daemon(DaemonPid2),
-    timer:sleep(15000),
+    ?wait_match(undefined, process_info(DaemonPid2), 1000, 30),
     [{client_version,_}] = ssh:connection_info(C1,[client_version]),
     [{client_version,_}] = ssh:connection_info(C2,[client_version]),
     
     ok = ssh:stop_daemon(DaemonPid),
-    timer:sleep(15000),
+    ?wait_match(undefined, process_info(DaemonPid), 1000, 30),
     {error,closed} = ssh:connection_info(C1,[client_version]),
     {error,closed} = ssh:connection_info(C2,[client_version]).
+
+%%-------------------------------------------------------------------------
+shell_channel_tree(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    UserDir = filename:join(PrivDir, nopubkey), % to make sure we don't use public-key-auth
+    file:make_dir(UserDir),
+    SysDir = proplists:get_value(data_dir, Config),
+    TimeoutShell =
+        fun() ->
+                io:format("TimeoutShell started!~n",[]),
+                timer:sleep(5000),
+                ct:log("~p TIMEOUT!",[self()])
+        end,
+    {Daemon, Host, Port} = ssh_test_lib:daemon([{system_dir, SysDir},
+                                                {user_dir, UserDir},
+                                                {password, "morot"},
+                                                {shell, fun(_User) ->
+                                                                spawn(TimeoutShell)
+                                                        end
+                                                }
+                                            ]),
+    ConnectionRef = ssh_test_lib:connect(Host, Port, [{silently_accept_hosts, true},
+						      {user, "foo"},
+						      {password, "morot"},
+						      {user_interaction, true},
+						      {user_dir, UserDir}]),
+
+    [ChannelSup|_] = Sups0 = chk_empty_con_daemon(Daemon),
     
+    {ok, ChannelId0} = ssh_connection:session_channel(ConnectionRef, infinity),
+    ok = ssh_connection:shell(ConnectionRef,ChannelId0),
+
+    ?wait_match([{_, GroupPid,worker,[ssh_channel]}],
+		supervisor:which_children(ChannelSup),
+               [GroupPid]),
+    {links,GroupLinks} = erlang:process_info(GroupPid, links),
+    [ShellPid] = GroupLinks--[ChannelSup],
+    ct:log("GroupPid = ~p, ShellPid = ~p",[GroupPid,ShellPid]),
+
+    receive
+        {ssh_cm,ConnectionRef, {data, ChannelId0, 0, <<"TimeoutShell started!\r\n">>}} ->
+            receive
+                %%---- wait for the subsystem to terminate
+                {ssh_cm,ConnectionRef,{closed,ChannelId0}} ->
+                    ct:log("Subsystem terminated",[]),
+                    case {chk_empty_con_daemon(Daemon),
+                          process_info(GroupPid),
+                          process_info(ShellPid)} of
+                        {Sups0, undefined, undefined} ->
+                            %% SUCCESS
+                            ssh:stop_daemon(Daemon);
+                        {Sups0, _, undefined}  ->
+                            ssh:stop_daemon(Daemon),
+                            ct:fail("Group proc lives!");
+                        {Sups0, undefined, _}  ->
+                            ssh:stop_daemon(Daemon),
+                            ct:fail("Shell proc lives!");
+                        _ ->
+                            ssh:stop_daemon(Daemon),
+                            ct:fail("Sup tree changed!")
+                    end
+            after 10000 ->
+                    ssh:close(ConnectionRef),
+                    ssh:stop_daemon(Daemon),
+                    ct:fail("CLI Timeout")
+            end
+    after 10000 ->
+            ssh:close(ConnectionRef),
+            ssh:stop_daemon(Daemon),
+            ct:fail("CLI Timeout")
+    end.
+
+
+chk_empty_con_daemon(Daemon) ->
+    ?wait_match([{_,SubSysSup, supervisor,[ssh_subsystem_sup]},
+		 {{ssh_acceptor_sup,_,_,_}, AccSup, supervisor,[ssh_acceptor_sup]}],
+		supervisor:which_children(Daemon),
+                [SubSysSup,AccSup]),
+    ?wait_match([{{server,ssh_connection_sup, _,_},
+		  ConnectionSup, supervisor,
+		  [ssh_connection_sup]},
+		 {{server,ssh_channel_sup,_ ,_},
+		  ChannelSup,supervisor,
+		  [ssh_channel_sup]}],
+		supervisor:which_children(SubSysSup),
+		[ConnectionSup,ChannelSup]),
+    ?wait_match([{{ssh_acceptor_sup,_,_,_},_,worker,[ssh_acceptor]}],
+		supervisor:which_children(AccSup)),
+    ?wait_match([{_, _, worker,[ssh_connection_handler]}],
+		supervisor:which_children(ConnectionSup)),
+    ?wait_match([], supervisor:which_children(ChannelSup)),
+    [ChannelSup, ConnectionSup, SubSysSup, AccSup].
+
 %%-------------------------------------------------------------------------
 %% Help functions
 %%-------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,25 +25,45 @@
 -export([start/0, stop/0, info_lib/0, info_fips/0, supports/0, enable_fips_mode/1,
          version/0, bytes_to_integer/1]).
 -export([hash/2, hash_init/1, hash_update/2, hash_final/1]).
--export([sign/4, verify/5]).
+-export([sign/4, sign/5, verify/5, verify/6]).
 -export([generate_key/2, generate_key/3, compute_key/4]).
 -export([hmac/3, hmac/4, hmac_init/2, hmac_update/2, hmac_final/1, hmac_final_n/2]).
 -export([cmac/3, cmac/4]).
 -export([exor/2, strong_rand_bytes/1, mod_pow/3]).
--export([rand_seed/0]).
--export([rand_seed_s/0]).
+-export([rand_seed/0, rand_seed_alg/1]).
+-export([rand_seed_s/0, rand_seed_alg_s/1]).
 -export([rand_plugin_next/1]).
 -export([rand_plugin_uniform/1]).
 -export([rand_plugin_uniform/2]).
+-export([rand_cache_plugin_next/1]).
 -export([rand_uniform/2]).
 -export([block_encrypt/3, block_decrypt/3, block_encrypt/4, block_decrypt/4]).
 -export([next_iv/2, next_iv/3]).
 -export([stream_init/2, stream_init/3, stream_encrypt/2, stream_decrypt/2]).
 -export([public_encrypt/4, private_decrypt/4]).
 -export([private_encrypt/4, public_decrypt/4]).
--export([dh_generate_parameters/2, dh_check/1]). %% Testing see
+-export([privkey_to_pubkey/2]).
 -export([ec_curve/1, ec_curves/0]).
 -export([rand_seed/1]).
+%% Engine
+-export([
+         engine_get_all_methods/0,
+         engine_load/3,
+         engine_load/4,
+         engine_unload/1,
+         engine_list/0,
+         engine_ctrl_cmd_string/3,
+         engine_ctrl_cmd_string/4
+        ]).
+
+-export_type([engine_ref/0,
+              key_id/0,
+              password/0
+             ]).
+
+
+%% Private. For tests.
+-export([packed_openssl_version/4, engine_methods_convert_to_bitmask/2, get_test_engine/0]).
 
 -deprecated({rand_uniform, 2, next_major_release}).
 
@@ -87,11 +107,12 @@ stop() ->
     application:stop(crypto).
 
 supports()->
-    {Hashs, PubKeys, Ciphers} = algorithms(),
+    {Hashs, PubKeys, Ciphers, Macs} = algorithms(),
 
     [{hashs, Hashs},
      {ciphers, Ciphers},
-     {public_keys, PubKeys}
+     {public_keys, PubKeys},
+     {macs, Macs}
     ].
 
 info_lib() -> ?nif_stub.
@@ -296,9 +317,17 @@ stream_decrypt(State, Data0) ->
 %%
 %% RAND - pseudo random numbers using RN_ and BN_ functions in crypto lib
 %%
+-type rand_cache_seed() ::
+        nonempty_improper_list(non_neg_integer(), binary()).
 -spec strong_rand_bytes(non_neg_integer()) -> binary().
 -spec rand_seed() -> rand:state().
 -spec rand_seed_s() -> rand:state().
+-spec rand_seed_alg(Alg :: atom()) ->
+                           {rand:alg_handler(),
+                            atom() | rand_cache_seed()}.
+-spec rand_seed_alg_s(Alg :: atom()) ->
+                             {rand:alg_handler(),
+                              atom() | rand_cache_seed()}.
 -spec rand_uniform(crypto_integer(), crypto_integer()) ->
 			  crypto_integer().
 
@@ -314,12 +343,36 @@ rand_seed() ->
     rand:seed(rand_seed_s()).
 
 rand_seed_s() ->
+    rand_seed_alg_s(?MODULE).
+
+rand_seed_alg(Alg) ->
+    rand:seed(rand_seed_alg_s(Alg)).
+
+-define(CRYPTO_CACHE_BITS, 56).
+rand_seed_alg_s(?MODULE) ->
     {#{ type => ?MODULE,
         bits => 64,
         next => fun ?MODULE:rand_plugin_next/1,
         uniform => fun ?MODULE:rand_plugin_uniform/1,
         uniform_n => fun ?MODULE:rand_plugin_uniform/2},
-     no_seed}.
+     no_seed};
+rand_seed_alg_s(crypto_cache) ->
+    CacheBits = ?CRYPTO_CACHE_BITS,
+    EnvCacheSize =
+        application:get_env(
+          crypto, rand_cache_size, CacheBits * 16), % Cache 16 * 8 words
+    Bytes = (CacheBits + 7) div 8,
+    CacheSize =
+        case ((EnvCacheSize + (Bytes - 1)) div Bytes) * Bytes of
+            Sz when is_integer(Sz), Bytes =< Sz ->
+                Sz;
+            _ ->
+                Bytes
+        end,
+    {#{ type => crypto_cache,
+        bits => CacheBits,
+        next => fun ?MODULE:rand_cache_plugin_next/1},
+     {CacheBits, CacheSize, <<>>}}.
 
 rand_plugin_next(Seed) ->
     {bytes_to_integer(strong_rand_range(1 bsl 64)), Seed}.
@@ -330,6 +383,12 @@ rand_plugin_uniform(State) ->
 rand_plugin_uniform(Max, State) ->
     {bytes_to_integer(strong_rand_range(Max)) + 1, State}.
 
+rand_cache_plugin_next({CacheBits, CacheSize, <<>>}) ->
+    rand_cache_plugin_next(
+      {CacheBits, CacheSize, strong_rand_bytes(CacheSize)});
+rand_cache_plugin_next({CacheBits, CacheSize, Cache}) ->
+    <<I:CacheBits, NewCache/binary>> = Cache,
+    {I, {CacheBits, CacheSize, NewCache}}.
 
 strong_rand_range(Range) when is_integer(Range), Range > 0 ->
     BinRange = int_to_bin(Range),
@@ -377,7 +436,7 @@ rand_uniform_nif(_From,_To) -> ?nif_stub.
 
 
 -spec rand_seed(binary()) -> ok.
-rand_seed(Seed) ->
+rand_seed(Seed) when is_binary(Seed) ->
     rand_seed_nif(Seed).
 
 rand_seed_nif(_Seed) -> ?nif_stub.
@@ -388,78 +447,93 @@ mod_pow(Base, Exponent, Prime) ->
 	<<0>> -> error;
 	R -> R
     end.
-verify(dss, none, Data, Signature, Key) when is_binary(Data) ->
-    verify(dss, sha, {digest, Data}, Signature, Key);
-verify(Alg, Type, Data, Signature, Key) when is_binary(Data) ->
-    verify(Alg, Type,  {digest, hash(Type, Data)}, Signature, Key);
-verify(dss, Type, {digest, Digest}, Signature, Key) ->
-    dss_verify_nif(Type, Digest, Signature, map_ensure_int_as_bin(Key));
-verify(rsa, Type, {digest, Digest}, Signature, Key) ->
-    notsup_to_error(
-      rsa_verify_nif(Type, Digest, Signature, map_ensure_int_as_bin(Key)));
-verify(ecdsa, Type, {digest, Digest}, Signature, [Key, Curve]) ->
-    notsup_to_error(
-      ecdsa_verify_nif(Type, Digest, Signature, nif_curve_params(Curve), ensure_int_as_bin(Key))).
-sign(dss, none, Data, Key) when is_binary(Data) ->
-    sign(dss, sha, {digest, Data}, Key);
-sign(Alg, Type, Data, Key) when is_binary(Data) ->
-    sign(Alg, Type, {digest, hash(Type, Data)}, Key);
-sign(rsa, Type, {digest, Digest}, Key) ->
-    case rsa_sign_nif(Type, Digest, map_ensure_int_as_bin(Key)) of
-	error -> erlang:error(badkey, [rsa, Type, {digest, Digest}, Key]);
-	Sign -> Sign
+
+verify(Algorithm, Type, Data, Signature, Key) ->
+    verify(Algorithm, Type, Data, Signature, Key, []).
+
+%% Backwards compatible
+verify(Algorithm = dss, none, Digest, Signature, Key, Options) ->
+    verify(Algorithm, sha, {digest, Digest}, Signature, Key, Options);
+verify(Algorithm, Type, Data, Signature, Key, Options) ->
+    case pkey_verify_nif(Algorithm, Type, Data, Signature, format_pkey(Algorithm, Key), Options) of
+	notsup -> erlang:error(notsup);
+	Boolean -> Boolean
+    end.
+
+
+sign(Algorithm, Type, Data, Key) ->
+    sign(Algorithm, Type, Data, Key, []).
+
+%% Backwards compatible
+sign(Algorithm = dss, none, Digest, Key, Options) ->
+    sign(Algorithm, sha, {digest, Digest}, Key, Options);
+sign(Algorithm, Type, Data, Key, Options) ->
+    case pkey_sign_nif(Algorithm, Type, Data, format_pkey(Algorithm, Key), Options) of
+	error -> erlang:error(badkey, [Algorithm, Type, Data, Key, Options]);
+	notsup -> erlang:error(notsup);
+	Signature -> Signature
+    end.
+
+
+
+-type key_id()   :: string() | binary() .
+-type password() :: string() | binary() .
+
+-type engine_key_ref() :: #{engine :=   engine_ref(),
+                            key_id :=   key_id(),
+                            password => password(),
+                            term() => term() 
+                           }.
+
+-type pk_algs() :: rsa | ecdsa | dss .
+-type pk_key()  :: engine_key_ref() | [integer() | binary()] .
+-type pk_opt()  :: list() | rsa_padding() .
+
+-spec public_encrypt(pk_algs(),  binary(), pk_key(), pk_opt()) -> binary().
+-spec public_decrypt(pk_algs(),  binary(), pk_key(), pk_opt()) -> binary().
+-spec private_encrypt(pk_algs(), binary(), pk_key(), pk_opt()) -> binary().
+-spec private_decrypt(pk_algs(), binary(), pk_key(), pk_opt()) -> binary().
+
+public_encrypt(Algorithm, In, Key, Options) when is_list(Options) ->
+    case pkey_crypt_nif(Algorithm, In, format_pkey(Algorithm, Key), Options, false, true) of
+	error -> erlang:error(encrypt_failed, [Algorithm, In, Key, Options]);
+	notsup -> erlang:error(notsup);
+	Out -> Out
     end;
-sign(dss, Type, {digest, Digest}, Key) ->
-    case dss_sign_nif(Type, Digest, map_ensure_int_as_bin(Key)) of
-	error -> erlang:error(badkey, [dss, Type, {digest, Digest}, Key]);
-	Sign -> Sign
+%% Backwards compatible
+public_encrypt(Algorithm = rsa, In, Key, Padding) when is_atom(Padding) ->
+    public_encrypt(Algorithm, In, Key, [{rsa_padding, Padding}]).
+
+private_decrypt(Algorithm, In, Key, Options) when is_list(Options) ->
+    case pkey_crypt_nif(Algorithm, In, format_pkey(Algorithm, Key), Options, true, false) of
+	error -> erlang:error(decrypt_failed, [Algorithm, In, Key, Options]);
+	notsup -> erlang:error(notsup);
+	Out -> Out
     end;
-sign(ecdsa, Type, {digest, Digest}, [Key, Curve]) ->
-    case ecdsa_sign_nif(Type, Digest, nif_curve_params(Curve), ensure_int_as_bin(Key)) of
-	error -> erlang:error(badkey, [ecdsa, Type, {digest, Digest}, [Key, Curve]]);
-	Sign -> Sign
-    end.
+%% Backwards compatible
+private_decrypt(Algorithm = rsa, In, Key, Padding) when is_atom(Padding) ->
+    private_decrypt(Algorithm, In, Key, [{rsa_padding, Padding}]).
 
--spec public_encrypt(rsa, binary(), [binary()], rsa_padding()) ->
-				binary().
--spec public_decrypt(rsa, binary(), [integer() | binary()], rsa_padding()) ->
-				binary().
--spec private_encrypt(rsa, binary(), [integer() | binary()], rsa_padding()) ->
-				binary().
--spec private_decrypt(rsa, binary(), [integer() | binary()], rsa_padding()) ->
-				binary().
+private_encrypt(Algorithm, In, Key, Options) when is_list(Options) ->
+    case pkey_crypt_nif(Algorithm, In, format_pkey(Algorithm, Key), Options, true, true) of
+	error -> erlang:error(encrypt_failed, [Algorithm, In, Key, Options]);
+	notsup -> erlang:error(notsup);
+	Out -> Out
+    end;
+%% Backwards compatible
+private_encrypt(Algorithm = rsa, In, Key, Padding) when is_atom(Padding) ->
+    private_encrypt(Algorithm, In, Key, [{rsa_padding, Padding}]).
 
-public_encrypt(rsa, BinMesg, Key, Padding) ->
-    case rsa_public_crypt(BinMesg,  map_ensure_int_as_bin(Key), Padding, true) of
-	error ->
-	    erlang:error(encrypt_failed, [rsa, BinMesg,Key, Padding]);
-	Sign -> Sign
-    end.
+public_decrypt(Algorithm, In, Key, Options) when is_list(Options) ->
+    case pkey_crypt_nif(Algorithm, In, format_pkey(Algorithm, Key), Options, false, false) of
+	error -> erlang:error(decrypt_failed, [Algorithm, In, Key, Options]);
+	notsup -> erlang:error(notsup);
+	Out -> Out
+    end;
+%% Backwards compatible
+public_decrypt(Algorithm = rsa, In, Key, Padding) when is_atom(Padding) ->
+    public_decrypt(Algorithm, In, Key, [{rsa_padding, Padding}]).
 
-%% Binary, Key = [E,N,D]
-private_decrypt(rsa, BinMesg, Key, Padding) ->
-    case rsa_private_crypt(BinMesg, map_ensure_int_as_bin(Key), Padding, false) of
-	error ->
-	    erlang:error(decrypt_failed, [rsa, BinMesg,Key, Padding]);
-	Sign -> Sign
-    end.
-
-
-%% Binary, Key = [E,N,D]
-private_encrypt(rsa, BinMesg, Key, Padding) ->
-    case rsa_private_crypt(BinMesg, map_ensure_int_as_bin(Key), Padding, true) of
-	error ->
-	    erlang:error(encrypt_failed, [rsa, BinMesg,Key, Padding]);
-	Sign -> Sign
-    end.
-
-%% Binary, Key = [E,N]
-public_decrypt(rsa, BinMesg, Key, Padding) ->
-    case rsa_public_crypt(BinMesg, map_ensure_int_as_bin(Key), Padding, false) of
-	error ->
-	    erlang:error(decrypt_failed, [rsa, BinMesg,Key, Padding]);
-	Sign -> Sign
-    end.
 
 %%
 %% XOR - xor to iolists and return a binary
@@ -559,10 +633,174 @@ compute_key(ecdh, Others, My, Curve) ->
 			 nif_curve_params(Curve),
 			 ensure_int_as_bin(My)).
 
+%%======================================================================
+%% Engine functions
+%%======================================================================
+%%----------------------------------------------------------------------
+%% Function: engine_get_all_methods/0
+%%----------------------------------------------------------------------
+-type engine_method_type() :: engine_method_rsa | engine_method_dsa | engine_method_dh |
+                              engine_method_rand | engine_method_ecdh | engine_method_ecdsa |
+                              engine_method_ciphers | engine_method_digests | engine_method_store |
+                              engine_method_pkey_meths | engine_method_pkey_asn1_meths | 
+                              engine_method_ec.
+
+-type engine_ref() :: term().
+
+-spec engine_get_all_methods() ->
+    [engine_method_type()].
+engine_get_all_methods() ->
+     notsup_to_error(engine_get_all_methods_nif()).
+
+%%----------------------------------------------------------------------
+%% Function: engine_load/3
+%%----------------------------------------------------------------------
+-spec engine_load(EngineId::unicode:chardata(),
+                  PreCmds::[{unicode:chardata(), unicode:chardata()}],
+                  PostCmds::[{unicode:chardata(), unicode:chardata()}]) ->
+    {ok, Engine::engine_ref()} | {error, Reason::term()}.
+engine_load(EngineId, PreCmds, PostCmds) when is_list(PreCmds), is_list(PostCmds) ->
+    engine_load(EngineId, PreCmds, PostCmds, engine_get_all_methods()).
+
+%%----------------------------------------------------------------------
+%% Function: engine_load/4
+%%----------------------------------------------------------------------
+-spec engine_load(EngineId::unicode:chardata(),
+                  PreCmds::[{unicode:chardata(), unicode:chardata()}],
+                  PostCmds::[{unicode:chardata(), unicode:chardata()}],
+                  EngineMethods::[engine_method_type()]) ->
+    {ok, Engine::term()} | {error, Reason::term()}.
+engine_load(EngineId, PreCmds, PostCmds, EngineMethods) when is_list(PreCmds),
+                                                             is_list(PostCmds) ->
+    try
+        ok = notsup_to_error(engine_load_dynamic_nif()),
+        case notsup_to_error(engine_by_id_nif(ensure_bin_chardata(EngineId))) of
+            {ok, Engine} ->
+                ok = engine_load_1(Engine, PreCmds, PostCmds, EngineMethods),
+                {ok, Engine};
+            {error, Error1} ->
+                {error, Error1}
+        end
+    catch
+       throw:Error2 ->
+          Error2
+    end.
+
+engine_load_1(Engine, PreCmds, PostCmds, EngineMethods) ->
+    try
+        ok = engine_nif_wrapper(engine_ctrl_cmd_strings_nif(Engine, ensure_bin_cmds(PreCmds), 0)),
+        ok = engine_nif_wrapper(engine_add_nif(Engine)),
+        ok = engine_nif_wrapper(engine_init_nif(Engine)),
+        engine_load_2(Engine, PostCmds, EngineMethods),
+        ok
+    catch
+       throw:Error ->
+          %% The engine couldn't initialise, release the structural reference
+          ok = engine_free_nif(Engine),
+          throw(Error)
+    end.
+
+engine_load_2(Engine, PostCmds, EngineMethods) ->
+    try
+        ok = engine_nif_wrapper(engine_ctrl_cmd_strings_nif(Engine, ensure_bin_cmds(PostCmds), 0)),
+        [ok = engine_nif_wrapper(engine_register_nif(Engine, engine_method_atom_to_int(Method))) ||
+            Method <- EngineMethods],
+        ok
+    catch
+       throw:Error ->
+          %% The engine registration failed, release the functional reference
+          ok = engine_finish_nif(Engine),
+          throw(Error)
+    end.
+
+%%----------------------------------------------------------------------
+%% Function: engine_unload/1
+%%----------------------------------------------------------------------
+-spec engine_unload(Engine::term()) ->
+    ok | {error, Reason::term()}.
+engine_unload(Engine) ->
+    engine_unload(Engine, engine_get_all_methods()).
+
+-spec engine_unload(Engine::term(), EngineMethods::[engine_method_type()]) ->
+    ok | {error, Reason::term()}.
+engine_unload(Engine, EngineMethods) ->
+    try
+        [ok = engine_nif_wrapper(engine_unregister_nif(Engine, engine_method_atom_to_int(Method))) ||
+            Method <- EngineMethods],
+        ok = engine_nif_wrapper(engine_remove_nif(Engine)),
+        %% Release the functional reference from engine_init_nif
+        ok = engine_nif_wrapper(engine_finish_nif(Engine)),
+        %% Release the structural reference from engine_by_id_nif
+        ok = engine_nif_wrapper(engine_free_nif(Engine))
+    catch
+       throw:Error ->
+          Error
+    end.
+
+%%----------------------------------------------------------------------
+%% Function: engine_list/0
+%%----------------------------------------------------------------------
+-spec engine_list() ->
+    [EngineId::binary()].
+engine_list() ->
+    case notsup_to_error(engine_get_first_nif()) of
+        {ok, <<>>} ->
+            [];
+        {ok, Engine} ->
+            case notsup_to_error(engine_get_id_nif(Engine)) of
+                {ok, <<>>} ->
+                    engine_list(Engine, []);
+                {ok, EngineId} ->
+                    engine_list(Engine, [EngineId])
+            end
+    end.
+
+engine_list(Engine0, IdList) ->
+    case notsup_to_error(engine_get_next_nif(Engine0)) of
+        {ok, <<>>} ->
+            lists:reverse(IdList);
+        {ok, Engine1} ->
+            case notsup_to_error(engine_get_id_nif(Engine1)) of
+                {ok, <<>>} ->
+                    engine_list(Engine1, IdList);
+                {ok, EngineId} ->
+                    engine_list(Engine1, [EngineId |IdList])
+            end
+    end.
+
+%%----------------------------------------------------------------------
+%% Function: engine_ctrl_cmd_string/3
+%%----------------------------------------------------------------------
+-spec engine_ctrl_cmd_string(Engine::term(),
+                      CmdName::unicode:chardata(), 
+                      CmdArg::unicode:chardata()) ->
+    ok | {error, Reason::term()}.
+engine_ctrl_cmd_string(Engine, CmdName, CmdArg) ->
+    engine_ctrl_cmd_string(Engine, CmdName, CmdArg, false).
+
+%%----------------------------------------------------------------------
+%% Function: engine_ctrl_cmd_string/4
+%%----------------------------------------------------------------------
+-spec engine_ctrl_cmd_string(Engine::term(),
+                      CmdName::unicode:chardata(), 
+                      CmdArg::unicode:chardata(),
+                      Optional::boolean()) ->
+    ok | {error, Reason::term()}.
+engine_ctrl_cmd_string(Engine, CmdName, CmdArg, Optional) ->
+    case engine_ctrl_cmd_strings_nif(Engine, 
+                                     ensure_bin_cmds([{CmdName, CmdArg}]), 
+                                     bool_to_int(Optional)) of
+        ok ->
+            ok;
+        notsup ->
+            erlang:error(notsup);
+        {error, Error} ->
+            {error, Error}
+    end.
+
 %%--------------------------------------------------------------------
 %%% On load
 %%--------------------------------------------------------------------
-
 on_load() ->
     LibBaseName = "crypto",
     PrivDir = code:priv_dir(crypto),
@@ -609,8 +847,13 @@ on_load() ->
     case Status of
 	ok -> ok;
 	{error, {E, Str}} ->
-	    error_logger:error_msg("Unable to load crypto library. Failed with error:~n\"~p, ~s\"~n"
-				   "OpenSSL might not be installed on this system.~n",[E,Str]),
+            Fmt = "Unable to load crypto library. Failed with error:~n\"~p, ~s\"~n~s",
+            Extra = case E of
+                        load_failed ->
+                            "OpenSSL might not be installed on this system.\n";
+                        _ -> ""
+                    end,
+	    error_logger:error_msg(Fmt, [E,Str,Extra]),
 	    Status
     end.
 
@@ -622,12 +865,12 @@ path2bin(Path) when is_list(Path) ->
     end.
 
 %%--------------------------------------------------------------------
-%%% Internal functions 
+%%% Internal functions
 %%--------------------------------------------------------------------
 max_bytes() ->
     ?MAX_BYTES_TO_NIF.
 
-notsup_to_error(notsup) ->
+notsup_to_error(notsup) -> 
     erlang:error(notsup);
 notsup_to_error(Other) ->
     Other.
@@ -751,7 +994,7 @@ do_stream_decrypt({rc4, State0}, Data) ->
 
 
 %%
-%% AES - in counter mode (CTR) with state maintained for multi-call streaming 
+%% AES - in counter mode (CTR) with state maintained for multi-call streaming
 %%
 -type ctr_state() :: { iodata(), binary(), binary(), integer() } | binary().
 
@@ -760,11 +1003,11 @@ do_stream_decrypt({rc4, State0}, Data) ->
 				 { ctr_state(), binary() }.
 -spec aes_ctr_stream_decrypt(ctr_state(), binary()) ->
 				 { ctr_state(), binary() }.
- 
+
 aes_ctr_stream_init(_Key, _IVec) -> ?nif_stub.
 aes_ctr_stream_encrypt(_State, _Data) -> ?nif_stub.
 aes_ctr_stream_decrypt(_State, _Cipher) -> ?nif_stub.
-     
+
 %%
 %% RC4 - symmetric stream cipher
 %%
@@ -838,13 +1081,9 @@ srp_value_B_nif(_Multiplier, _Verifier, _Generator, _Exponent, _Prime) -> ?nif_s
 
 
 %% Digital signatures  --------------------------------------------------------------------
-rsa_sign_nif(_Type,_Digest,_Key) -> ?nif_stub.
-dss_sign_nif(_Type,_Digest,_Key) -> ?nif_stub.
-ecdsa_sign_nif(_Type, _Digest, _Curve, _Key) -> ?nif_stub.
 
-dss_verify_nif(_Type, _Digest, _Signature, _Key) -> ?nif_stub.
-rsa_verify_nif(_Type, _Digest, _Signature, _Key) -> ?nif_stub.
-ecdsa_verify_nif(_Type, _Digest, _Signature, _Curve, _Key) -> ?nif_stub.
+pkey_sign_nif(_Algorithm, _Type, _Digest, _Key, _Options) -> ?nif_stub.
+pkey_verify_nif(_Algorithm, _Type, _Data, _Signature, _Key, _Options) -> ?nif_stub.
 
 %% Public Keys  --------------------------------------------------------------------
 %% RSA Rivest-Shamir-Adleman functions
@@ -853,28 +1092,7 @@ ecdsa_verify_nif(_Type, _Digest, _Signature, _Curve, _Key) -> ?nif_stub.
 rsa_generate_key_nif(_Bits, _Exp) -> ?nif_stub.
 
 %% DH Diffie-Hellman functions
-%% 
-
-%% Generate (and check) Parameters is not documented because they are implemented
-%% for testing (and offline parameter generation) only.
-%% From the openssl doc: 
-%%  DH_generate_parameters() may run for several hours before finding a suitable prime.
-%% Thus dh_generate_parameters may in this implementation block 
-%% the emulator for several hours.
 %%
-%% usage: dh_generate_parameters(1024, 2 or 5) -> 
-%%    [Prime=mpint(), SharedGenerator=mpint()]
-dh_generate_parameters(PrimeLen, Generator) ->
-    case dh_generate_parameters_nif(PrimeLen, Generator) of
-	error -> erlang:error(generation_failed, [PrimeLen,Generator]);
-	Ret -> Ret
-    end.  
-
-dh_generate_parameters_nif(_PrimeLen, _Generator) -> ?nif_stub.
-
-%% Checks that the DHParameters are ok.
-%% DHParameters = [P (Prime)= mpint(), G(Generator) = mpint()]
-dh_check([_Prime,_Gen]) -> ?nif_stub.
 
 %% DHParameters = [P (Prime)= mpint(), G(Generator) = mpint()]
 %% PrivKey = mpint()
@@ -893,6 +1111,24 @@ ec_curves() ->
 
 ec_curve(X) ->
     crypto_ec_curves:curve(X).
+
+
+privkey_to_pubkey(Alg, EngineMap) when Alg == rsa; Alg == dss; Alg == ecdsa ->
+    try privkey_to_pubkey_nif(Alg, format_pkey(Alg,EngineMap))
+    of
+        [_|_]=L -> map_ensure_bin_as_int(L);
+        X -> X
+    catch
+        error:badarg when Alg==ecdsa ->
+            {error, notsup};
+        error:badarg ->
+            {error, not_found};
+        error:notsup ->
+            {error, notsup}
+    end.
+            
+privkey_to_pubkey_nif(_Alg, _EngineMap) -> ?nif_stub.
+
 
 %%
 %% EC
@@ -961,19 +1197,42 @@ ensure_int_as_bin(Int) when is_integer(Int) ->
 ensure_int_as_bin(Bin) ->
     Bin.
 
+map_ensure_bin_as_int(List) when is_list(List) ->
+    lists:map(fun ensure_bin_as_int/1, List).
+
+ensure_bin_as_int(Bin) when is_binary(Bin) ->
+    bin_to_int(Bin);
+ensure_bin_as_int(E) ->
+    E.
+
+format_pkey(_Alg, #{engine:=_, key_id:=T}=M) when is_binary(T) -> format_pwd(M);
+format_pkey(_Alg, #{engine:=_, key_id:=T}=M) when is_list(T) -> format_pwd(M#{key_id:=list_to_binary(T)});
+format_pkey(_Alg, #{engine:=_           }=M) -> error({bad_key_id, M});
+format_pkey(_Alg, #{}=M) -> error({bad_engine_map, M});
+%%%
+format_pkey(rsa, Key) ->
+    map_ensure_int_as_bin(Key);
+format_pkey(ecdsa, [Key, Curve]) ->
+    {nif_curve_params(Curve), ensure_int_as_bin(Key)};
+format_pkey(dss, Key) ->
+    map_ensure_int_as_bin(Key);
+format_pkey(_, Key) ->
+    Key.
+
+format_pwd(#{password := Pwd}=M) when is_list(Pwd) -> M#{password := list_to_binary(Pwd)};
+format_pwd(M) -> M.
+
 %%--------------------------------------------------------------------
 %%
 -type rsa_padding() :: 'rsa_pkcs1_padding' | 'rsa_pkcs1_oaep_padding' | 'rsa_no_padding'.
 
-rsa_public_crypt(_BinMsg, _Key, _Padding, _IsEncrypt) -> ?nif_stub.
-
-rsa_private_crypt(_BinMsg, _Key, _Padding, _IsEncrypt) -> ?nif_stub.
+pkey_crypt_nif(_Algorithm, _In, _Key, _Options, _IsPrivate, _IsEncrypt) -> ?nif_stub.
 
 %% large integer in a binary with 32bit length
 %% MP representaion  (SSH2)
 mpint(X) when X < 0 -> mpint_neg(X);
 mpint(X) -> mpint_pos(X).
- 
+
 -define(UINT32(X),   X:32/unsigned-big-integer).
 
 
@@ -981,7 +1240,7 @@ mpint_neg(X) ->
     Bin = int_to_bin_neg(X, []),
     Sz = byte_size(Bin),
     <<?UINT32(Sz), Bin/binary>>.
-    
+
 mpint_pos(X) ->
     Bin = int_to_bin_pos(X, []),
     <<MSB,_/binary>> = Bin,
@@ -1003,3 +1262,105 @@ erlint(<<MPIntSize:32/integer,MPIntValue/binary>>) ->
 %%
 mod_exp_nif(_Base,_Exp,_Mod,_bin_hdr) -> ?nif_stub.
 
+%%%----------------------------------------------------------------
+%% 9470495 == V(0,9,8,zh).
+%% 268435615 == V(1,0,0,i).
+%% 268439663 == V(1,0,1,f).
+
+packed_openssl_version(MAJ, MIN, FIX, P0) ->
+    %% crypto.c
+    P1 = atom_to_list(P0),
+    P = lists:sum([C-$a||C<-P1]),
+    ((((((((MAJ bsl 8) bor MIN) bsl 8 ) bor FIX) bsl 8) bor (P+1)) bsl 4) bor 16#f).
+
+%%--------------------------------------------------------------------
+%% Engine nifs
+engine_by_id_nif(_EngineId) -> ?nif_stub.
+engine_init_nif(_Engine) -> ?nif_stub.
+engine_finish_nif(_Engine) -> ?nif_stub.
+engine_free_nif(_Engine) -> ?nif_stub.
+engine_load_dynamic_nif() -> ?nif_stub.
+engine_ctrl_cmd_strings_nif(_Engine, _Cmds, _Optional) -> ?nif_stub.
+engine_add_nif(_Engine)  -> ?nif_stub.
+engine_remove_nif(_Engine)  -> ?nif_stub.
+engine_register_nif(_Engine, _EngineMethod) -> ?nif_stub.
+engine_unregister_nif(_Engine, _EngineMethod) -> ?nif_stub.
+engine_get_first_nif() -> ?nif_stub.
+engine_get_next_nif(_Engine) -> ?nif_stub.
+engine_get_id_nif(_Engine) -> ?nif_stub.
+engine_get_all_methods_nif() -> ?nif_stub.
+
+%%--------------------------------------------------------------------
+%% Engine internals
+engine_nif_wrapper(ok) ->
+    ok;
+engine_nif_wrapper(notsup) ->
+    erlang:error(notsup);
+engine_nif_wrapper({error, Error}) ->
+    throw({error, Error}).
+
+ensure_bin_chardata(CharData) when is_binary(CharData) ->
+    CharData;
+ensure_bin_chardata(CharData) ->
+    unicode:characters_to_binary(CharData).
+
+ensure_bin_cmds(CMDs) ->
+    ensure_bin_cmds(CMDs, []).
+
+ensure_bin_cmds([], Acc) ->
+    lists:reverse(Acc);
+ensure_bin_cmds([{Key, Value} |CMDs], Acc) ->
+    ensure_bin_cmds(CMDs, [{ensure_bin_chardata(Key), ensure_bin_chardata(Value)} | Acc]);
+ensure_bin_cmds([Key | CMDs], Acc) ->
+    ensure_bin_cmds(CMDs, [{ensure_bin_chardata(Key), <<"">>} | Acc]).
+
+engine_methods_convert_to_bitmask([], BitMask) ->
+    BitMask;
+engine_methods_convert_to_bitmask(engine_method_all, _BitMask) ->
+    16#FFFF;
+engine_methods_convert_to_bitmask(engine_method_none, _BitMask) ->
+    16#0000;
+engine_methods_convert_to_bitmask([M |Ms], BitMask) ->
+    engine_methods_convert_to_bitmask(Ms, BitMask bor engine_method_atom_to_int(M)).
+
+bool_to_int(true) -> 1;
+bool_to_int(false) -> 0.
+
+engine_method_atom_to_int(engine_method_rsa) -> 16#0001;
+engine_method_atom_to_int(engine_method_dsa) -> 16#0002;
+engine_method_atom_to_int(engine_method_dh) -> 16#0004;
+engine_method_atom_to_int(engine_method_rand) -> 16#0008;
+engine_method_atom_to_int(engine_method_ecdh) -> 16#0010;
+engine_method_atom_to_int(engine_method_ecdsa) -> 16#0020;
+engine_method_atom_to_int(engine_method_ciphers) -> 16#0040;
+engine_method_atom_to_int(engine_method_digests) -> 16#0080;
+engine_method_atom_to_int(engine_method_store) -> 16#0100;
+engine_method_atom_to_int(engine_method_pkey_meths) -> 16#0200;
+engine_method_atom_to_int(engine_method_pkey_asn1_meths) -> 16#0400;
+engine_method_atom_to_int(engine_method_ec) -> 16#0800;
+engine_method_atom_to_int(X) ->
+    erlang:error(badarg, [X]).
+
+get_test_engine() ->
+    Type = erlang:system_info(system_architecture),
+    LibDir = filename:join([code:priv_dir(crypto), "lib"]),
+    ArchDir = filename:join([LibDir, Type]),
+    case filelib:is_dir(ArchDir) of        
+	true  -> check_otp_test_engine(ArchDir);
+	false -> check_otp_test_engine(LibDir)
+    end.
+
+check_otp_test_engine(LibDir) ->
+    case filelib:wildcard("otp_test_engine*", LibDir) of
+        [] ->
+            {error, notexist};
+        [LibName] ->
+            LibPath = filename:join(LibDir,LibName),
+            case filelib:is_file(LibPath) of
+                true ->
+                    {ok, unicode:characters_to_binary(LibPath)};
+                false ->
+                    {error, notexist}
+            end
+    end.
+            

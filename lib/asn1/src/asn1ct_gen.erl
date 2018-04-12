@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -145,27 +145,37 @@ pgen_n2nconversion(_Erules,#typedef{name=TypeName,typespec=#type{def={'ENUMERATE
 pgen_n2nconversion(_Erules,_) ->
     true.
 
-pgen_name2numfunc(_TypeName,[], _) ->
-    true;
-pgen_name2numfunc(TypeName,[{Atom,Number}], extension_marker) ->
-    emit(["name2num_",TypeName,"(",{asis,Atom},") ->",Number,";",nl]),
-    emit(["name2num_",TypeName,"({asn1_enum, Num}) -> Num.",nl,nl]);
-pgen_name2numfunc(TypeName,[{Atom,Number}], _) ->
-    emit(["name2num_",TypeName,"(",{asis,Atom},") ->",Number,".",nl,nl]);
-pgen_name2numfunc(TypeName,[{Atom,Number}|NNRest], EM) ->
-    emit(["name2num_",TypeName,"(",{asis,Atom},") ->",Number,";",nl]),
-    pgen_name2numfunc(TypeName,NNRest, EM).
+pgen_name2numfunc(TypeNameAsAtom,Mapping,Ext) when is_atom(TypeNameAsAtom) ->
+    FuncName = list_to_atom("name2num_"++atom_to_list(TypeNameAsAtom)),
+    pgen_name2numfunc1(FuncName,Mapping,Ext).
 
-pgen_num2namefunc(_TypeName,[], _) ->
+pgen_name2numfunc1(_FuncName,[], _) ->
     true;
-pgen_num2namefunc(TypeName,[{Atom,Number}], extension_marker) ->
-    emit(["num2name_",TypeName,"(",Number,") ->",{asis,Atom},";",nl]),
-    emit(["num2name_",TypeName,"(ExtensionNum) -> {asn1_enum, ExtensionNum}.",nl,nl]);
-pgen_num2namefunc(TypeName,[{Atom,Number}], _) ->
-    emit(["num2name_",TypeName,"(",Number,") ->",{asis,Atom},".",nl,nl]);
-pgen_num2namefunc(TypeName,[{Atom,Number}|NNRest], EM) ->
-    emit(["num2name_",TypeName,"(",Number,") ->",{asis,Atom},";",nl]),
-    pgen_num2namefunc(TypeName,NNRest, EM).
+pgen_name2numfunc1(FuncName,[{Atom,Number}], extension_marker) ->
+    emit([{asis,FuncName},"(",{asis,Atom},") ->",Number,";",nl]),
+    emit([{asis,FuncName},"({asn1_enum, Num}) -> Num.",nl,nl]);
+pgen_name2numfunc1(FuncName,[{Atom,Number}], _) ->
+    emit([{asis,FuncName},"(",{asis,Atom},") ->",Number,".",nl,nl]);
+pgen_name2numfunc1(FuncName,[{Atom,Number}|NNRest], EM) ->
+    emit([{asis,FuncName},"(",{asis,Atom},") ->",Number,";",nl]),
+    pgen_name2numfunc1(FuncName,NNRest, EM).
+
+pgen_num2namefunc(TypeNameAsAtom,Mapping,Ext) when is_atom(TypeNameAsAtom) ->
+    FuncName = list_to_atom("num2name_"++atom_to_list(TypeNameAsAtom)),
+    pgen_num2namefunc1(FuncName,Mapping,Ext).
+
+pgen_num2namefunc1(_FuncName,[], _) ->
+    true;
+pgen_num2namefunc1(FuncName,[{Atom,Number}], extension_marker) ->
+    emit([{asis,FuncName},"(",Number,") ->",{asis,Atom},";",nl]),
+    emit([{asis,FuncName},"(ExtensionNum) -> {asn1_enum, ExtensionNum}.",nl,nl]);
+pgen_num2namefunc1(FuncName,[{Atom,Number}], _) ->
+    emit([{asis,FuncName},"(",Number,") ->",{asis,Atom},".",nl,nl]);
+pgen_num2namefunc1(FuncName,[{Atom,Number}|NNRest], EM) ->
+    emit([{asis,FuncName},"(",Number,") ->",{asis,Atom},";",nl]),
+    pgen_num2namefunc1(FuncName,NNRest, EM).
+
+    
 
 pgen_objects(_,_,_,[]) ->
     true;
@@ -697,6 +707,7 @@ gen_exports([_|_]=L0, Prefix, Arity) ->
 pgen_dispatcher(Erules, []) ->
     gen_info_functions(Erules);
 pgen_dispatcher(Gen, Types) ->
+    %% MODULE HEAD
     emit(["-export([encode/2,decode/2]).",nl,nl]),
     gen_info_functions(Gen),
 
@@ -704,6 +715,7 @@ pgen_dispatcher(Gen, Types) ->
     NoFinalPadding = lists:member(no_final_padding, Options),
     NoOkWrapper = proplists:get_bool(no_ok_wrapper, Options),
 
+    %% ENCODER
     Call = case Gen of
 	       #gen{erule=per,aligned=true} ->
 		   asn1ct_func:need({per,complete,1}),
@@ -730,6 +742,7 @@ pgen_dispatcher(Gen, Types) ->
     end,
     emit([nl,nl]),
 
+    %% DECODER
     ReturnRest = proplists:get_bool(undec_rest, Gen#gen.options),
     Data = case Gen#gen.erule =:= ber andalso ReturnRest of
 	       true -> "Data0";
@@ -737,6 +750,12 @@ pgen_dispatcher(Gen, Types) ->
 	   end,
 
     emit(["decode(Type, ",Data,") ->",nl]),
+
+    case NoOkWrapper of
+        false -> emit(["try",nl]);
+        true -> ok
+    end,
+
     DecWrap =
 	case {Gen,ReturnRest} of
 	    {#gen{erule=ber},false} ->
@@ -744,32 +763,38 @@ pgen_dispatcher(Gen, Types) ->
 		"element(1, ber_decode_nif(Data))";
 	    {#gen{erule=ber},true} ->
 		asn1ct_func:need({ber,ber_decode_nif,1}),
-		emit(["{Data,Rest} = ber_decode_nif(Data0),",nl]),
+		emit(["   {Data,Rest} = ber_decode_nif(Data0),",nl]),
 		"Data";
 	    {_,_} ->
 		"Data"
 	end,
-    emit([case NoOkWrapper of
-	      false -> "try";
-	      true -> "case"
-	  end, " decode_disp(Type, ",DecWrap,") of",nl]),
-    case Gen of
-	#gen{erule=ber} ->
-	    emit(["  Result ->",nl]);
-	#gen{erule=per} ->
-	    emit(["  {Result,Rest} ->",nl])
+
+    DecodeDisp = ["decode_disp(Type, ",DecWrap,")"],
+    case {Gen,ReturnRest} of
+	{#gen{erule=ber},true} ->
+	    emit(["   Result = ",DecodeDisp,",",nl]),
+            result_line(NoOkWrapper, ["Result","Rest"]);
+	{#gen{erule=ber},false} ->
+	    emit(["   Result = ",DecodeDisp,",",nl]),
+            result_line(NoOkWrapper, ["Result"]);
+
+
+	{#gen{erule=per},true} ->
+	    emit(["   {Result,Rest} = ",DecodeDisp,",",nl]),
+            result_line(NoOkWrapper, ["Result","Rest"]);
+	{#gen{erule=per},false} ->
+	    emit(["   {Result,_Rest} = ",DecodeDisp,",",nl]),
+            result_line(NoOkWrapper, ["Result"])
     end,
-    case ReturnRest of
-	false -> result_line(NoOkWrapper, ["Result"]);
-	true ->  result_line(NoOkWrapper, ["Result","Rest"])
-    end,
+
     case NoOkWrapper of
 	false ->
 	    emit([nl,try_catch(),nl,nl]);
 	true ->
-	    emit([nl,"end.",nl,nl])
+	    emit([".",nl,nl])
     end,
 
+    %% REST of MODULE
     gen_decode_partial_incomplete(Gen),
     gen_partial_inc_dispatcher(Gen),
 
@@ -777,7 +802,7 @@ pgen_dispatcher(Gen, Types) ->
     gen_dispatcher(Types, "decode_disp", "dec_").
 
 result_line(NoOkWrapper, Items) ->
-    S = ["    "|case NoOkWrapper of
+    S = ["   "|case NoOkWrapper of
 		    false -> result_line_1(["ok"|Items]);
 		    true -> result_line_1(Items)
 		end],
@@ -786,7 +811,7 @@ result_line(NoOkWrapper, Items) ->
 result_line_1([SingleItem]) ->
     SingleItem;
 result_line_1(Items) ->
-    ["{",string:join(Items, ","),"}"].
+    ["{",lists:join(",",Items),"}"].
 
 try_catch() ->
     ["  catch",nl,
@@ -933,7 +958,7 @@ open_hrl(OutFile,Module) ->
 
 hrl_protector(OutFile) ->
     BaseName = filename:basename(OutFile),
-    P = "_" ++ string:to_upper(BaseName) ++ "_HRL_",
+    P = "_" ++ string:uppercase(BaseName) ++ "_HRL_",
     [if
 	 $A =< C, C =< $Z -> C;
 	 $a =< C, C =< $a -> C;

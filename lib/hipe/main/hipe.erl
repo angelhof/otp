@@ -1425,6 +1425,7 @@ opt_keys() ->
      use_clusters,
      use_jumptable,
      verbose,
+     verify_gcsafe,
      %% verbose_spills,
      x87].
 
@@ -1521,7 +1522,8 @@ opt_negations() ->
    {no_use_callgraph, use_callgraph},
    {no_use_clusters, use_clusters},
    {no_use_inline_atom_search, use_inline_atom_search},
-   {no_use_indexing, use_indexing}].
+   {no_use_indexing, use_indexing},
+   {no_verify_gcsafe, verify_gcsafe}].
 
 %% Don't use negative forms in right-hand sides of aliases and expansions!
 %% We only expand negations once, before the other expansions are done.
@@ -1627,11 +1629,11 @@ llvm_support_available() ->
 get_llvm_version() ->
   OptStr = os:cmd("opt -version"),
   SubStr = "LLVM version ", N = length(SubStr),
-  case string:str(OptStr, SubStr) of
-     0 -> % No opt available
+  case string:find(OptStr, SubStr) of
+     nomatch -> % No opt available
        {0, 0};
      S ->
-       case string:tokens(string:sub_string(OptStr, S + N), ".") of
+       case string:lexemes(string:slice(S, N), ".") of
 	 [MajorS, MinorS | _] ->
 	   case {string:to_integer(MajorS), string:to_integer(MinorS)} of
 	     {{Major, ""}, {Minor, _}}

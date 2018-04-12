@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -121,7 +121,8 @@ connect1(Name,Ip,Port,Timeout,KeepAlive,TCPNoDelay,Username,Password) ->
 							  prompt,?prx,[]) of
 			    {ok,{prompt,?password},_} ->
 				ok = ct_telnet_client:send_data(Pid,Password),
-				Stars = lists:duplicate(length(Password),$*),
+				Stars =
+                                    lists:duplicate(string:length(Password),$*),
 				log(Name,send,"Password: ~s",[Stars]),
 %				ok = ct_telnet_client:send_data(Pid,""),
 				case ct_telnet:silent_teln_expect(Name,Pid,[],
@@ -132,25 +133,25 @@ connect1(Name,Ip,Port,Timeout,KeepAlive,TCPNoDelay,Username,Password) ->
 					 Prompt=/=?password ->
 					{ok,Pid};
 				    Error ->
-					log(Name,recv,"Password failed\n~p\n",
+					log(Name,recv,"Password failed\n~tp\n",
 					    [Error]),
 					{error,Error}
 				end;
 			    Error ->
-				log(Name,recv,"Login to ~p:~p failed\n~p\n",[Ip,Port,Error]),
+				log(Name,recv,"Login to ~p:~p failed\n~tp\n",[Ip,Port,Error]),
 				{error,Error}
 			end;
 		    {ok,[{prompt,_OtherPrompt1},{prompt,_OtherPrompt2}],_} ->
 			{ok,Pid};
 		    Error ->
 			log(Name,conn_error,
-			    "Did not get expected prompt from ~p:~p\n~p\n",
+			    "Did not get expected prompt from ~p:~p\n~tp\n",
 			    [Ip,Port,Error]),
 			{error,Error}
 		end;
 	    Error ->
 		log(Name,conn_error,
-		    "Could not open telnet connection to ~p:~p\n~p\n",
+		    "Could not open telnet connection to ~p:~p\n~tp\n",
 		    [Ip,Port,Error]),
 		Error
 	end,

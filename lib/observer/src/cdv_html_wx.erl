@@ -52,8 +52,12 @@ init([ParentWin, HtmlText]) ->
     init(ParentWin, HtmlText, undefined, cdv).
 
 init(ParentWin, HtmlText, Tab, App) ->
+    %% If progress dialog is shown, remove it now - and sett cursor busy instead
+    observer_lib:destroy_progress_dialog(),
+    wx_misc:beginBusyCursor(),
     HtmlWin = observer_lib:html_window(ParentWin),
     wxHtmlWindow:setPage(HtmlWin,HtmlText),
+    wx_misc:endBusyCursor(),
     {HtmlWin, #state{panel=HtmlWin,expand_table=Tab,app=App}}.
 
 %%%%%%%%%%%%%%%%%%%%%%% Callbacks %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -62,7 +66,7 @@ handle_info(active, State) ->
     {noreply, State};
 
 handle_info(Info, State) ->
-    io:format("~p:~p: Unhandled info: ~p~n", [?MODULE, ?LINE, Info]),
+    io:format("~p:~p: Unhandled info: ~tp~n", [?MODULE, ?LINE, Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -72,7 +76,7 @@ code_change(_, _, State) ->
     {ok, State}.
 
 handle_call(Msg, _From, State) ->
-    io:format("~p~p: Unhandled Call ~p~n",[?MODULE, ?LINE, Msg]),
+    io:format("~p~p: Unhandled Call ~tp~n",[?MODULE, ?LINE, Msg]),
     {reply, ok, State}.
 
 handle_cast({detail_win_closed, Id},#state{expand_wins=Opened0}=State) ->
@@ -80,7 +84,7 @@ handle_cast({detail_win_closed, Id},#state{expand_wins=Opened0}=State) ->
     {noreply, State#state{expand_wins=Opened}};
 
 handle_cast(Msg, State) ->
-    io:format("~p~p: Unhandled cast ~p~n",[?MODULE, ?LINE, Msg]),
+    io:format("~p~p: Unhandled cast ~tp~n",[?MODULE, ?LINE, Msg]),
     {noreply, State}.
 
 handle_event(#wx{event=#wxHtmlLink{type=command_html_link_clicked,
@@ -90,21 +94,21 @@ handle_event(#wx{event=#wxHtmlLink{type=command_html_link_clicked,
 	case Target of
 	    "#Binary?" ++ BinSpec ->
 		[{"offset",Off},{"size",Size},{"pos",Pos}] =
-		    httpd:parse_query(BinSpec),
+		    uri_string:dissect_query(BinSpec),
 		Id = {cdv, {list_to_integer(Off),
 			    list_to_integer(Size),
 			    list_to_integer(Pos)}},
 		expand(Id,cdv_bin_cb,State);
 	    "#OBSBinary?" ++ BinSpec ->
 		[{"key1",Preview},{"key2",Size},{"key3",Hash}] =
-		    httpd:parse_query(BinSpec),
+		    uri_string:dissect_query(BinSpec),
 		Id = {obs, {Tab, {list_to_integer(Preview),
 				  list_to_integer(Size),
 				  list_to_integer(Hash)}}},
 		expand(Id,cdv_bin_cb,State);
 	    "#Term?" ++ TermKeys ->
 		[{"key1",Key1},{"key2",Key2},{"key3",Key3}] =
-		    httpd:parse_query(TermKeys),
+		    uri_string:dissect_query(TermKeys),
 		Id = {cdv, {Tab,{list_to_integer(Key1),
 				 list_to_integer(Key2),
 				 list_to_integer(Key3)}}},
@@ -118,16 +122,17 @@ handle_event(#wx{event=#wxHtmlLink{type=command_html_link_clicked,
     {noreply, NewState};
 
 handle_event(Event, State) ->
-    io:format("~p:~p: Unhandled event ~p\n", [?MODULE,?LINE,Event]),
+    io:format("~p:~p: Unhandled event ~tp\n", [?MODULE,?LINE,Event]),
     {noreply, State}.
 
 %%%-----------------------------------------------------------------
 %%% Internal
-expand(Id,Callback,#state{expand_wins=Opened0}=State) ->
+expand(Id,Callback,#state{expand_wins=Opened0, app=App}=State) ->
     Opened =
 	case lists:keyfind(Id,1,Opened0) of
 	    false ->
-		EW = cdv_detail_wx:start_link(Id,[],State#state.panel,Callback),
+		EW = cdv_detail_wx:start_link(Id,[],State#state.panel,
+                                              Callback,App),
 		wx_object:get_pid(EW) ! active,
 		[{Id,EW}|Opened0];
 	    {_,EW} ->

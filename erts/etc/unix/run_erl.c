@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2017. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -627,12 +627,14 @@ static void pass_on(pid_t childpid)
 	    status("Pty master read; ");
 #endif
 	    if ((len = sf_read(mfd, buf, BUFSIZ)) <= 0) {
+		int saved_errno = errno;
 		sf_close(rfd);
 		if(wfd) sf_close(wfd);
 		sf_close(mfd);
 		unlink(fifo1);
 		unlink(fifo2);
 		if (len < 0) {
+		    errno = saved_errno;
 		    if(errno == EIO)
 			ERROR0(LOG_ERR,"Erlang closed the connection.");
 		    else
@@ -1342,13 +1344,12 @@ static int sf_open(const char *path, int type, mode_t mode) {
 
     return fd;
 }
+
 static int sf_close(int fd) {
-    int res = 0;
-
-    do { res = close(fd); } while(fd < 0 && errno == EINTR);
-
-    return res;
+    /* "close() should not be retried after an EINTR" */
+    return close(fd);
 }
+
 /* Extract any control sequences that are ment only for run_erl
  * and should not be forwarded to the pty.
  */

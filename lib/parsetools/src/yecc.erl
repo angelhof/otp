@@ -365,10 +365,10 @@ is_filename(T) ->
 
 shorten_filename(Name0) ->
     {ok,Cwd} = file:get_cwd(),
-    case lists:prefix(Cwd, Name0) of
-        false -> Name0;
-        true ->
-            case lists:nthtail(length(Cwd), Name0) of
+    case string:prefix(Name0, Cwd) of
+        nomatch -> Name0;
+        Rest ->
+            case unicode:characters_to_list(Rest) of
                 "/"++N -> N;
                 N -> N
             end
@@ -2196,8 +2196,8 @@ output_reduce(St0, State, Terminal,
                 St20;
             true ->
                 Ns = "Nss",
-                Tmp = string:join(lists:duplicate(NmbrOfDaughters - 1, "_"),
-                                  ","),
+                Tmp = lists:join(",",
+                                  lists:duplicate(NmbrOfDaughters - 1, "_")),
                 fwrite(St20, <<" [~s|Nss] = Ss,\n">>, [Tmp])
         end,
     St40 = case tokens(RuleNmbr, St30) of
@@ -2597,18 +2597,18 @@ format_symbol(Symbol) ->
     String = concat([Symbol]),
     case erl_scan:string(String) of
         {ok, [{atom, _, _}], _} ->
-            io_lib:fwrite(<<"~w">>, [Symbol]);
+            io_lib:fwrite(<<"~tw">>, [Symbol]);
         {ok, [{Word, _}], _} when Word =/= ':', Word =/= '->' ->
             case erl_scan:reserved_word(Word) of
                 true ->
                     String;
                 false ->
-                    io_lib:fwrite(<<"~w">>, [Symbol])
+                    io_lib:fwrite(<<"~tw">>, [Symbol])
             end;
         {ok, [{var, _, _}], _} ->
             String;
         _ -> 
-            io_lib:fwrite(<<"~w">>, [Symbol])
+            io_lib:fwrite(<<"~tw">>, [Symbol])
     end.
 
 inverse(L) ->

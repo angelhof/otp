@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -95,7 +95,11 @@ init_per_group(_GroupName, Config) ->
 end_per_group(_GroupName, Config) ->
     Config.
 
-
+init_per_testcase(TC, Config) when TC == hostnames;
+                                   TC == nodenames ->
+    file:make_dir("hostnames_nodedir"),
+    file:write_file("hostnames_nodedir/ignore_core_files",""),
+    Config;
 init_per_testcase(Func, Config) when is_atom(Func), is_list(Config) ->
     Config.
 
@@ -230,7 +234,7 @@ legal(Name) ->
     end.
 
 illegal(Name) ->
-    case test_node(Name) of
+    case test_node(Name, true) of
         not_started ->
             ok;
         started ->
@@ -238,12 +242,20 @@ illegal(Name) ->
     end.
 
 test_node(Name) ->
+    test_node(Name, false).
+test_node(Name, Illigal) ->
     ProgName = atom_to_list(lib:progname()),
     Command = ProgName ++ " -noinput " ++ long_or_short() ++ Name ++
-               " -eval \"net_adm:ping('" ++ atom_to_list(node()) ++ "')\"",
+        " -eval \"net_adm:ping('" ++ atom_to_list(node()) ++ "')\"" ++
+        case Illigal of
+            true ->
+                " -eval \"timer:sleep(10000),init:stop().\"";
+            false ->
+                ""
+        end,
     net_kernel:monitor_nodes(true),
     BinCommand = unicode:characters_to_binary(Command, utf8),
-    open_port({spawn, BinCommand}, [stream]),
+    Prt = open_port({spawn, BinCommand}, [stream,{cd,"hostnames_nodedir"}]),
     Node = list_to_atom(Name),
     receive
         {nodeup, Node} ->
@@ -451,9 +463,9 @@ run_remote_test([FuncStr, TestNodeStr | Args]) ->
 		1
 	end
     catch
-	C:E ->
+	C:E:S ->
 	    io:format("Node ~p got EXCEPTION ~p:~p\nat ~p\n",
-		      [node(), C, E, erlang:get_stacktrace()]),
+		      [node(), C, E, S]),
 	    2
     end,
     io:format("Node ~p doing halt(~p).\n",[node(), Status]),
@@ -1132,17 +1144,16 @@ monitor_nodes_otp_6481_test(Config, TestType) when is_list(Config) ->
     TestMonNodeState = monitor_node_state(),
     %% io:format("~p~n", [TestMonNodeState]),
     TestMonNodeState =
-	MonNodeState
+	case TestType of
+	    nodedown -> [];
+	    nodeup -> [{self(), []}]
+	end
+	++ lists:map(fun (_) -> {MN, []} end, Seq)
 	++ case TestType of
 	       nodedown -> [{self(), []}];
 	       nodeup -> []
 	   end
-	++ lists:map(fun (_) -> {MN, []} end, Seq)
-	++ case TestType of
-	       nodedown -> [];
-	       nodeup -> [{self(), []}]
-	   end,
-
+	++ MonNodeState,
 
     {ok, Node} = start_node(Name, "", this),
     receive {nodeup, Node} -> ok end,

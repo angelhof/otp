@@ -144,9 +144,9 @@ ERTS_GLB_INLINE void
 erts_nif_export_restore(Process *c_p, NifExport *ep, Eterm result)
 {
     ASSERT(!ERTS_SCHEDULER_IS_DIRTY(erts_get_scheduler_data()));
-    ERTS_SMP_LC_ASSERT(!(c_p->static_flags
+    ERTS_LC_ASSERT(!(c_p->static_flags
 			 & ERTS_STC_FLG_SHADOW_PROC));
-    ERTS_SMP_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
+    ERTS_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
 		       & ERTS_PROC_LOCK_MAIN);
 
     c_p->current = ep->current;
@@ -193,7 +193,6 @@ erts_nif_export_check_save_trace(Process *c_p, Eterm result,
 ERTS_GLB_INLINE Process *
 erts_proc_shadow2real(Process *c_p)
 {
-#ifdef ERTS_DIRTY_SCHEDULERS
     if (c_p->static_flags & ERTS_STC_FLG_SHADOW_PROC) {
 	Process *real_c_p = c_p->next;
 	ASSERT(ERTS_SCHEDULER_IS_DIRTY(erts_get_scheduler_data()));
@@ -201,7 +200,6 @@ erts_proc_shadow2real(Process *c_p)
 	return real_c_p;
     }
     ASSERT(!ERTS_SCHEDULER_IS_DIRTY(erts_get_scheduler_data()));
-#endif
     return c_p;
 }
 
@@ -213,11 +211,10 @@ erts_proc_shadow2real(Process *c_p)
 #define ERTS_NFUNC_SCHED_INTERNALS__
 
 #define ERTS_I_BEAM_OP_TO_NIF_EXPORT(I)					\
-    (ASSERT(BeamOp(op_apply_bif) == (BeamInstr *) (*(I))		\
-	    || BeamOp(op_call_nif) == (BeamInstr *) (*(I))),		\
+    (ASSERT(BeamIsOpCode(*(I), op_apply_bif) ||                         \
+            BeamIsOpCode(*(I), op_call_nif)),                           \
      ((NifExport *) (((char *) (I)) - offsetof(NifExport, exp.beam[0]))))
 
-#ifdef ERTS_DIRTY_SCHEDULERS
 
 #include "erl_message.h"
 #include <stddef.h>
@@ -235,7 +232,7 @@ erts_flush_dirty_shadow_proc(Process *sproc)
     Process *c_p = sproc->next;
 
     ASSERT(sproc->common.id == c_p->common.id);
-    ERTS_SMP_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
+    ERTS_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
 		       & ERTS_PROC_LOCK_MAIN);
 
     ASSERT(c_p->stop == sproc->stop);
@@ -283,7 +280,7 @@ erts_cache_dirty_shadow_proc(Process *sproc)
     Process *c_p = sproc->next;
     ASSERT(c_p);
     ASSERT(sproc->common.id == c_p->common.id);
-    ERTS_SMP_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
+    ERTS_LC_ASSERT(erts_proc_lc_my_proc_locks(c_p)
 		       & ERTS_PROC_LOCK_MAIN);
 
     sproc->htop = c_p->htop;
@@ -311,7 +308,7 @@ erts_make_dirty_shadow_proc(ErtsSchedulerData *esdp, Process *c_p)
     sproc = esdp->dirty_shadow_process;
     ASSERT(sproc);
     ASSERT(sproc->static_flags & ERTS_STC_FLG_SHADOW_PROC);
-    ASSERT(erts_smp_atomic32_read_nob(&sproc->state)
+    ASSERT(erts_atomic32_read_nob(&sproc->state)
 	   == (ERTS_PSFLG_ACTIVE
 	       | ERTS_PSFLG_DIRTY_RUNNING
 	       | ERTS_PSFLG_PROXY));
@@ -326,7 +323,6 @@ erts_make_dirty_shadow_proc(ErtsSchedulerData *esdp, Process *c_p)
 
 #endif /* ERTS_GLB_INLINE_INCL_FUNC_DEF */
 
-#endif /* ERTS_DIRTY_SCHEDULERS */
 
 #endif /* defined(ERTS_WANT_NFUNC_SCHED_INTERNALS__) && !defined(ERTS_NFUNC_SCHED_INTERNALS__) */
 

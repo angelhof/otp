@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -344,7 +344,7 @@ create_spec_tree([Spec|Specs],TS,JoinWithNext,Known) ->
 		     create_spec_tree(Specs,TS,JoinWithNext,Known)};	
 		{error,Reason} ->
 		    ReasonStr =
-			lists:flatten(io_lib:format("~s",
+			lists:flatten(io_lib:format("~ts",
 						    [file:format_error(Reason)])),
 		    throw({error,{SpecAbsName,ReasonStr}})
 	    end
@@ -537,7 +537,7 @@ replace_names_in_elems([],Modified,_Defs) ->
 replace_names_in_string(Term,Defs=[{Name,Replacement=[Ch|_]}|Ds])
   when is_integer(Ch) ->
     try re:replace(Term,[$'|atom_to_list(Name)]++"'",
-		   Replacement,[{return,list}]) of
+		   Replacement,[{return,list},unicode]) of
 	Term ->					% no match, proceed
 	    replace_names_in_string(Term,Ds);
 	Term1 ->
@@ -569,7 +569,7 @@ replace_names_in_node1(NodeStr,Defs=[{Name,Replacement}|Ds]) ->
 	    replace_names_in_node1(NodeStr,Ds);
        true ->
 	    case re:replace(NodeStr,atom_to_list(Name),
-			    ReplStr,[{return,list}]) of
+			    ReplStr,[{return,list},unicode]) of
 		NodeStr ->			% no match, proceed
 		    replace_names_in_node1(NodeStr,Ds);
 		NodeStr1 ->
@@ -1101,7 +1101,7 @@ check_term(Term) when is_tuple(Term) ->
 				true ->
 				    io:format("~nSuspicious term, "
 					      "please check:~n"
-					      "~p~n", [Term]),
+					      "~tp~n", [Term]),
 				    invalid;
 				false ->
 				    invalid
@@ -1425,7 +1425,12 @@ skip_groups1(Suite,Groups,Cmt,Suites0) ->
 	    GrAndCases1 = GrAndCases0 ++ SkipGroups,
 	    insert_in_order({Suite,GrAndCases1},Suites0,replace);
 	false ->
-	    insert_in_order({Suite,SkipGroups},Suites0,replace)
+	    case Suites0 of
+		[{all,_}=All|Skips]->
+		    [All|Skips++[{Suite,SkipGroups}]];
+                _ ->
+                    insert_in_order({Suite,SkipGroups},Suites0,replace)
+            end
     end.
 
 skip_cases(Node,Dir,Suite,Cases,Cmt,Tests,false) when is_list(Cases) ->

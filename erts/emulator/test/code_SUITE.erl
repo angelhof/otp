@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1999-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1999-2018. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,8 +25,10 @@
          multi_proc_purge/1, t_check_old_code/1,
          external_fun/1,get_chunk/1,module_md5/1,
          constant_pools/1,constant_refc_binaries/1,
+         fake_literals/1,
          false_dependency/1,coverage/1,fun_confusion/1,
-         t_copy_literals/1, t_copy_literals_frags/1]).
+         t_copy_literals/1, t_copy_literals_frags/1,
+         erl_544/1]).
 
 -define(line_trace, 1).
 -include_lib("common_test/include/ct.hrl").
@@ -38,8 +40,10 @@ all() ->
      call_purged_fun_code_reload, call_purged_fun_code_there,
      multi_proc_purge, t_check_old_code, external_fun, get_chunk,
      module_md5,
-     constant_pools, constant_refc_binaries, false_dependency,
-     coverage, fun_confusion, t_copy_literals, t_copy_literals_frags].
+     constant_pools, constant_refc_binaries, fake_literals,
+     false_dependency,
+     coverage, fun_confusion, t_copy_literals, t_copy_literals_frags,
+     erl_544].
 
 init_per_suite(Config) ->
     erts_debug:set_internal_state(available_internal_state, true),
@@ -229,27 +233,6 @@ multi_proc_purge(Config) when is_list(Config) ->
 		   Pid9, Pid10, Pid11, Pid12, Pid13, Pid14, Pid15, Pid16]),
     ok.
 
-body(F, Fakes) ->
-    receive
-        jog ->
-            40 = F(3),
-            erlang:garbage_collect(),
-            body(F, Fakes);
-        drop_funs ->
-            dropped_body()
-    end.
-
-dropped_body() ->
-    receive
-        X -> exit(X)
-    end.
-
-gc() ->
-    erlang:garbage_collect(),
-    gc1().
-gc1() -> ok.
-
-
 %% Test the erlang:check_old_code/1 BIF.
 t_check_old_code(Config) when is_list(Config) ->
     Data = proplists:get_value(data_dir, Config),
@@ -379,9 +362,40 @@ constant_pools(Config) when is_list(Config) ->
     erlang:purge_module(literals),
     OldHeap ! done,
     receive
-        {'EXIT',OldHeap,{A,B,C,[1,2,3|_]=Seq}} when length(Seq) =:= 16 ->
-            ok
-    end.
+	{'EXIT',OldHeap,{A,B,C,[1,2,3|_]=Seq}} when length(Seq) =:= 16 ->
+	    ok
+    end,
+
+    {module,literals} = erlang:load_module(literals, Code),
+    %% Have a hibernated process that references the literals
+    %% in the 'literals' module.
+    {Hib, Mon} = spawn_monitor(fun() -> hibernated(Self) end),
+    receive go -> ok end,
+    [{heap_size,OldHeapSz},
+     {total_heap_size,OldTotHeapSz}] = process_info(Hib, [heap_size,
+							  total_heap_size]),
+    OldHeapSz = OldTotHeapSz,
+    io:format("OldHeapSz=~p OldTotHeapSz=~p~n", [OldHeapSz, OldTotHeapSz]),
+    true = erlang:delete_module(literals),
+    false = erlang:check_process_code(Hib, literals),
+    erlang:check_process_code(self(), literals),
+    erlang:purge_module(literals),
+    receive after 1000 -> ok end,
+    [{heap_size,HeapSz},
+     {total_heap_size,TotHeapSz}] = process_info(Hib, [heap_size,
+						       total_heap_size]),
+    io:format("HeapSz=~p TotHeapSz=~p~n", [HeapSz, TotHeapSz]),
+    Hib ! hej,
+    receive
+	{'DOWN', Mon, process, Hib, Reason} ->
+	    {undef, [{no_module,
+		      no_function,
+		      [{A,B,C,[1,2,3|_]=Seq}], _}]} = Reason,
+	    16 = length(Seq)
+    end,
+    HeapSz = TotHeapSz, %% Ensure restored to hibernated state...
+    true = HeapSz > OldHeapSz,
+    ok.
 
 no_old_heap(Parent) ->
     A = literals:a(),
@@ -403,6 +417,13 @@ old_heap(Parent) ->
         done ->
             exit(Res)
     end.
+
+hibernated(Parent) ->
+    A = literals:a(),
+    B = literals:b(),
+    Res = {A,B,literals:huge_bignum(),lists:seq(1, 16)},
+    Parent ! go,
+    erlang:hibernate(no_module, no_function, [Res]).
 
 create_old_heap() ->
     case process_info(self(), [heap_size,total_heap_size]) of
@@ -536,6 +557,62 @@ wait_for_memory_deallocations() ->
             erts_debug:set_internal_state(available_internal_state, true),
             wait_for_memory_deallocations()
     end.
+
+fake_literals(_Config) ->
+    Mod = fake__literals__module,
+    try
+        do_fake_literals(Mod)
+    after
+        _ = code:purge(Mod),
+        _ = code:delete(Mod),
+        _ = code:purge(Mod),
+        _ = code:delete(Mod)
+    end,
+    ok.
+
+do_fake_literals(Mod) ->
+    Tid = ets:new(test, []),
+    ExtTerms = get_external_terms(),
+    Term0 = {self(),make_ref(),Tid,fun() -> ok end,ExtTerms},
+    Terms = [begin
+                 make_literal_module(Mod, Term0),
+                 Mod:term()
+             end || _ <- lists:seq(1, 10)],
+    verify_lit_terms(Terms, Term0),
+    true = ets:delete(Tid),
+    ok.
+
+make_literal_module(Mod, Term) ->
+    Exp = [{term,0}],
+    Attr = [],
+    Fs = [{function,term,0,2,
+           [{label,1},
+            {line,[]},
+            {func_info,{atom,Mod},{atom,term},0},
+            {label,2},
+            {move,{literal,Term},{x,0}},
+            return]}],
+    Asm = {Mod,Exp,Attr,Fs,2},
+    {ok,Mod,Beam} = compile:forms(Asm, [from_asm,binary,report]),
+    code:load_binary(Mod, atom_to_list(Mod), Beam).
+
+verify_lit_terms([H|T], Term) ->
+    case H =:= Term of
+        true ->
+            verify_lit_terms(T, Term);
+        false ->
+            error({bad_term,H})
+    end;
+verify_lit_terms([], _) ->
+    ok.
+
+get_external_terms() ->
+    {ok,Node} =	test_server:start_node(?FUNCTION_NAME, slave, []),
+    Ref = rpc:call(Node, erlang, make_ref, []),
+    Ports = rpc:call(Node, erlang, ports, []),
+    Pid = rpc:call(Node, erlang, self, []),
+    _ = test_server:stop_node(Node),
+    {Ref,hd(Ports),Pid}.
 
 %% OTP-7559: c_p->cp could contain garbage and create a false dependency
 %% to a module in a process. (Thanks to Richard Carlsson.)
@@ -843,6 +920,53 @@ reloader(Mod,Code,Time) ->
               reloader(Mod,Code,Time)
     end.
 
+erl_544(Config) when is_list(Config) ->
+    case file:native_name_encoding() of
+        utf8 ->
+            {ok, CWD} = file:get_cwd(),
+            try
+                Mod = erl_544,
+                FileName = atom_to_list(Mod) ++ ".erl",
+                Priv = proplists:get_value(priv_dir, Config),
+                Data = proplists:get_value(data_dir, Config),
+                {ok, FileContent} = file:read_file(filename:join(Data,
+                                                                 FileName)),
+                Dir = filename:join(Priv, [16#2620,16#2620,16#2620]),
+                File = filename:join(Dir, FileName),
+                io:format("~ts~n", [File]),
+                ok = file:make_dir(Dir),
+                ok = file:set_cwd(Dir),
+                ok = file:write_file(File, [FileContent]),
+                {ok, Mod} = compile:file(File),
+                Res1 = (catch Mod:err()),
+                io:format("~p~n", [Res1]),
+                {'EXIT', {err, [{Mod, err, 0, Info1}|_]}} = Res1,
+                File = proplists:get_value(file, Info1),
+                Me = self(),
+                Go = make_ref(),
+                Tester = spawn_link(fun () ->
+                                            Mod:wait(Me, Go),
+                                            Mod:err()
+                                    end),
+                receive Go -> ok end,
+                Res2 = process_info(Tester, current_stacktrace),
+                io:format("~p~n", [Res2]),
+                {current_stacktrace, Stack} = Res2,
+                [{Mod, wait, 2, Info2}|_] = Stack,
+                File = proplists:get_value(file, Info2),
+                StackFun = fun(_, _, _) -> false end,
+                FormatFun = fun (Term, _) -> io_lib:format("~tp", [Term]) end,
+                Formated =
+                    lib:format_stacktrace(1, Stack, StackFun, FormatFun),
+                true = is_list(Formated),
+                ok
+            after
+                ok = file:set_cwd(CWD)
+            end,
+            ok;
+        _Enc ->
+            {skipped, "Only run when native file name encoding is utf8"}
+    end.
 
 %% Utilities.
 

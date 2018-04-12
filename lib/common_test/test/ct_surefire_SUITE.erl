@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2012-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2012-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -304,7 +304,7 @@ test_events(Test) ->
 check_xml(Case,XmlRe) ->
     case filelib:wildcard(XmlRe) of
 	[] ->
-	    ct:fail("No xml files found with regexp ~p~n", [XmlRe]);
+	    ct:fail("No xml files found with regexp ~tp~n", [XmlRe]);
 	[_] = Xmls when Case==absolute_path ->
 	    do_check_xml(Case,Xmls);
 	[_,_] = Xmls ->
@@ -326,12 +326,12 @@ check_xml(Case,XmlRe) ->
 %%  ...
 %% </testsuites>
 do_check_xml(Case,[Xml|Xmls]) ->
-    ct:log("Checking <a href=~p>~s</a>~n",[Xml,Xml]),
+    ct:log("Checking <a href=~tp>~ts</a>~n",[Xml,Xml]),
     {E,_} = xmerl_scan:file(Xml),
     Expected = events_to_result(lists:flatten(test_events(Case))),
     ParseResult = testsuites(Case,E),
-    ct:log("Expecting: ~p~n",[Expected]),
-    ct:log("Actual   : ~p~n",[ParseResult]),
+    ct:log("Expecting: ~tp~n",[Expected]),
+    ct:log("Actual   : ~tp~n",[ParseResult]),
     Expected = ParseResult,
     do_check_xml(Case,Xmls);
 do_check_xml(_,[]) ->

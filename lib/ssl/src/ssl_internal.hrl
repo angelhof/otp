@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -73,6 +73,7 @@
 %% sslv3 is considered insecure due to lack of padding check (Poodle attack)
 %% Keep as interop with legacy software but do not support as default 
 -define(ALL_AVAILABLE_VERSIONS, ['tlsv1.2', 'tlsv1.1', tlsv1, sslv3]).
+-define(ALL_AVAILABLE_DATAGRAM_VERSIONS, ['dtlsv1.2', dtlsv1]).
 -define(ALL_SUPPORTED_VERSIONS, ['tlsv1.2', 'tlsv1.1', tlsv1]).
 -define(MIN_SUPPORTED_VERSIONS, ['tlsv1.1', tlsv1]).
 -define(ALL_DATAGRAM_SUPPORTED_VERSIONS, ['dtlsv1.2', dtlsv1]).
@@ -95,7 +96,8 @@
 	  certfile             :: binary(),
 	  cert                 :: public_key:der_encoded() | secret_printout() | 'undefined',
 	  keyfile              :: binary(),
-	  key	               :: {'RSAPrivateKey' | 'DSAPrivateKey' | 'ECPrivateKey' | 'PrivateKeyInfo', public_key:der_encoded()} | secret_printout() | 'undefined',
+	  key	               :: {'RSAPrivateKey' | 'DSAPrivateKey' | 'ECPrivateKey' | 'PrivateKeyInfo', 
+                                   public_key:der_encoded()} | key_map() | secret_printout() | 'undefined',
 	  password	       :: string() | secret_printout() | 'undefined',
 	  cacerts              :: [public_key:der_encoded()] | secret_printout() | 'undefined',
 	  cacertfile           :: binary(),
@@ -142,7 +144,6 @@
 	  signature_algs,
 	  eccs,
 	  honor_ecc_order            :: boolean(),
-	  v2_hello_compatible        :: boolean(),
           max_handshake_size         :: integer()
          }).
 
@@ -164,7 +165,15 @@
 		 connection_cb
 		}).
 
-
+-type key_map()              :: #{algorithm := rsa | dss | ecdsa,
+                                  %% engine and key_id ought to 
+                                  %% be :=, but putting it in
+                                  %% the spec gives dialyzer warning
+                                  %% of correct code!
+                                  engine => crypto:engine_ref(),
+                                  key_id => crypto:key_id(),
+                                  password => crypto:password()
+                                 }.
 -type state_name()           :: hello | abbreviated | certify | cipher | connection.
 -type gen_fsm_state_return() :: {next_state, state_name(), term()} |
 				{next_state, state_name(), term(), timeout()} |

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -3275,16 +3275,16 @@ otp_8856(Config) when is_list(Config) ->
     {ok, _} = dets:open_file(Tab, [{type, bag}, {file, File}]),
     spawn(fun()-> Me ! {1, dets:insert(Tab, [])} end),
     spawn(fun()-> Me ! {2, dets:insert_new(Tab, [])} end),
-    ok = dets:close(Tab),
     receive {1, ok} -> ok end,
     receive {2, true} -> ok end,
+    ok = dets:close(Tab),
     file:delete(File),
 
     {ok, _} = dets:open_file(Tab, [{type, set}, {file, File}]),
     spawn(fun() -> dets:delete(Tab, 0) end),
     spawn(fun() -> Me ! {3, dets:insert_new(Tab, {0,0})} end),
-    ok = dets:close(Tab),
     receive {3, true} -> ok end,
+    ok = dets:close(Tab),
     file:delete(File),
     ok.
 

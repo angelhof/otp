@@ -470,9 +470,9 @@ get_suite(Mod, {group, Suite}) ->
 	{_, _, TCList} = lists:keyfind(Suite, 1, Groups),
 	TCList
     catch
-	_:Reason ->
+	_:Reason:Stacktrace ->
 	    io:format("Not implemented ~p ~p (~p ~p)~n",
-		      [Mod,Suite,Reason, erlang:get_stacktrace()]),
+		      [Mod,Suite,Reason,Stacktrace]),
 	    'NYI'
     end;
 get_suite(Mod, all) ->
@@ -774,7 +774,7 @@ init_nodes([], _File, _Line) ->
 
 %% Returns [Name, Host]
 node_to_name_and_host(Node) ->
-    string:tokens(atom_to_list(Node), [$@]).
+    string:lexemes(atom_to_list(Node), [$@]).
 
 lookup_config(Key,Config) ->
     case lists:keysearch(Key,1,Config) of

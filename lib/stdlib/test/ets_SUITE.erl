@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -78,6 +78,7 @@
 -export([ets_all/1]).
 -export([massive_ets_all/1]).
 -export([take/1]).
+-export([whereis_table/1]).
 
 -export([init_per_testcase/2, end_per_testcase/2]).
 %% Convenience for manual testing
@@ -137,7 +138,8 @@ all() ->
      otp_9423,
      ets_all,
      massive_ets_all,
-     take].
+     take,
+     whereis_table].
 
 groups() ->
     [{new, [],
@@ -1349,6 +1351,26 @@ t_select_replace(Config) when is_list(Config) ->
                    NeqPairs(X,Y)) || X <- Terms, Y <- Terms],
 
 
+    %% Wrap entire tuple with 'const'
+    [[begin
+          Old = {Key, 1, 2},
+          ets:insert(T2, Old),
+          1 = ets:select_replace(T2, [{Old, [], [{const, New}]}]),
+          [New] = ets:lookup(T2, Key),
+          ets:delete(T2, Key)
+      end || New <- [{Key, 1, 2}, {Key, 3, 4}, {Key, 1}, {Key, 1, 2, 3}, {Key}]
+     ]
+     || Key <- [{1, tuple}, {nested, {tuple, {a,b}}} | Terms]],
+
+    %% 'const' wrap does not work with maps or variables in keys
+    [[begin
+          Old = {Key, 1, 2},
+          {'EXIT',{badarg,_}} = (catch ets:select_replace(T2, [{Old, [], [{const, New}]}]))
+      end || New <- [{Key, 1, 2}, {Key, 3, 4}, {Key, 1}, {Key, 1, 2, 3}, {Key}]
+     ]
+     || Key <- [#{a => 1}, {nested, #{a => 1}}, '$1']],
+
+
     ets:delete(T2),
 
     verify_etsmem(EtsMem).
@@ -1662,7 +1684,7 @@ do_random_test() ->
     ets:delete(Set),
     verify_etsmem(EtsMem).
 
-%% Ttest various variants of update_element.
+%% Test various variants of update_element.
 update_element(Config) when is_list(Config) ->
     EtsMem = etsmem(),
     repeat_for_opts(fun update_element_opts/1),
@@ -2263,13 +2285,8 @@ write_concurrency(Config) when is_list(Config) ->
     NoHashMem = ets:info(No7,memory),
     NoHashMem = ets:info(No8,memory),
 
-    case erlang:system_info(smp_support) of
-	true ->
-	    true = YesMem > NoHashMem,
-	    true = YesMem > NoTreeMem;
-	false ->
-	    true = YesMem =:= NoHashMem
-    end,
+    true = YesMem > NoHashMem,
+    true = YesMem > NoTreeMem,
 
     {'EXIT',{badarg,_}} = (catch ets_new(foo,[public,{write_concurrency,foo}])),
     {'EXIT',{badarg,_}} = (catch ets_new(foo,[public,{write_concurrency}])),
@@ -3632,7 +3649,7 @@ verify_rescheduling_exit(Config, ForEachData, Flags, Fix, NOTabs, NOProcs) ->
 			  XScheds = count_exit_sched(TP),
 			  io:format("~p XScheds=~p~n",
 				    [TP, XScheds]),
-			  true = XScheds >= 5
+			  true = XScheds >= 3
 		  end,
 		  TPs),
     stop_loopers(LPs),
@@ -4084,6 +4101,7 @@ info_do(Opts) ->
     {value, {keypos, 2}} = lists:keysearch(keypos, 1, Res),
     {value, {protection, protected}} =
 	lists:keysearch(protection, 1, Res),
+    {value, {id, Tab}} = lists:keysearch(id, 1, Res),
     true = ets:delete(Tab),
     undefined = ets:info(non_existing_table_xxyy),
     undefined = ets:info(non_existing_table_xxyy,type),
@@ -5877,6 +5895,36 @@ take(Config) when is_list(Config) ->
     ets:delete(T3),
     ok.
 
+whereis_table(Config) when is_list(Config) ->
+    %% Do we return 'undefined' when the named table doesn't exist?
+    undefined = ets:whereis(whereis_test),
+
+    %% Does the tid() refer to the same table as the name?
+    whereis_test = ets:new(whereis_test, [named_table]),
+    Tid = ets:whereis(whereis_test),
+
+    ets:insert(whereis_test, [{hello}, {there}]),
+
+    [[{hello}],[{there}]] = ets:match(whereis_test, '$1'),
+    [[{hello}],[{there}]] = ets:match(Tid, '$1'),
+
+    true = ets:delete_all_objects(Tid),
+
+    [] = ets:match(whereis_test, '$1'),
+    [] = ets:match(Tid, '$1'),
+
+    %% Does the name disappear when deleted through the tid()?
+    true = ets:delete(Tid),
+    undefined = ets:info(whereis_test),
+    {'EXIT',{badarg, _}} = (catch ets:match(whereis_test, '$1')),
+
+    %% Is the old tid() broken when the table is re-created with the same
+    %% name?
+    whereis_test = ets:new(whereis_test, [named_table]),
+    [] = ets:match(whereis_test, '$1'),
+    {'EXIT',{badarg, _}} = (catch ets:match(Tid, '$1')),
+
+    ok.
 
 %%
 %% Utility functions:
@@ -5892,16 +5940,11 @@ add_lists([E1|T1], [E2|T2], Acc) ->
 run_smp_workers(InitF,ExecF,FiniF,Laps) ->
     run_smp_workers(InitF,ExecF,FiniF,Laps, 0).
 run_smp_workers(InitF,ExecF,FiniF,Laps, Exclude) ->
-    case erlang:system_info(smp_support) of
-	true ->
-            case erlang:system_info(schedulers_online) of
-                N when N > Exclude ->
-                    run_workers_do(InitF,ExecF,FiniF,Laps, N - Exclude);
-                _ ->
-                    {skipped, "Too few schedulers online"}
-            end;
-	false ->
-	    {skipped,"No smp support"}
+    case erlang:system_info(schedulers_online) of
+        N when N > Exclude ->
+            run_workers_do(InitF,ExecF,FiniF,Laps, N - Exclude);
+        _ ->
+            {skipped, "Too few schedulers online"}
     end.
 
 run_sched_workers(InitF,ExecF,FiniF,Laps) ->
@@ -6013,17 +6056,23 @@ etsmem() ->
 	 end},
     {Mem,AllTabs}.
 
-verify_etsmem({MemInfo,AllTabs}) ->
+
+verify_etsmem(MI) ->
     wait_for_test_procs(),
+    verify_etsmem(MI, 1).
+
+verify_etsmem({MemInfo,AllTabs}, Try) ->
     case etsmem() of
 	{MemInfo,_} ->
 	    io:format("Ets mem info: ~p", [MemInfo]),
-	    case MemInfo of
-		{ErlMem,EtsAlloc} when ErlMem == notsup; EtsAlloc == undefined ->
+	    case {MemInfo, Try} of
+		{{ErlMem,EtsAlloc},_} when ErlMem == notsup; EtsAlloc == undefined ->
 		    %% Use 'erl +Mea max' to do more complete memory leak testing.
 		    {comment,"Incomplete or no mem leak testing"};
-		_ ->
-                    ok
+		{_, 1} ->
+                    ok;
+                _ ->
+                    {comment, "Transient memory discrepancy"}
 	    end;
 
 	{MemInfo2, AllTabs2} ->
@@ -6031,7 +6080,15 @@ verify_etsmem({MemInfo,AllTabs}) ->
 	    io:format("Actual:   ~p", [MemInfo2]),
 	    io:format("Changed tables before: ~p\n",[AllTabs -- AllTabs2]),
 	    io:format("Changed tables after: ~p\n", [AllTabs2 -- AllTabs]),
-            ct:fail("Failed memory check")
+            case Try < 2 of
+                true ->
+                    io:format("\nThis discrepancy could be caused by an "
+                              "inconsistent memory \"snapshot\""
+                              "\nTry again...\n", []),
+                    verify_etsmem({MemInfo, AllTabs}, Try+1);
+                false ->
+                    ct:fail("Failed memory check")
+            end
     end.
 
 
@@ -6211,11 +6268,9 @@ spawn_monitor_with_pid(Pid, Fun, N) ->
 only_if_smp(Func) ->
     only_if_smp(2, Func).
 only_if_smp(Schedulers, Func) ->
-    case {erlang:system_info(smp_support),
-	  erlang:system_info(schedulers_online)} of
-	{false,_} -> {skip,"No smp support"};
-	{true,N} when N < Schedulers -> {skip,"Too few schedulers online"};
-	{true,_} -> Func()
+    case erlang:system_info(schedulers_online) of
+	N when N < Schedulers -> {skip,"Too few schedulers online"};
+	_ -> Func()
     end.
 
 %% Copy-paste from emulator/test/binary_SUITE.erl
@@ -6361,7 +6416,7 @@ very_big_num(0, Result) ->
     Result.
 
 make_port() ->
-    open_port({spawn, "efile"}, [eof]).
+    hd(erlang:ports()).
 
 make_pid() ->
     spawn_link(fun sleeper/0).

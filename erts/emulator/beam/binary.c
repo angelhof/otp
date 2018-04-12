@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,14 +60,36 @@ erts_init_binary(void)
 
 }
 
+static ERTS_INLINE
+Eterm build_proc_bin(ErlOffHeap* ohp, Eterm* hp, Binary* bptr)
+{
+    ProcBin* pb = (ProcBin *) hp;
+    pb->thing_word = HEADER_PROC_BIN;
+    pb->size = bptr->orig_size;
+    pb->next = ohp->first;
+    ohp->first = (struct erl_off_heap_header*)pb;
+    pb->val = bptr;
+    pb->bytes = (byte*) bptr->orig_bytes;
+    pb->flags = 0;
+    OH_OVERHEAD(ohp, pb->size / sizeof(Eterm));
+
+    return make_binary(pb);
+}
+
+/** @brief Initiate a ProcBin for a full Binary.
+ *  @param hp must point to PROC_BIN_SIZE available heap words.
+ */
+Eterm erts_build_proc_bin(ErlOffHeap* ohp, Eterm* hp, Binary* bptr)
+{
+    return build_proc_bin(ohp, hp, bptr);
+}
+
 /*
  * Create a brand new binary from scratch.
  */
-
 Eterm
 new_binary(Process *p, byte *buf, Uint len)
 {
-    ProcBin* pb;
     Binary* bptr;
 
     if (len <= ERL_ONHEAP_BIN_LIMIT) {
@@ -88,23 +110,7 @@ new_binary(Process *p, byte *buf, Uint len)
 	sys_memcpy(bptr->orig_bytes, buf, len);
     }
 
-    /*
-     * Now allocate the ProcBin on the heap.
-     */
-    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-    pb->thing_word = HEADER_PROC_BIN;
-    pb->size = len;
-    pb->next = MSO(p).first;
-    MSO(p).first = (struct erl_off_heap_header*)pb;
-    pb->val = bptr;
-    pb->bytes = (byte*) bptr->orig_bytes;
-    pb->flags = 0;
-
-    /*
-     * Miscellaneous updates. Return the tagged binary.
-     */
-    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-    return make_binary(pb);
+    return build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), bptr);
 }
 
 /* 
@@ -113,7 +119,6 @@ new_binary(Process *p, byte *buf, Uint len)
 
 Eterm erts_new_mso_binary(Process *p, byte *buf, Uint len)
 {
-    ProcBin* pb;
     Binary* bptr;
 
     /*
@@ -124,23 +129,7 @@ Eterm erts_new_mso_binary(Process *p, byte *buf, Uint len)
 	sys_memcpy(bptr->orig_bytes, buf, len);
     }
 
-    /*
-     * Now allocate the ProcBin on the heap.
-     */
-    pb = (ProcBin *) HAlloc(p, PROC_BIN_SIZE);
-    pb->thing_word = HEADER_PROC_BIN;
-    pb->size = len;
-    pb->next = MSO(p).first;
-    MSO(p).first = (struct erl_off_heap_header*)pb;
-    pb->val = bptr;
-    pb->bytes = (byte*) bptr->orig_bytes;
-    pb->flags = 0;
-
-    /*
-     * Miscellaneous updates. Return the tagged binary.
-     */
-    OH_OVERHEAD(&(MSO(p)), pb->size / sizeof(Eterm));
-    return make_binary(pb);
+    return build_proc_bin(&MSO(p), HAlloc(p, PROC_BIN_SIZE), bptr);
 }
 
 /*
@@ -964,7 +953,10 @@ HIPE_WRAPPER_BIF_DISABLE_GC(iolist_to_binary, 1)
 BIF_RETTYPE iolist_to_binary_1(BIF_ALIST_1)
 {
     if (is_binary(BIF_ARG_1)) {
-	BIF_RET(BIF_ARG_1);
+        if (binary_bitsize(BIF_ARG_1) == 0) {
+            BIF_RET(BIF_ARG_1);
+        }
+        BIF_ERROR(BIF_P, BADARG);
     }
     return erts_list_to_binary_bif(BIF_P, BIF_ARG_1, bif_export[BIF_iolist_to_binary_1]);
 }

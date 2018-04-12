@@ -63,7 +63,7 @@ void (*erts_printf_unblock_fpe)(int) = NULL;
 #undef FWRITE
 #undef PUTC_ON_SMALL_WRITES
 
-#if defined(USE_THREADS) && defined(HAVE_FLOCKFILE)
+#if defined(HAVE_FLOCKFILE)
 #	define FLOCKFILE(FP)	flockfile(FP)
 #	define FUNLOCKFILE(FP)	funlockfile(FP)
 #	ifdef HAVE_PUTC_UNLOCKED
@@ -73,11 +73,7 @@ void (*erts_printf_unblock_fpe)(int) = NULL;
 #	ifdef HAVE_FWRITE_UNLOCKED
 #		define FWRITE	fwrite_unlocked
 #	endif
-#endif
-#if !defined(USE_THREADS) && defined(putc) && !defined(fwrite)
-#	define PUTC_ON_SMALL_WRITES
-#endif
-#if !defined(FLOCKFILE) || !defined(FUNLOCKFILE)
+#else
 #	define FLOCKFILE(FP)
 #	define FUNLOCKFILE(FP)
 #endif
@@ -147,8 +143,8 @@ write_f_add_cr(void *vfp, char* buf, size_t len)
     return len;
 }
 
-static int
-write_f(void *vfp, char* buf, size_t len)
+int
+erts_write_fp(void *vfp, char* buf, size_t len)
 {
     ASSERT(vfp);
 #ifdef PUTC_ON_SMALL_WRITES
@@ -257,7 +253,7 @@ erts_printf(const char *format, ...)
 	FLOCKFILE(stdout);
 	res = erts_printf_format(erts_printf_add_cr_to_stdout
 				 ? write_f_add_cr
-				 : write_f,
+				 : erts_write_fp,
 				 (void *) stdout,
 				 (char *) format,
 				 arglist);
@@ -285,7 +281,7 @@ erts_fprintf(FILE *filep, const char *format, ...)
 	else if (erts_printf_add_cr_to_stderr && filep == stderr)
 	    fmt_f = write_f_add_cr;
 	else
-	    fmt_f = write_f;
+	    fmt_f = erts_write_fp;
 	FLOCKFILE(filep);
 	res = erts_printf_format(fmt_f,(void *)filep,(char *)format,arglist);
 	FUNLOCKFILE(filep);
@@ -390,7 +386,7 @@ erts_vprintf(const char *format, va_list arglist)
 	errno = 0;
 	res = erts_printf_format(erts_printf_add_cr_to_stdout
 				 ? write_f_add_cr
-				 : write_f,
+				 : erts_write_fp,
 				 (void *) stdout,
 				 (char *) format,
 				 arglist);
@@ -414,7 +410,7 @@ erts_vfprintf(FILE *filep, const char *format, va_list arglist)
 	else if (erts_printf_add_cr_to_stderr && filep == stderr)
 	    fmt_f = write_f_add_cr;
 	else
-	    fmt_f = write_f;
+	    fmt_f = erts_write_fp;
 	res = erts_printf_format(fmt_f,(void *)filep,(char *)format,arglist);
     }
     return res;

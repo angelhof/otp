@@ -5,7 +5,7 @@
   <header>
     <copyright>
       <year>1997</year>
-      <year>2016</year>
+      <year>2017</year>
       <holder>Ericsson AB, All Rights Reserved</holder>
     </copyright>
     <legalnotice>
@@ -967,6 +967,12 @@
               opened in read-only or read-write mode. Defaults to
               <c>read_write</c>.
               </p>
+          </item>
+          <tag><c>{quiet, Boolean}</c></tag>
+          <item>
+              <p>Specifies if messages will be sent to
+                <c>error_logger</c> on recoverable errors with
+                the log files. Defaults to <c>false</c>.</p>
           </item>
         </taglist>
         <p><c>open/1</c> returns <c>{ok, <anno>Log</anno>}</c> if the

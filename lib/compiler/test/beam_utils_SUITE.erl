@@ -24,7 +24,8 @@
 	 apply_fun/1,apply_mf/1,bs_init/1,bs_save/1,
 	 is_not_killed/1,is_not_used_at/1,
 	 select/1,y_catch/1,otp_8949_b/1,liveopt/1,coverage/1,
-	 y_registers/1]).
+         y_registers/1,user_predef/1,scan_f/1,cafu/1,
+         receive_label/1,read_size_file_version/1,not_used/1]).
 -export([id/1]).
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
@@ -46,7 +47,12 @@ groups() ->
        otp_8949_b,
        liveopt,
        coverage,
-       y_registers
+       y_registers,
+       user_predef,
+       scan_f,
+       cafu,
+       read_size_file_version,
+       not_used
       ]}].
 
 init_per_suite(Config) ->
@@ -117,6 +123,15 @@ bs_init(_Config) ->
     {'EXIT',{badarg,_}} = (catch do_bs_init_2([0.5])),
     {'EXIT',{badarg,_}} = (catch do_bs_init_2([-1])),
     {'EXIT',{badarg,_}} = (catch do_bs_init_2([1 bsl 32])),
+
+    <<>> = do_bs_init_3({tag,0}, 0, 0),
+    <<0>> = do_bs_init_3({tag,0}, 2, 1),
+
+    <<"_build/shared">> = do_bs_init_4([], false),
+    <<"abc/shared">> = do_bs_init_4(<<"abc">>, false),
+    <<"foo/foo">> = do_bs_init_4(<<"foo">>, true),
+    error = do_bs_init_4([], not_boolean),
+
     ok.
 
 do_bs_init_1([?MODULE], Sz) ->
@@ -134,6 +149,45 @@ do_bs_init_2(SigNos) ->
 	    erlang:error(badarg)
     >>.
 
+do_bs_init_3({tag,Pos}, Offset, Len) ->
+    N0 = Offset - Pos,
+    N = if N0 > Len -> Len;
+           true -> N0
+        end,
+    <<0:N/unit:8>>.
+
+do_bs_init_4(Arg1, Arg2) ->
+    Build =
+        case id(Arg1) of
+            X when X =:= [] orelse X =:= false -> <<"_build">>;
+            X -> X
+        end,
+    case id(Arg2) of
+        true ->
+            id(<<case Build of
+                     Rewrite when is_binary(Rewrite) ->
+                         Rewrite;
+                     Rewrite ->
+                         id(Rewrite)
+                 end/binary,
+                 "/",
+                 case id(<<"foo">>) of
+                     Rewrite when is_binary(Rewrite) ->
+                         Rewrite;
+                     Rewrite ->
+                         id(Rewrite)
+                 end/binary>>);
+        false ->
+            id(<<case Build of
+                     Rewrite when is_binary(Rewrite) ->
+                         Rewrite;
+                     Rewrite ->
+                         id(Rewrite)
+                 end/binary,
+                 "/shared">>);
+        Other ->
+            error
+    end.
 
 bs_save(_Config) ->
     {a,30,<<>>} = do_bs_save(<<1:1,30:5>>),
@@ -260,6 +314,14 @@ otp_8949_b(A, B) ->
 liveopt(_Config) ->
     F = liveopt_fun(42, pebkac, user),
     void = F(42, #alarmInfo{type=sctp,cause=pebkac,origin=user}),
+
+
+    A = {#alarmInfo{cause = {abc, def}}, ghi},
+    A = liveopt_guard_bif(A),
+
+    B = {#alarmInfo{cause = {abc}}, def},
+    {#alarmInfo{cause = {{abc}}}, def} = liveopt_guard_bif(B),
+
     ok.
 
 liveopt_fun(Peer, Cause, Origin) ->
@@ -269,6 +331,15 @@ liveopt_fun(Peer, Cause, Origin) ->
 				       cause=Cause,
 				       origin=Origin} ->
 	    void
+    end.
+
+liveopt_guard_bif({#alarmInfo{cause=F}=R, X}=A) ->
+    %% ERIERL-48
+    if
+        is_tuple(F), tuple_size(F) == 2 -> A;
+        true ->
+            R2 = R#alarmInfo{cause={F}},
+            {R2,X}
     end.
 
 %% Thanks to QuickCheck.
@@ -358,6 +429,103 @@ yellow(Hill) ->
 do(A, B) -> {A,B}.
 appointment(#{"resolution" := Url}) ->
     do(receive _ -> Url end, #{true => Url}).
+
+%% From epp.erl.
+user_predef(_Config) ->
+    #{key:="value"} = user_predef({key,"value"}, #{}),
+    #{key:="value"} = user_predef({key,"value"}, #{key=>defined}),
+    error = user_predef({key,"value"}, #{key=>[defined]}),
+    ok.
+
+user_predef({M,Val}, Ms) ->
+    case Ms of
+	#{M:=Defs} when is_list(Defs) ->
+	    error;
+	_ ->
+	    Ms#{M=>Val}
+    end.
+
+%% From disk_log_1.erl.
+scan_f(_Config) ->
+    {1,<<>>,[]} = scan_f(<<1:32>>, 1, []),
+    {1,<<>>,[<<156>>]} = scan_f(<<1:32,156,1:32>>, 1, []),
+    ok.
+
+scan_f(<<Size:32,Tail/binary>>, FSz, Acc) when Size =< FSz ->
+    case Tail of
+        <<BinTerm:Size/binary,Tail2/binary>> ->
+            scan_f(Tail2, FSz, [BinTerm | Acc]);
+        _ ->
+            {Size,Tail,Acc}
+    end.
+
+%% From file_io_server.erl.
+cafu(_Config) ->
+    error = cafu(<<42:32>>, -1, 0, {utf32,big}),
+    error = cafu(<<42:32>>, 10, 0, {utf32,big}),
+    error = cafu(<<42:32>>, -1, 0, {utf32,little}),
+    ok.
+
+cafu(<<_/big-utf32,Rest/binary>>, N, Count, {utf32,big}) when N < 0 ->
+    cafu(Rest, -1, Count+1, {utf32,big});
+cafu(<<_/big-utf32,Rest/binary>>, N, Count, {utf32,big}) ->
+    cafu(Rest, N-1, Count+1, {utf32,big});
+cafu(<<_/little-utf32,Rest/binary>>, N, Count, {utf32,little}) when N < 0 ->
+    cafu(Rest, -1, Count+1, {utf32,little});
+cafu(_, _, _, _) ->
+    error.
+
+-record(rec_label, {bool}).
+
+receive_label(_Config) ->
+    Pid = spawn_link(fun() -> do_receive_label(#rec_label{bool=true}) end),
+    Msg = {a,b,c},
+    Pid ! {self(),Msg},
+    receive
+        {ok,Msg} ->
+            unlink(Pid),
+            exit(Pid, die),
+            ok
+    end.
+
+do_receive_label(Rec) ->
+    receive
+        {From,Message} when Rec#rec_label.bool ->
+            From ! {ok,Message},
+            do_receive_label(Rec)
+    end.
+
+read_size_file_version(_Config) ->
+    ok = do_read_size_file_version({ok,<<42>>}),
+    {ok,7777} = do_read_size_file_version({ok,<<7777:32>>}),
+    ok.
+
+do_read_size_file_version(E) ->
+    case E of
+	{ok,<<Version>>} when Version =:= 42 ->
+            ok;
+	{ok,<<MaxFiles:32>>} ->
+            {ok,MaxFiles}
+    end.
+
+-record(s, { a, b }).
+-record(k, { v }).
+
+not_used(_Config) ->
+    [] = not_used_p(any, #s{b=true}, #k{}, ignored),
+    #k{v=42} = not_used_p(any, #s{b=false}, #k{v=42}, ignored),
+    #k{v=42} = not_used_p(any, #s{b=bad}, #k{v=42}, ignored),
+    ok.
+
+not_used_p(_C, S, K, L) when is_record(K, k) ->
+    if ((S#s.b) and
+         (S#s.b)) ->
+            [];
+       true ->
+            id(L),
+            id(K#k.v),
+            id(K)
+    end.
 
 %% The identity function.
 id(I) -> I.

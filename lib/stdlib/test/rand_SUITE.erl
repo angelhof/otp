@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2000-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,10 +29,16 @@
 	 basic_stats_uniform_1/1, basic_stats_uniform_2/1,
 	 basic_stats_standard_normal/1,
 	 basic_stats_normal/1,
+         stats_standard_normal_box_muller/1,
+         stats_standard_normal_box_muller_2/1,
+         stats_standard_normal/1,
+         uniform_real_conv/1,
 	 plugin/1, measure/1,
 	 reference_jump_state/1, reference_jump_procdict/1]).
 
 -export([test/0, gen/1]).
+
+-export([uniform_real_gen/1, uniform_gen/2]).
 
 -include_lib("common_test/include/ct.hrl").
 
@@ -47,6 +53,8 @@ all() ->
      api_eq,
      reference,
      {group, basic_stats},
+     {group, distr_stats},
+     uniform_real_conv,
      plugin, measure,
      {group, reference_jump}
     ].
@@ -55,10 +63,17 @@ groups() ->
     [{basic_stats, [parallel],
       [basic_stats_uniform_1, basic_stats_uniform_2,
        basic_stats_standard_normal]},
+     {distr_stats, [parallel],
+      [stats_standard_normal_box_muller,
+       stats_standard_normal_box_muller_2,
+       stats_standard_normal]},
      {reference_jump, [parallel],
       [reference_jump_state, reference_jump_procdict]}].
 
 group(basic_stats) ->
+    %% valgrind needs a lot of time
+    [{timetrap,{minutes,10}}];
+group(distr_stats) ->
     %% valgrind needs a lot of time
     [{timetrap,{minutes,10}}];
 group(reference_jump) ->
@@ -73,14 +88,14 @@ test() ->
               try
                   ok = ?MODULE:Test([]),
                   io:format("~p: ok~n", [Test])
-              catch _:Reason ->
+              catch _:Reason:Stacktrace ->
                       io:format("Failed: ~p: ~p ~p~n",
-                                [Test, Reason, erlang:get_stacktrace()])
+                                [Test, Reason, Stacktrace])
               end
       end, Tests).
 
 algs() ->
-    [exs64, exsplus, exsp, exrop, exs1024, exs1024s].
+    [exrop, exsp, exs1024s, exs64, exsplus, exs1024].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -89,8 +104,8 @@ seed(Config) when is_list(Config) ->
     Algs = algs(),
     Test = fun(Alg) ->
 		   try seed_1(Alg)
-		   catch _:Reason ->
-			   ct:fail({Alg, Reason, erlang:get_stacktrace()})
+		   catch _:Reason:Stacktrace ->
+			   ct:fail({Alg, Reason, Stacktrace})
 		   end
 	   end,
     [Test(Alg) || Alg <- Algs],
@@ -101,7 +116,7 @@ seed_1(Alg) ->
     _ = rand:uniform(),
     S00 = get(rand_seed),
     erase(),
-    _ = rand:uniform(),
+    _ = rand:uniform_real(),
     false = S00 =:= get(rand_seed), %% hopefully
 
     %% Choosing algo and seed
@@ -228,11 +243,13 @@ interval_float(Config) when is_list(Config) ->
 interval_float_1(0) -> ok;
 interval_float_1(N) ->
     X = rand:uniform(),
+    Y = rand:uniform_real(),
     if
-	0.0 =< X, X < 1.0 ->
+	0.0 =< X, X < 1.0, 0.0 < Y, Y < 1.0 ->
 	    ok;
 	true ->
-	    io:format("X=~p 0=<~p<1.0~n", [X,X]),
+	    io:format("X=~p 0.0=<~p<1.0~n", [X,X]),
+	    io:format("Y=~p 0.0<~p<1.0~n", [Y,Y]),
 	    exit({X, rand:export_seed()})
     end,
     interval_float_1(N-1).
@@ -334,7 +351,13 @@ basic_stats_normal(Config) when is_list(Config) ->
       IntendedMeanVariancePairs).
 
 basic_uniform_1(N, S0, Sum, A0) when N > 0 ->
-    {X,S} = rand:uniform_s(S0),
+    {X,S} =
+        case N band 1 of
+            0 ->
+                rand:uniform_s(S0);
+            1 ->
+                rand:uniform_real_s(S0)
+        end,
     I = trunc(X*100),
     A = array:set(I, 1+array:get(I,A0), A0),
     basic_uniform_1(N-1, S, Sum+X, A);
@@ -399,6 +422,351 @@ normal_s(Mean, Variance, State0) when Mean == 0, Variance == 1 ->
 normal_s(Mean, Variance, State0) ->
     rand:normal_s(Mean, Variance, State0).
 
+
+
+-dialyzer({no_improper_lists, stats_standard_normal_box_muller/1}).
+stats_standard_normal_box_muller(Config) when is_list(Config) ->
+    try math:erfc(1.0) of
+        _ ->
+            TwoPi = 2.0 * math:pi(),
+            NormalS =
+                fun
+                    ([S0]) ->
+                        {U1, S1} = rand:uniform_real_s(S0),
+                        R = math:sqrt(-2.0 * math:log(U1)),
+                        {U2, S2} = rand:uniform_s(S1),
+                        T = TwoPi * U2,
+                        Z0 = R * math:cos(T),
+                        Z1 = R * math:sin(T),
+                        {Z0, [S2|Z1]};
+                    ([S|Z]) ->
+                        {Z, [S]}
+                end,
+            State = [rand:seed(exrop)],
+            stats_standard_normal(NormalS, State, 3)
+    catch error:_ ->
+            {skip, "math:erfc/1 not supported"}
+    end.
+
+-dialyzer({no_improper_lists, stats_standard_normal_box_muller_2/1}).
+stats_standard_normal_box_muller_2(Config) when is_list(Config) ->
+    try math:erfc(1.0) of
+        _ ->
+            TwoPi = 2.0 * math:pi(),
+            NormalS =
+                fun
+                    ([S0]) ->
+                        {U0, S1} = rand:uniform_s(S0),
+                        U1 = 1.0 - U0,
+                        R = math:sqrt(-2.0 * math:log(U1)),
+                        {U2, S2} = rand:uniform_s(S1),
+                        T = TwoPi * U2,
+                        Z0 = R * math:cos(T),
+                        Z1 = R * math:sin(T),
+                        {Z0, [S2|Z1]};
+                    ([S|Z]) ->
+                        {Z, [S]}
+                end,
+            State = [rand:seed(exrop)],
+            stats_standard_normal(NormalS, State, 3)
+    catch error:_ ->
+            {skip, "math:erfc/1 not supported"}
+    end.
+
+
+stats_standard_normal(Config) when is_list(Config) ->
+    try math:erfc(1.0) of
+        _ ->
+            stats_standard_normal(
+              fun rand:normal_s/1, rand:seed_s(exrop), 3)
+    catch error:_ ->
+            {skip, "math:erfc/1 not supported"}
+    end.
+%%
+stats_standard_normal(Fun, S, Retries) ->
+%%%
+%%% ct config:
+%%% {rand_SUITE, [{stats_standard_normal,[{seconds, 8}, {std_devs, 4.0}]}]}.
+%%%
+    Seconds = ct:get_config({?MODULE, ?FUNCTION_NAME, seconds}, 8),
+    StdDevs =
+        ct:get_config(
+          {?MODULE, ?FUNCTION_NAME, std_devs},
+          4.0), % probability erfc(4.0/sqrt(2)) (1/15787) to fail a bucket
+%%%
+    ct:timetrap({seconds, Seconds + 120}),
+    %% Buckets is chosen to get a range where the the probability to land
+    %% in the top catch-all bucket is not vanishingly low, but with
+    %% these values it is about 1/25 of the probability for the low bucket
+    %% (closest to 0).
+    %%
+    %% Rounds is calculated so the expected value for the low
+    %% bucket will be at least TargetHits.
+    %%
+    InvDelta = 512,
+    Buckets = 4 * InvDelta, % 4 std devs range
+    TargetHits = 1024,
+    Sqrt2 = math:sqrt(2.0),
+    W = InvDelta * Sqrt2,
+    P0 = math:erf(1 / W),
+    Rounds = TargetHits * ceil(1.0 / P0),
+    Histogram = array:new({default, 0}),
+    ct:pal(
+      "Running standard normal test against ~w std devs for ~w seconds...",
+      [StdDevs, Seconds]),
+    StopTime = erlang:monotonic_time(second) + Seconds,
+    {PositiveHistogram, NegativeHistogram, Outlier, TotalRounds, NewS} =
+        stats_standard_normal(
+          InvDelta, Buckets, Histogram, Histogram, 0.0,
+          Fun, S, Rounds, StopTime, Rounds, 0),
+    Precision = math:sqrt(TotalRounds * P0) / StdDevs,
+    TopP = math:erfc(Buckets / W),
+    TopPrecision = math:sqrt(TotalRounds * TopP) / StdDevs,
+    OutlierProbability = math:erfc(Outlier / Sqrt2) * TotalRounds,
+    InvOP = 1.0 / OutlierProbability,
+    ct:pal(
+      "Total rounds: ~w, tolerance: 1/~.2f..1/~.2f, "
+      "outlier: ~.2f, probability 1/~.2f.",
+      [TotalRounds, Precision, TopPrecision, Outlier, InvOP]),
+    case
+        {bucket_error, TotalRounds,
+         check_histogram(
+           W, TotalRounds, StdDevs, PositiveHistogram, Buckets),
+         check_histogram(
+           W, TotalRounds, StdDevs, NegativeHistogram, Buckets)}
+    of
+        {_, _, [], []} when InvOP < 100 ->
+            {comment, {tp, TopPrecision, op, InvOP}};
+        {_, _, [], []} ->
+            %% If the probability for getting this Outlier is lower than
+            %% 1/100, then this is fishy!
+            stats_standard_normal(
+              Fun, NewS, Retries, {outlier_fishy, InvOP});
+        BucketErrors ->
+            stats_standard_normal(
+              Fun, NewS, Retries, BucketErrors)
+    end.
+%%
+stats_standard_normal(Fun, S, Retries, Failure) ->
+    case Retries - 1 of
+        0 ->
+            ct:fail(Failure);
+        NewRetries ->
+            ct:pal("Retry due to TC glitch: ~p", [Failure]),
+            stats_standard_normal(Fun, S, NewRetries)
+    end.
+%%
+stats_standard_normal(
+  InvDelta, Buckets, PositiveHistogram, NegativeHistogram, Outlier,
+  Fun, S, 0, StopTime, Rounds, TotalRounds) ->
+    case erlang:monotonic_time(second) of
+        Now when Now < StopTime ->
+            stats_standard_normal(
+              InvDelta, Buckets,
+              PositiveHistogram, NegativeHistogram, Outlier,
+              Fun, S, Rounds, StopTime, Rounds, TotalRounds + Rounds);
+        _ ->
+            {PositiveHistogram, NegativeHistogram,
+             Outlier, TotalRounds + Rounds, S}
+    end;
+stats_standard_normal(
+  InvDelta, Buckets, PositiveHistogram, NegativeHistogram, Outlier,
+  Fun, S, Count, StopTime, Rounds, TotalRounds) ->
+    case Fun(S) of
+        {X, NewS} when 0.0 =< X ->
+            Bucket = min(Buckets, floor(X * InvDelta)),
+            stats_standard_normal(
+              InvDelta, Buckets,
+              increment_bucket(Bucket, PositiveHistogram),
+              NegativeHistogram, max(Outlier, X),
+              Fun, NewS, Count - 1, StopTime, Rounds, TotalRounds);
+        {MinusX, NewS} ->
+            X = -MinusX,
+            Bucket = min(Buckets, floor(X * InvDelta)),
+            stats_standard_normal(
+              InvDelta, Buckets,
+              PositiveHistogram,
+              increment_bucket(Bucket, NegativeHistogram), max(Outlier, X),
+              Fun, NewS, Count - 1, StopTime, Rounds, TotalRounds)
+    end.
+
+increment_bucket(Bucket, Array) ->
+    array:set(Bucket, array:get(Bucket, Array) + 1, Array).
+
+check_histogram(W, Rounds, StdDevs, Histogram, Buckets) ->
+    TargetP = 0.5 * math:erfc(Buckets / W),
+    P = 0.0,
+    N = 0,
+    check_histogram(
+      W, Rounds, StdDevs, Histogram, TargetP,
+      Buckets, Buckets, P, N).
+%%
+check_histogram(
+  _W, _Rounds, _StdDevs, _Histogram, _TargetP,
+  0, _PrevBucket, _PrevP, _PrevN) ->
+    [];
+check_histogram(
+  W, Rounds, StdDevs, Histogram, TargetP,
+  Bucket, PrevBucket, PrevP, PrevN) ->
+    N = PrevN + array:get(Bucket, Histogram),
+    P = 0.5 * math:erfc(Bucket / W),
+    BucketP = P - PrevP,
+    if
+        BucketP < TargetP ->
+            check_histogram(
+              W, Rounds, StdDevs, Histogram, TargetP,
+              Bucket - 1, PrevBucket, PrevP, N);
+        true ->
+            Exp = BucketP * Rounds,
+            Var = Rounds * BucketP*(1.0 - BucketP),
+            Threshold = StdDevs * math:sqrt(Var),
+            LowerLimit = floor(Exp - Threshold),
+            UpperLimit = ceil(Exp + Threshold),
+            if
+                N < LowerLimit; UpperLimit < N ->
+                    [#{bucket => {Bucket, PrevBucket}, n => N,
+                       lower => LowerLimit, upper => UpperLimit} |
+                     check_histogram(
+                       W, Rounds, StdDevs, Histogram, TargetP,
+                       Bucket - 1, Bucket, P, 0)];
+                true ->
+                    check_histogram(
+                      W, Rounds, StdDevs, Histogram, TargetP,
+                      Bucket - 1, Bucket, P, 0)
+            end
+    end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% White box test of the conversion to float
+
+uniform_real_conv(Config) when is_list(Config) ->
+    [begin
+%%         ct:pal("~13.16.0bx~3.16.0b: ~p~n", [M,E,Gen]),
+         uniform_real_conv_check(M, E, Gen)
+     end || {M, E, Gen} <- uniform_real_conv_data()],
+    uniform_real_scan(0),
+    uniform_real_scan(3).
+
+uniform_real_conv_data() ->
+    [{16#fffffffffffff,  -1, [16#3ffffffffffffff]},
+     {16#fffffffffffff,  -1, [16#3ffffffffffffe0]},
+     {16#ffffffffffffe,  -1, [16#3ffffffffffffdf]},
+     %%
+     {16#0000000000000,  -1, [16#200000000000000]},
+     {16#fffffffffffff,  -2, [16#1ffffffffffffff]},
+     {16#fffffffffffff,  -2, [16#1fffffffffffff0]},
+     {16#ffffffffffffe,  -2, [16#1ffffffffffffef]},
+     %%
+     {16#0000000000000,  -2, [16#100000000000000]},
+     {16#fffffffffffff,  -3, [16#0ffffffffffffff]},
+     {16#fffffffffffff,  -3, [16#0fffffffffffff8]},
+     {16#ffffffffffffe,  -3, [16#0fffffffffffff7]},
+     %%
+     {16#0000000000000,  -3, [16#080000000000000]},
+     {16#fffffffffffff,  -4, [16#07fffffffffffff]},
+     {16#fffffffffffff,  -4, [16#07ffffffffffffc]},
+     {16#ffffffffffffe,  -4, [16#07ffffffffffffb]},
+     %%
+     {16#0000000000000,  -4, [16#040000000000000]},
+     {16#fffffffffffff,  -5, [16#03fffffffffffff,16#3ffffffffffffff]},
+     {16#fffffffffffff,  -5, [16#03ffffffffffffe,16#200000000000000]},
+     {16#ffffffffffffe,  -5, [16#03fffffffffffff,16#1ffffffffffffff]},
+     {16#ffffffffffffe,  -5, [16#03fffffffffffff,16#100000000000000]},
+     %%
+     {16#0000000000001, -56, [16#000000000000007,16#00000000000007f]},
+     {16#0000000000001, -56, [16#000000000000004,16#000000000000040]},
+     {16#0000000000000, -57, [16#000000000000003,16#20000000000001f]},
+     {16#0000000000000, -57, [16#000000000000000,16#200000000000000]},
+     {16#fffffffffffff, -58, [16#000000000000003,16#1ffffffffffffff]},
+     {16#fffffffffffff, -58, [16#000000000000000,16#1fffffffffffff0]},
+     {16#ffffffffffffe, -58, [16#000000000000000,16#1ffffffffffffef]},
+     {16#ffffffffffffe, -58, [16#000000000000000,16#1ffffffffffffe0]},
+     %%
+     {16#0000000000000, -58, [16#000000000000000,16#10000000000000f]},
+     {16#0000000000000, -58, [16#000000000000000,16#100000000000000]},
+     {2#11001100000000000000000000000000000000000011000000011, % 53 bits
+      -1022,
+      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, % 18 zeros
+       2#1100110000000000000000000000000000000000001 bsl 2, % 43 bits
+       2#1000000011 bsl (56-10+2)]}, % 10 bits
+     {0, -1, % 0.5 after retry
+      [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, % 18 zeros
+       2#111111111111111111111111111111111111111111 bsl 2, % 42 bits - retry
+       16#200000000000003]}]. % 0.5
+
+-define(UNIFORM_REAL_SCAN_PATTERN, (16#19000000000009)). % 53 bits
+-define(UNIFORM_REAL_SCAN_NUMBER, (1021)).
+
+uniform_real_scan_template(K) ->
+    <<0:?UNIFORM_REAL_SCAN_NUMBER,
+      ?UNIFORM_REAL_SCAN_PATTERN:53,K:2,0:1>>.
+
+uniform_real_scan(K) ->
+    Templ = uniform_real_scan_template(K),
+    N = ?UNIFORM_REAL_SCAN_NUMBER,
+    uniform_real_scan(Templ, N, K).
+
+uniform_real_scan(Templ, N, K) when 0 =< N ->
+    <<_:N/bits,T/bits>> = Templ,
+    Data = uniform_real_scan_data(T, K),
+    uniform_real_conv_check(
+      ?UNIFORM_REAL_SCAN_PATTERN, N - 1 - ?UNIFORM_REAL_SCAN_NUMBER, Data),
+    uniform_real_scan(Templ, N - 1, K);
+uniform_real_scan(_, _, _) ->
+    ok.
+
+uniform_real_scan_data(Templ, K) ->
+    case Templ of
+        <<X:56, T/bits>> ->
+            B = rand:bc64(X),
+            [(X bsl 2) bor K |
+             if
+                 53 =< B ->
+                     [];
+                 true ->
+                     uniform_real_scan_data(T, K)
+             end];
+        _ ->
+            <<X:56, _/bits>> = <<Templ/bits, 0:56>>,
+            [(X bsl 2) bor K]
+    end.
+
+uniform_real_conv_check(M, E, Gen) ->
+    <<F/float>> = <<0:1, (E + 16#3ff):11, M:52>>,
+    try uniform_real_gen(Gen) of
+        F -> F;
+        FF ->
+            ct:pal(
+              "~s =/= ~s: ~s~n",
+              [rand:float2str(FF), rand:float2str(F),
+               [["16#",integer_to_list(G,16),$\s]||G<-Gen]]),
+            ct:fail({neq, FF, F})
+    catch
+        Error:Reason:Stacktrace ->
+            ct:pal(
+              "~w:~p ~s: ~s~n",
+              [Error, Reason, rand:float2str(F),
+               [["16#",integer_to_list(G,16),$\s]||G<-Gen]]),
+            ct:fail({Error, Reason, F, Stacktrace})
+    end.
+
+
+uniform_real_gen(Gen) ->
+    State = rand_state(Gen),
+    {F, {#{type := rand_SUITE_list},[]}} = rand:uniform_real_s(State),
+    F.
+
+uniform_gen(Range, Gen) ->
+    State = rand_state(Gen),
+    {N, {#{type := rand_SUITE_list},[]}} = rand:uniform_s(Range, State),
+    N.
+
+%% Loaded dice for white box tests
+rand_state(Gen) ->
+    {#{type => rand_SUITE_list, bits => 58, weak_low_bits => 1,
+       next => fun ([H|T]) -> {H, T} end},
+     Gen}.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Test that the user can write algorithms.
@@ -459,213 +827,289 @@ measure(Config) ->
             {skip,{will_not_run_in_scaled_time,Scale}}
     end.
 
+-define(CHECK_UNIFORM_RANGE(Gen, Range, X, St),
+        case (Gen) of
+            {(X), (St)} when is_integer(X), 1 =< (X), (X) =< (Range) ->
+                St
+        end).
+-define(CHECK_UNIFORM(Gen, X, St),
+        case (Gen) of
+            {(X), (St)} when is_float(X), 0.0 =< (X), (X) < 1.0 ->
+                St
+        end).
+-define(CHECK_UNIFORM_NZ(Gen, X, St),
+        case (Gen) of
+            {(X), (St)} when is_float(X), 0.0 < (X), (X) =< 1.0 ->
+                St
+        end).
+-define(CHECK_NORMAL(Gen, X, St),
+        case (Gen) of
+            {(X), (St)} when is_float(X) ->
+                St
+        end).
+
 do_measure(_Config) ->
-    Algos =
+    Algs =
+        algs() ++
         try crypto:strong_rand_bytes(1) of
-            <<_>> -> [crypto64, crypto]
+            <<_>> -> [crypto64, crypto_cache, crypto]
         catch
             error:low_entropy -> [];
             error:undef -> []
-        end ++ algs(),
+        end,
     %%
-    ct:pal("RNG uniform integer performance~n",[]),
-    TMark1 =
-        measure_1(
-          random,
-          fun (_) -> 10000 end,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
+    ct:pal("~nRNG uniform integer range 10000 performance~n",[]),
     _ =
-        [measure_1(
-           Algo,
-           fun (_) -> 10000 end,
-           TMark1,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (_) -> 10000 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
+    %%
+    ct:pal("~nRNG uniform integer 32 bit performance~n",[]),
+    _ =
+        measure_1(
+          fun (_) -> 1 bsl 32 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer half range performance~n",[]),
-    HalfRangeFun = fun (State) -> half_range(State) end,
-    TMark2 =
-        measure_1(
-          random,
-          HalfRangeFun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           HalfRangeFun,
-           TMark2,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) -> half_range(State) end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
-    ct:pal("~nRNG uniform integer half range + 1  performance~n",[]),
-    HalfRangePlus1Fun = fun (State) -> half_range(State) + 1 end,
-    TMark3 =
-        measure_1(
-          random,
-          HalfRangePlus1Fun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
+    ct:pal("~nRNG uniform integer half range + 1 performance~n",[]),
     _ =
-        [measure_1(
-           Algo,
-           HalfRangePlus1Fun,
-           TMark3,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) -> half_range(State) + 1 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer full range - 1 performance~n",[]),
-    FullRangeMinus1Fun = fun (State) -> (half_range(State) bsl 1) - 1 end,
-    TMark4 =
-        measure_1(
-          random,
-          FullRangeMinus1Fun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           FullRangeMinus1Fun,
-           TMark4,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) -> (half_range(State) bsl 1) - 1 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer full range performance~n",[]),
-    FullRangeFun = fun (State) -> half_range(State) bsl 1 end,
-    TMark5 =
-        measure_1(
-          random,
-          FullRangeFun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           FullRangeFun,
-           TMark5,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) -> half_range(State) bsl 1 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer full range + 1 performance~n",[]),
-    FullRangePlus1Fun = fun (State) -> (half_range(State) bsl 1) + 1 end,
-    TMark6 =
-        measure_1(
-          random,
-          FullRangePlus1Fun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           FullRangePlus1Fun,
-           TMark6,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) -> (half_range(State) bsl 1) + 1 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer double range performance~n",[]),
-    DoubleRangeFun = fun (State) -> half_range(State) bsl 2 end,
-    TMark7 =
-        measure_1(
-          random,
-          DoubleRangeFun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           DoubleRangeFun,
-           TMark7,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) ->
+                  half_range(State) bsl 2
+          end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform integer double range + 1  performance~n",[]),
-    DoubleRangePlus1Fun = fun (State) -> (half_range(State) bsl 2) + 1 end,
-    TMark8 =
-        measure_1(
-          random,
-          DoubleRangePlus1Fun,
-          undefined,
-          fun (Range, State) ->
-                  {int, random:uniform_s(Range, State)}
-          end),
     _ =
-        [measure_1(
-           Algo,
-           DoubleRangePlus1Fun,
-           TMark8,
-           fun (Range, State) ->
-                   {int, rand:uniform_s(Range, State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (State) ->
+                  (half_range(State) bsl 2) + 1
+          end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
+    %%
+    ct:pal("~nRNG uniform integer 64 bit performance~n",[]),
+    _ =
+        measure_1(
+          fun (_) -> 1 bsl 64 end,
+          fun (State, Range, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM_RANGE(
+                               Mod:uniform_s(Range, St0), Range,
+                               X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG uniform float performance~n",[]),
-    TMark9 =
-        measure_1(
-          random,
-          fun (_) -> 0 end,
-          undefined,
-          fun (_, State) ->
-                  {uniform, random:uniform_s(State)}
-          end),
     _ =
-        [measure_1(
-           Algo, 
-           fun (_) -> 0 end,
-           TMark9,
-           fun (_, State) ->
-                   {uniform, rand:uniform_s(State)}
-           end) || Algo <- Algos],
+        measure_1(
+          fun (_) -> 0 end,
+          fun (State, _, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM(Mod:uniform_s(St0), X, St)
+                    end,
+                    State)
+          end,
+          Algs),
+    %%
+    ct:pal("~nRNG uniform_real float performance~n",[]),
+    _ =
+        measure_1(
+          fun (_) -> 0 end,
+          fun (State, _, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_UNIFORM(Mod:uniform_real_s(St0), X, St)
+                    end,
+                    State)
+          end,
+          Algs),
     %%
     ct:pal("~nRNG normal float performance~n",[]),
-    io:format("~.12w: not implemented (too few bits)~n", [random]),
-    _ = [measure_1(
-           Algo,
-           fun (_) -> 0 end,
-           TMark9,
-           fun (_, State) ->
-                   {normal, rand:normal_s(State)}
-           end) || Algo <- Algos],
+    [TMarkNormalFloat|_] =
+        measure_1(
+          fun (_) -> 0 end,
+          fun (State, _, Mod) ->
+                  measure_loop(
+                    fun (St0) ->
+                            ?CHECK_NORMAL(Mod:normal_s(St0), X, St1)
+                    end,
+                    State)
+          end,
+          Algs),
+    %% Just for fun try an implementation of the Box-Muller
+    %% transformation for creating normal distribution floats
+    %% to compare with our Ziggurat implementation.
+    %% Generates two numbers per call that we add so they
+    %% will not be optimized away.  Hence the benchmark time
+    %% is twice what it should be.
+    TwoPi = 2 * math:pi(),
+    _ =
+        measure_1(
+          fun (_) -> 0 end,
+          fun (State, _, Mod) ->
+                  measure_loop(
+                    fun (State0) ->
+                            {U1, State1} = Mod:uniform_real_s(State0),
+                            {U2, State2} = Mod:uniform_s(State1),
+                            R = math:sqrt(-2.0 * math:log(U1)),
+                            T = TwoPi * U2,
+                            Z0 = R * math:cos(T),
+                            Z1 = R * math:sin(T),
+                            ?CHECK_NORMAL({Z0 + Z1, State2}, X, State3)
+                    end,
+                    State)
+          end,
+          exrop, TMarkNormalFloat),
     ok.
 
-measure_1(Algo, RangeFun, TMark, Gen) ->
+-define(LOOP_MEASURE, (?LOOP div 5)).
+
+measure_loop(Fun, State) ->
+    measure_loop(Fun, State, ?LOOP_MEASURE).
+%%
+measure_loop(Fun, State, N) when 0 < N ->
+    measure_loop(Fun, Fun(State), N-1);
+measure_loop(_, _, _) ->
+    ok.
+
+measure_1(RangeFun, Fun, Algs) ->
+    TMark = measure_1(RangeFun, Fun, hd(Algs), undefined),
+    [TMark] ++
+        [measure_1(RangeFun, Fun, Alg, TMark) || Alg <- tl(Algs)].
+
+measure_1(RangeFun, Fun, Alg, TMark) ->
     Parent = self(),
-    Seed =
-        case Algo of
+    {Mod, State} =
+        case Alg of
             crypto64 ->
-                crypto64_seed();
+                {rand, crypto64_seed()};
+            crypto_cache ->
+                {rand, crypto:rand_seed_alg(crypto_cache)};
             crypto ->
-                crypto:rand_seed_s();
+                {rand, crypto:rand_seed_s()};
             random ->
-                random:seed(os:timestamp()), get(random_seed);
+                {random, random:seed(os:timestamp()), get(random_seed)};
             _ ->
-                rand:seed_s(Algo)
+                {rand, rand:seed_s(Alg)}
         end,
-    Range = RangeFun(Seed),
+    Range = RangeFun(State),
     Pid = spawn_link(
             fun() ->
-                    Fun = fun() -> measure_2(?LOOP, Range, Seed, Gen) end,
-                    {Time, ok} = timer:tc(Fun),
+                    {Time, ok} = timer:tc(fun () -> Fun(State, Range, Mod) end),
                     Percent =
                         case TMark of
                             undefined -> 100;
@@ -673,28 +1117,14 @@ measure_1(Algo, RangeFun, TMark, Gen) ->
                         end,
                     io:format(
                       "~.12w: ~p ns ~p% [16#~.16b]~n",
-                      [Algo, (Time * 1000 + 500) div ?LOOP, Percent, Range]),
+                      [Alg, (Time * 1000 + 500) div ?LOOP_MEASURE,
+                       Percent, Range]),
                     Parent ! {self(), Time},
                     normal
             end),
     receive
 	{Pid, Msg} -> Msg
     end.
-
-measure_2(N, Range, State0, Fun) when N > 0 ->
-    case Fun(Range, State0) of
-	{int, {Random, State}}
-	  when is_integer(Random), Random >= 1, Random =< Range ->
-	    measure_2(N-1, Range, State, Fun);
-	{uniform, {Random, State}}
-          when is_float(Random), 0.0 =< Random, Random < 1.0 ->
-	    measure_2(N-1, Range, State, Fun);
-	{normal, {Random, State}} when is_float(Random) ->
-	    measure_2(N-1, Range, State, Fun);
-	Res ->
-	    exit({error, Res, State0})
-    end;
-measure_2(0, _, _, _) -> ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The jump sequence tests has two parts

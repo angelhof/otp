@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2000-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2000-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 #ifndef __ERLFUNTABLE_H__
 #define __ERLFUNTABLE_H__
 
-#include "erl_smp.h"
+#include "erl_threads.h"
 
 /*
  * Fun entry.
@@ -42,7 +42,7 @@ typedef struct erl_fun_entry {
 
     Uint arity;			/* The arity of the fun. */
     Eterm module;		/* Tagged atom for module. */
-    erts_smp_refc_t refc;		/* Reference count: One for code + one for each
+    erts_refc_t refc;		/* Reference count: One for code + one for each
 				   fun object in each process. */
     BeamInstr *pend_purge_address; /* address stored during a pending purge */
 #ifdef HIPE

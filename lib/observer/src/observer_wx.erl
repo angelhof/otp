@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2011-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2011-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -143,7 +143,8 @@ setup(#state{frame = Frame} = State) ->
     wxFrame:setTitle(Frame, atom_to_list(node())),
     wxStatusBar:setStatusText(StatusBar, atom_to_list(node())),
 
-    wxNotebook:connect(Notebook, command_notebook_page_changed, [{skip, true}]),
+    wxNotebook:connect(Notebook, command_notebook_page_changed,
+                       [{skip, true}, {id, ?ID_NOTEBOOK}]),
     wxFrame:connect(Frame, close_window, []),
     wxMenu:connect(Frame, command_menu_selected),
     wxFrame:show(Frame),
@@ -230,12 +231,13 @@ setup(#state{frame = Frame} = State) ->
 
 %%Callbacks
 handle_event(#wx{event=#wxNotebook{type=command_notebook_page_changed, nSel=Next}},
-	     #state{active_tab=Previous, node=Node, panels=Panels} = State) ->
+	     #state{active_tab=Previous, node=Node, panels=Panels, status_bar=SB} = State) ->
     {_, Obj, _} = lists:nth(Next+1, Panels),
     case wx_object:get_pid(Obj) of
 	Previous ->
             {noreply, State};
 	Pid ->
+            wxStatusBar:setStatusText(SB, ""),
 	    Previous ! not_active,
 	    Pid ! {active, Node},
 	    {noreply, State#state{active_tab=Pid}}
@@ -457,7 +459,7 @@ handle_info({'EXIT', Pid, Reason}, State) ->
 	normal ->
 	    {noreply, State};
 	_ ->
-	    io:format("Observer: Child (~s) crashed exiting:  ~p ~p~n",
+	    io:format("Observer: Child (~s) crashed exiting:  ~p ~tp~n",
 		      [pid2panel(Pid, State), Pid, Reason]),
 	    {stop, normal, State}
     end;
@@ -502,7 +504,7 @@ save_config(Panels) ->
     File = config_file(),
     case filelib:ensure_dir(File) of
         ok ->
-            Format = [io_lib:format("~p.~n",[Conf]) || Conf <- Configs],
+            Format = [io_lib:format("~tp.~n",[Conf]) || Conf <- Configs],
             _ = file:write_file(File, Format);
         _ ->
             ignore
@@ -730,7 +732,7 @@ get_nodes() ->
     {Nodes, lists:reverse(Menues)}.
 
 epmd_nodes(Names) ->
-    [_, Host] = string:tokens(atom_to_list(node()),"@"),
+    [_, Host] = string:lexemes(atom_to_list(node()),"@"),
     [list_to_atom(Name ++ [$@|Host]) || {Name, _} <- Names].
 
 update_node_list(State = #state{menubar=MenuBar}) ->

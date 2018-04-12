@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>1996</year><year>2016</year>
+      <year>1996</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -123,6 +123,17 @@
 	    in the Efficiency Guide.</p>
           </item>
 
+          <tag><c>{compile_info, [{atom(), term()}]}</c></tag>
+          <item>
+            <p>Allows compilers built on top of <c>compile</c> to attach
+            extra compilation metadata to the <c>compile_info</c> chunk
+            in the generated beam file.</p>
+
+            <p>It is advised for compilers to remove all non-deterministic
+            information if the <c>deterministic</c> option is supported and
+            it was supplied by the user.</p>
+          </item>
+
           <tag><c>compressed</c></tag>
           <item>
             <p>The compiler will compress the generated object code,
@@ -221,6 +232,15 @@ module.beam: module.erl \
   /usr/local/lib/erlang/lib/eunit/include/eunit.hrl \
   header.hrl</code>
           </item>
+
+          <tag><c>makedep_side_effect</c></tag>
+          <item>
+	    <p>The dependecies are created as a side effect to the
+	    normal compilation process. This means that the object
+	    file will also be produced. This option override the
+	    <c>makedep</c> option.
+	    </p>
+	  </item>
 
           <tag><c>{makedep_output, Output}</c></tag>
           <item>
@@ -600,9 +620,9 @@ module.beam: module.erl \
 	    to be deprecated.</p>
           </item>
 
-	  <tag><c>warn_obsolete_guard</c></tag>
+	  <tag><c>nowarn_obsolete_guard</c></tag>
           <item>
-            <p>Emits warnings for calls to old type testing BIFs, 
+            <p>Turns off warnings for calls to old type testing BIFs, 
 	    such as <c>pid/1</c> and <c>list/1</c>. See the
 	    <seealso marker="doc/reference_manual:expressions#guards">Erlang Reference Manual</seealso>
 	      for a complete list of type testing BIFs and their old
@@ -628,6 +648,14 @@ module.beam: module.erl \
           <item>
             <p>Turns off warnings for unused record types. Default is to 
 	    emit warnings for unused locally defined record types.</p>
+          </item>
+
+	  <tag><c>nowarn_get_stacktrace</c></tag>
+          <item>
+            <p>Turns off warnings for using <c>get_stacktrace/0</c> in a context
+	    where it will probably not work in a future release. For example,
+	    by default there will be a warning if <c>get_stacktrace/0</c> is
+	    used following a <c>catch</c> expression.</p>
           </item>
         </taglist>
 

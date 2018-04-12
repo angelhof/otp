@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2003-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -88,6 +88,38 @@
 
 -export([get_target_name/1]).
 -export([parse_table/1, listenv/1]).
+
+-export([remaining_test_procs/0]).
+
+%%----------------------------------------------------------------------
+%% Exported types
+%%----------------------------------------------------------------------
+%% For ct_gen_conn
+-export_type([config_key/0,
+	      target_name/0,
+	      key_or_name/0]).
+
+%% For cth_conn_log
+-export_type([conn_log_options/0,
+	      conn_log_type/0,
+	      conn_log_mod/0]).
+
+%%------------------------------------------------------------------
+%% Type declarations
+%% ------------------------------------------------------------------
+-type config_key() :: atom(). % Config key which exists in a config file
+-type target_name() :: atom().% Name associated to a config_key() though 'require'
+-type key_or_name() :: config_key() | target_name().
+
+%% Types used when logging connections with the 'cth_conn_log' hook
+-type conn_log_options() :: [conn_log_option()].
+-type conn_log_option() :: {log_type,conn_log_type()} |
+                           {hosts,[key_or_name()]}.
+-type conn_log_type() :: raw | pretty | html | silent.
+-type conn_log_mod() :: ct_netconfc | ct_telnet.
+%%----------------------------------------------------------------------
+
+
 
 %%%-----------------------------------------------------------------
 %%% @spec install(Opts) -> ok | {error,Reason}
@@ -818,7 +850,8 @@ capture_get([ExclCat | ExclCategories]) ->
     Strs = test_server:capture_get(),
     CatsStr = [atom_to_list(ExclCat) | 
 	       [[$| | atom_to_list(EC)] || EC <- ExclCategories]],
-    {ok,MP} = re:compile("<div class=\"(" ++ lists:flatten(CatsStr) ++ ")\">.*"),
+    {ok,MP} = re:compile("<div class=\"(" ++ lists:flatten(CatsStr) ++ ")\">.*",
+                         [unicode]),
     lists:flatmap(fun(Str) ->
 			  case re:run(Str, MP) of
 			      {match,_} -> [];
@@ -839,8 +872,8 @@ fail(Reason) ->
     try
 	exit({test_case_failed,Reason})
     catch
-	Class:R ->
-	    case erlang:get_stacktrace() of
+	Class:R:S ->
+	    case S of
 		[{?MODULE,fail,1,_}|Stk] -> ok;
 		Stk -> ok
 	    end,
@@ -861,8 +894,8 @@ fail(Format, Args) ->
 	    try
 		exit({test_case_failed,lists:flatten(Str)})
 	    catch
-		Class:R ->
-		    case erlang:get_stacktrace() of
+		Class:R:S ->
+		    case S of
 			[{?MODULE,fail,2,_}|Stk] -> ok;
 			Stk -> ok
 		    end,
@@ -887,13 +920,13 @@ comment(Comment) when is_list(Comment) ->
     Formatted =
 	case (catch io_lib:format("~ts",[Comment])) of
 	    {'EXIT',_} ->  % it's a list not a string
-		io_lib:format("~p",[Comment]);
+		io_lib:format("~tp",[Comment]);
 	    String ->
 		String
 	end,
     send_html_comment(lists:flatten(Formatted));
 comment(Comment) ->
-    Formatted = io_lib:format("~p",[Comment]),
+    Formatted = io_lib:format("~tp",[Comment]),
     send_html_comment(lists:flatten(Formatted)).
 
 %%%-----------------------------------------------------------------
@@ -999,7 +1032,7 @@ make_and_load(Dir, Suite) ->
     EnvInclude =
 	case os:getenv("CT_INCLUDE_PATH") of
 	    false -> [];
-	    CtInclPath -> string:tokens(CtInclPath, [$:,$ ,$,])
+	    CtInclPath -> string:lexemes(CtInclPath, [$:,$ ,$,])
 	end,
     StartInclude =
 	case init:get_argument(include) of
@@ -1443,3 +1476,36 @@ continue() ->
 %%%      in order to let the test case proceed.</p>
 continue(TestCase) -> 
     test_server:continue(TestCase).
+
+
+%%%-----------------------------------------------------------------
+%%% @spec remaining_test_procs() -> {TestProcs,SharedGL,OtherGLs}
+%%%       TestProcs = [{pid(),GL}]
+%%%       GL = SharedGL = pid()
+%%%       OtherGLs = [pid()]
+%%%
+%%% @doc <p>This function will return the identity of test- and group
+%%%      leader processes that are still running at the time of this call.
+%%%      TestProcs are processes in the system that have a Common Test IO
+%%%      process as group leader. SharedGL is the central Common Test
+%%%      IO process, responsible for printing to log files for configuration
+%%%      functions and sequentially executing test cases. OtherGLs are
+%%%      Common Test IO processes that print to log files for test cases
+%%%      in parallel test case groups.</p>
+%%%      <p>The process information returned by this function may be
+%%%      used to locate and terminate remaining processes after tests have
+%%%      finished executing. The function would typically by called from
+%%%      Common Test Hook functions.</p>
+%%%      <p>Note that processes that execute configuration functions or
+%%%      test cases are never included in TestProcs. It is therefore safe
+%%%      to use post configuration hook functions (such as post_end_per_suite,
+%%%      post_end_per_group, post_end_per_testcase) to terminate all processes
+%%%      in TestProcs that have the current group leader process as its group
+%%%      leader.</p>
+%%%      <p>Note also that the shared group leader (SharedGL) must never be
+%%%      terminated by the user, only by Common Test. Group leader processes
+%%%      for parallel test case groups (OtherGLs) may however be terminated
+%%%      in post_end_per_group hook functions.</p>
+%%%      
+remaining_test_procs() ->
+    ct_util:remaining_test_procs().

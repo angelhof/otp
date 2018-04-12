@@ -70,8 +70,8 @@ XML_REF4_FILES = app.xml config.xml
 
 XML_REF6_FILES = kernel_app.xml
 
-XML_PART_FILES = part_notes.xml part_notes_history.xml
-XML_CHAPTER_FILES = notes.xml notes_history.xml
+XML_PART_FILES =
+XML_CHAPTER_FILES = notes.xml
 
 BOOK_FILES = book.xml
 
@@ -100,9 +100,9 @@ SPECS_FILES = $(XML_REF3_FILES:%.xml=$(SPECDIR)/specs_%.xml)
 TOP_SPECS_FILE = specs.xml
 
 # ----------------------------------------------------
-# FLAGS 
+# FLAGS
 # ----------------------------------------------------
-XML_FLAGS += 
+XML_FLAGS +=
 
 SPECS_ESRC = ../../src
 
@@ -125,7 +125,7 @@ html: gifs $(HTML_REF_MAN_FILE)
 man: $(MAN3_FILES) $(MAN4_FILES) $(MAN6_FILES)
 
 gifs: $(GIF_FILES:%=$(HTMLDIR)/%)
-debug opt: 
+debug opt:
 
 clean clean_docs:
 	rm -rf $(HTMLDIR)/*
@@ -134,24 +134,24 @@ clean clean_docs:
 	rm -f $(MAN6DIR)/*
 	rm -f $(TOP_PDF_FILE) $(TOP_PDF_FILE:%.pdf=%.fo)
 	rm -f $(SPECDIR)/*
-	rm -f errs core *~ 
+	rm -f errs core *~
 
 $(SPECDIR)/specs_erl_prim_loader_stub.xml:
-	escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
+	$(gen_verbose)escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
                 -o$(dir $@) -module erl_prim_loader_stub
 $(SPECDIR)/specs_erlang_stub.xml:
-	escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
+	$(gen_verbose)escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
                 -o$(dir $@) -module erlang_stub
 $(SPECDIR)/specs_init_stub.xml:
-	escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
+	$(gen_verbose)escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
                 -o$(dir $@) -module init_stub
 $(SPECDIR)/specs_zlib_stub.xml:
-	escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
+	$(gen_verbose)escript $(SPECS_EXTRACTOR) $(SPECS_FLAGS) \
                 -o$(dir $@) -module zlib_stub
 
 # ----------------------------------------------------
 # Release Target
-# ---------------------------------------------------- 
+# ----------------------------------------------------
 include $(ERL_TOP)/make/otp_release_targets.mk
 
 release_docs_spec: docs
@@ -169,4 +169,3 @@ release_docs_spec: docs
 	$(INSTALL_DATA) $(MAN6_FILES) "$(RELEASE_PATH)/man/man6"
 
 release_spec:
-

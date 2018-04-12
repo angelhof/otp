@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1998-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1998-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -288,57 +288,55 @@ bad_address(Config) when is_list(Config) ->
 %%
 %% Starts a slave node that on command sends a bunch of messages
 %% to our UDP port. The receiving process just receives and
-%% ignores the incoming messages, but counts them.
-%% A tracing process traces the receiving process for
-%% 'receive' and scheduling events. From the trace, 
-%% message contents is verified; and, how many messages
-%% are received per in/out scheduling, which should be
-%% the same as the read_packets parameter.
-%% 
-%% What happens on the SMP emulator remains to be seen...
-%%
+%% ignores the incoming messages.
+%% A tracing process traces the receiving port for
+%% 'send' and scheduling events. From the trace,
+%% how many messages are received per in/out scheduling,
+%% which should never be more than the read_packet parameter.
 
 %% OTP-6249 UDP option for number of packet reads.
 read_packets(Config) when is_list(Config) ->
-    case erlang:system_info(smp_support) of
-	false ->
-	    read_packets_1();
-	true ->
-	    %% We would need some new sort of tracing to test this
-	    %% option reliably in an SMP emulator.
-	    {skip,"SMP emulator"}
-    end.
-
-read_packets_1() ->
     N1 = 5,
-    N2 = 7,
+    N2 = 1,
+    Msgs = 30000,
     {ok,R} = gen_udp:open(0, [{read_packets,N1}]),
     {ok,RP} = inet:port(R),
     {ok,Node} = start_node(gen_udp_SUITE_read_packets),
     Die = make_ref(),
-    Loop = erlang:spawn_link(fun () -> infinite_loop(Die) end),
     %%
-    Msgs1 = [erlang:integer_to_list(M) || M <- lists:seq(1, N1*3)],
-    [V1|_] = read_packets_test(R, RP, Msgs1, Node),
+    {V1, Trace1} = read_packets_test(R, RP, Msgs, Node),
     {ok,[{read_packets,N1}]} = inet:getopts(R, [read_packets]),
     %%
     ok = inet:setopts(R, [{read_packets,N2}]),
-    Msgs2 = [erlang:integer_to_list(M) || M <- lists:seq(1, N2*3)],
-    [V2|_] = read_packets_test(R, RP, Msgs2, Node),
+    {V2, Trace2} = read_packets_test(R, RP, Msgs, Node),
     {ok,[{read_packets,N2}]} = inet:getopts(R, [read_packets]),
     %%
     stop_node(Node),
-    Mref = erlang:monitor(process, Loop),
-    Loop ! Die,
-    receive
-	{'DOWN',Mref,_,_, normal} ->
-	    case {V1,V2} of
-		{N1,N2} ->
-		    ok;
-		_ when V1 =/= N1, V2 =/= N2 ->
-		    ok
-	    end
+    ct:log("N1=~p, V1=~p vs N2=~p, V2=~p",[N1,V1,N2,V2]),
+
+    dump_terms(Config, "trace1.terms", Trace2),
+    dump_terms(Config, "trace2.terms", Trace2),
+
+    %% Because of the inherit racy-ness of the feature it is
+    %% hard to test that it behaves correctly.
+    %% Right now (OTP 21) a port task takes 5% of the
+    %% allotted port task reductions to execute, so
+    %% the max number of executions a port is allowed to
+    %% do before being re-scheduled is N * 20
+
+    if
+        V1 > (N1 * 20) ->
+            ct:fail("Got ~p msgs, max was ~p", [V1, N1]);
+        V2 > (N2 * 20) ->
+            ct:fail("Got ~p msgs, max was ~p", [V2, N2]);
+        true ->
+            ok
     end.
+
+dump_terms(Config, Name, Terms) ->
+    FName = filename:join(proplists:get_value(priv_dir, Config),Name),
+    file:write_file(FName, term_to_binary(Terms)),
+    ct:log("Logged terms to ~s",[FName]).
 
 infinite_loop(Die) ->
     receive 
@@ -350,7 +348,6 @@ infinite_loop(Die) ->
     end.
 
 read_packets_test(R, RP, Msgs, Node) ->
-    Len = length(Msgs),
     Receiver = self(),
     Tracer =
 	spawn_link(
@@ -375,24 +372,24 @@ read_packets_test(R, RP, Msgs, Node) ->
 	  [link,{priority,high}]),
     receive
 	{Sender,{port,SP}} ->
-	    erlang:trace(self(), true,
-			 [running,'receive',{tracer,Tracer}]),
+	    erlang:trace(R, true,
+			 [running_ports,'send',{tracer,Tracer}]),
 	    erlang:yield(),
 	    Sender ! {Receiver,go},
-	    read_packets_recv(Len),
-	    erlang:trace(self(), false, [all]),
+	    read_packets_recv(Msgs),
+	    erlang:trace(R, false, [all]),
 	    Tracer ! {Receiver,get_trace},
 	    receive
 		{Tracer,{trace,Trace}} ->
-		    read_packets_verify(R, SP, Msgs, Trace)
+		    {read_packets_verify(R, SP, Trace), Trace}
 	    end
     end.
 
-read_packets_send(S, RP, [Msg|Msgs]) ->
-    ok = gen_udp:send(S, localhost, RP, Msg),
-    read_packets_send(S, RP, Msgs);
-read_packets_send(_S, _RP, []) ->
-    ok.
+read_packets_send(_S, _RP, 0) ->
+    ok;
+read_packets_send(S, RP, Msgs) ->
+    ok = gen_udp:send(S, localhost, RP, "UDP FLOOOOOOD"),
+    read_packets_send(S, RP, Msgs - 1).
 
 read_packets_recv(0) ->
     ok;
@@ -404,23 +401,24 @@ read_packets_recv(N) ->
 	    timeout
     end.
 
-read_packets_verify(R, SP, Msg, Trace) ->    
-    lists:reverse(
-      lists:sort(read_packets_verify(R, SP, Msg, Trace, 0))).
+read_packets_verify(R, SP, Trace) ->
+    [Max | _] = Pkts = lists:reverse(lists:sort(read_packets_verify(R, SP, Trace, 0))),
+    ct:pal("~p",[lists:sublist(Pkts,10)]),
+    Max.
 
-read_packets_verify(R, SP, Msgs, [{trace,Self,OutIn,_}|Trace], M) 
-  when Self =:= self(), OutIn =:= out;
-       Self =:= self(), OutIn =:= in ->
-    push(M, read_packets_verify(R, SP, Msgs, Trace, 0));
-read_packets_verify(R, SP, [Msg|Msgs],
-		    [{trace,Self,'receive',{udp,R,{127,0,0,1},SP,Msg}}
-		     |Trace], M)
+read_packets_verify(R, SP, [{trace,R,OutIn,_}|Trace], M) 
+  when OutIn =:= out; OutIn =:= in ->
+    push(M, read_packets_verify(R, SP, Trace, 0));
+read_packets_verify(R, SP, [{trace, R,'receive',timeout}|Trace], M) ->
+    push(M, read_packets_verify(R, SP, Trace, 0));
+read_packets_verify(R, SP,
+		    [{trace,R,'send',{udp,R,{127,0,0,1},SP,_Msg}, Self} | Trace], M)
   when Self =:= self() ->
-    read_packets_verify(R, SP, Msgs, Trace, M+1);
-read_packets_verify(_R, _SP, [], [], M) ->
+    read_packets_verify(R, SP, Trace, M+1);
+read_packets_verify(_R, _SP, [], M) ->
     push(M, []);
-read_packets_verify(_R, _SP, Msgs, Trace, M) ->
-    ct:fail({read_packets_verify,mismatch,Msgs,Trace,M}).
+read_packets_verify(_R, _SP, Trace, M) ->
+    ct:fail({read_packets_verify,mismatch,Trace,M}).
 
 push(0, Vs) ->
     Vs;
@@ -717,9 +715,9 @@ implicit_inet6(Config) when is_list(Config) ->
 
 implicit_inet6(Host, Addr) ->
     Active = {active,false},
-    case gen_udp:open(0, [inet6,Active]) of
+    Loopback = {0,0,0,0,0,0,0,1},
+    case gen_udp:open(0, [inet6,Active,{ip, Loopback}]) of
 	{ok,S1} ->
-	    Loopback = {0,0,0,0,0,0,0,1},
 	    io:format("~s ~p~n", ["::1",Loopback]),
 	    implicit_inet6(S1, Active, Loopback),
 	    ok = gen_udp:close(S1),
@@ -757,9 +755,9 @@ ok({ok,V}) -> V;
 ok(NotOk) ->
     try throw(not_ok)
     catch
-	Thrown ->
+	throw:Thrown:Stacktrace ->
 	    erlang:raise(
-	      error, {Thrown, NotOk}, tl(erlang:get_stacktrace()))
+	      error, {Thrown, NotOk}, tl(Stacktrace))
     end.
 
 

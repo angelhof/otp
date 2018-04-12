@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -405,6 +405,7 @@ node_table_gc(Config) when is_list(Config) ->
     PreKnown = nodes(known),
     io:format("PreKnown = ~p~n", [PreKnown]),
     make_node_garbage(0, 200000, 1000, []),
+    receive after 1000 -> ok end, %% Wait for thread progress...
     PostKnown = nodes(known),
     PostAreas = erlang:system_info(allocated_areas),
     io:format("PostKnown = ~p~n", [PostKnown]),
@@ -964,6 +965,8 @@ check_refc(ThisNodeName,ThisCreation,Table,EntryList) when is_list(EntryList) ->
                 fun ({Referrer, ReferencesList}, {DDT, A1}) ->
                         {case Referrer of
                              {system,delayed_delete_timer} ->
+                                 true;
+                             {system,thread_progress_delete_timer} ->
                                  true;
                              _ ->
                                  DDT

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -31,8 +31,7 @@
 -export([localtime_to_universaltime/1]).
 -export([suspend_process/1]).
 -export([min/2, max/2]).
--export([dlink/1, dunlink/1, dsend/2, dsend/3, dgroup_leader/2,
-	 dexit/2, dmonitor_node/3, dmonitor_p/2]).
+-export([dmonitor_node/3]).
 -export([delay_trap/2]).
 -export([set_cookie/2, get_cookie/0]).
 -export([nodes/0]).
@@ -40,13 +39,16 @@
 -export([integer_to_list/2]).
 -export([integer_to_binary/2]).
 -export([set_cpu_topology/1, format_cpu_topology/1]).
--export([await_proc_exit/3]).
 -export([memory/0, memory/1]).
 -export([alloc_info/1, alloc_sizes/1]).
 
--export([gather_sched_wall_time_result/1,
-	 await_sched_wall_time_modifications/2,
-	 gather_gc_info_result/1]).
+-export([gather_gc_info_result/1]).
+
+-export([dist_ctrl_input_handler/2,
+         dist_ctrl_put_data/2,
+         dist_ctrl_get_data/1,
+         dist_ctrl_get_data_notification/1,
+         dist_get_stat/1]).
 
 -deprecated([now/0]).
 
@@ -87,6 +89,14 @@
 
 -export_type([prepared_code/0]).
 
+-opaque dist_handle() :: atom().
+
+-export_type([dist_handle/0]).
+
+-type iovec() :: [binary()].
+
+-export_type([iovec/0]).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Native code BIF stubs and their types
 %% (BIF's actually implemented in this module goes last in the file)
@@ -110,8 +120,8 @@
 -export([crc32/2, crc32_combine/3, date/0, decode_packet/3]).
 -export([delete_element/2]).
 -export([delete_module/1, demonitor/1, demonitor/2, display/1]).
--export([display_nl/0, display_string/1, dist_exit/3, erase/0, erase/1]).
--export([error/1, error/2, exit/1, exit/2, external_size/1]).
+-export([display_nl/0, display_string/1, erase/0, erase/1]).
+-export([error/1, error/2, exit/1, exit/2, exit_signal/2, external_size/1]).
 -export([external_size/2, finish_after_on_load/2, finish_loading/1, float/1]).
 -export([float_to_binary/1, float_to_binary/2,
 	 float_to_list/1, float_to_list/2, floor/1]).
@@ -124,7 +134,7 @@
 	 has_prepared_code_on_load/1, hibernate/3]).
 -export([insert_element/3]).
 -export([integer_to_binary/1, integer_to_list/1]).
--export([iolist_size/1, iolist_to_binary/1]).
+-export([iolist_size/1, iolist_to_binary/1, iolist_to_iovec/1]).
 -export([is_alive/0, is_builtin/3, is_process_alive/1, length/1, link/1]).
 -export([list_to_atom/1, list_to_binary/1]).
 -export([list_to_bitstring/1, list_to_existing_atom/1, list_to_float/1]).
@@ -413,9 +423,11 @@ binary_to_term(_Binary) ->
     erlang:nif_error(undefined).
 
 %% binary_to_term/2
--spec binary_to_term(Binary, Opts) -> term() when
+-spec binary_to_term(Binary, Opts) -> term() | {term(), Used} when
       Binary :: ext_binary(),
-      Opts :: [safe].
+      Opt :: safe | used,
+      Opts :: [Opt],
+      Used :: pos_integer().
 binary_to_term(_Binary, _Opts) ->
     erlang:nif_error(undefined).
 
@@ -688,14 +700,6 @@ display_nl() ->
 display_string(_P1) ->
     erlang:nif_error(undefined).
 
-%% dist_exit/3
--spec erlang:dist_exit(P1, P2, P3) -> true when
-      P1 :: pid(),
-      P2 :: kill | noconnection | normal,
-      P3 :: pid() | port().
-dist_exit(_P1, _P2, _P3) ->
-    erlang:nif_error(undefined).
-
 %% dt_append_vm_tag_data/1
 -spec erlang:dt_append_vm_tag_data(IoData) -> IoDataRet when
       IoData :: iodata(),
@@ -779,6 +783,13 @@ exit(_Reason) ->
       Pid :: pid() | port(),
       Reason :: term().
 exit(_Pid, _Reason) ->
+    erlang:nif_error(undefined).
+
+%% exit_signal/2
+-spec erlang:exit_signal(Pid, Reason) -> true when
+      Pid :: pid() | port(),
+      Reason :: term().
+exit_signal(_Pid, _Reason) ->
     erlang:nif_error(undefined).
 
 %% external_size/1
@@ -1007,8 +1018,20 @@ group_leader() ->
 -spec group_leader(GroupLeader, Pid) -> true when
       GroupLeader :: pid(),
       Pid :: pid().
-group_leader(_GroupLeader, _Pid) ->
-    erlang:nif_error(undefined).
+group_leader(GroupLeader, Pid) ->
+    case case erts_internal:group_leader(GroupLeader, Pid) of
+             false ->
+                 Ref = erlang:make_ref(),
+                 erts_internal:group_leader(GroupLeader,
+                                            Pid,
+                                            Ref),
+                 receive {Ref, MsgRes} -> MsgRes end;
+             Res ->
+                 Res
+         end of
+        true -> true;
+        Error -> erlang:error(Error, [GroupLeader, Pid])
+    end.
 
 %% halt/0
 %% Shadowed by erl_bif_types: erlang:halt/0
@@ -1077,6 +1100,12 @@ iolist_size(_Item) ->
 -spec iolist_to_binary(IoListOrBinary) -> binary() when
       IoListOrBinary :: iolist() | binary().
 iolist_to_binary(_IoListOrBinary) ->
+    erlang:nif_error(undefined).
+
+%% iolist_to_iovec/1
+-spec erlang:iolist_to_iovec(IoListOrBinary) -> iovec() when
+      IoListOrBinary :: iolist() | binary().
+iolist_to_iovec(_IoListOrBinary) ->
     erlang:nif_error(undefined).
 
 %% is_alive/0
@@ -1641,7 +1670,7 @@ setnode(_P1, _P2) ->
     erlang:nif_error(undefined).
 
 %% setnode/3
--spec erlang:setnode(P1, P2, P3) -> true when
+-spec erlang:setnode(P1, P2, P3) -> dist_handle() when
       P1 :: atom(),
       P2 :: port(),
       P3 :: {term(), term(), term(), term()}.
@@ -1893,7 +1922,7 @@ element(_N, _Tuple) ->
 
 %% Not documented
 -type module_info_key() :: attributes | compile | exports | functions | md5
-                         | module | native | native_addresses.
+                         | module | native | native_addresses | nifs.
 -spec erlang:get_module_info(Module, Item) -> ModuleInfo when
       Module :: atom(),
       Item :: module_info_key(),
@@ -2090,7 +2119,7 @@ nodes(_Arg) ->
            | stream
            | {line, L :: non_neg_integer()}
            | {cd, Dir :: string() | binary()}
-           | {env, Env :: [{Name :: string(), Val :: string() | false}]}
+           | {env, Env :: [{Name :: os:env_var_name(), Val :: os:env_var_value() | false}]}
            | {args, [string() | binary()]}
            | {arg0, string() | binary()}
            | exit_status
@@ -2306,6 +2335,8 @@ spawn_opt(_Tuple) ->
 
 -spec statistics(active_tasks) -> [ActiveTasks] when
       ActiveTasks :: non_neg_integer();
+		(active_tasks_all) -> [ActiveTasks] when
+      ActiveTasks :: non_neg_integer();
 		(context_switches) -> {ContextSwitches,0} when
       ContextSwitches :: non_neg_integer();
                 (exact_reductions) -> {Total_Exact_Reductions,
@@ -2322,7 +2353,8 @@ spawn_opt(_Tuple) ->
       MSAcc_Thread :: #{ type := MSAcc_Thread_Type,
                         id := MSAcc_Thread_Id,
                         counters := MSAcc_Counters},
-      MSAcc_Thread_Type :: scheduler | async | aux,
+      MSAcc_Thread_Type :: async | aux | dirty_io_scheduler
+                         | dirty_cpu_scheduler | poll | scheduler,
       MSAcc_Thread_Id :: non_neg_integer(),
       MSAcc_Counters :: #{ MSAcc_Thread_State => non_neg_integer() },
       MSAcc_Thread_State :: alloc | aux | bif | busy_wait | check_io |
@@ -2334,6 +2366,8 @@ spawn_opt(_Tuple) ->
       Reductions_Since_Last_Call :: non_neg_integer();
                 (run_queue) -> non_neg_integer();
                 (run_queue_lengths) -> [RunQueueLength] when
+      RunQueueLength :: non_neg_integer();
+                (run_queue_lengths_all) -> [RunQueueLength] when
       RunQueueLength :: non_neg_integer();
                 (runtime) -> {Total_Run_Time, Time_Since_Last_Call} when
       Total_Run_Time :: non_neg_integer(),
@@ -2347,8 +2381,12 @@ spawn_opt(_Tuple) ->
       ActiveTime  :: non_neg_integer(),
       TotalTime   :: non_neg_integer();
 		(total_active_tasks) -> ActiveTasks when
+      ActiveTasks :: non_neg_integer(); 
+		(total_active_tasks_all) -> ActiveTasks when
       ActiveTasks :: non_neg_integer();
                 (total_run_queue_lengths) -> TotalRunQueueLengths when
+      TotalRunQueueLengths :: non_neg_integer();
+                (total_run_queue_lengths_all) -> TotalRunQueueLengths when
       TotalRunQueueLengths :: non_neg_integer();
                 (wall_clock) -> {Total_Wallclock_Time,
                                  Wallclock_Time_Since_Last_Call} when
@@ -2383,6 +2421,10 @@ subtract(_,_) ->
                                 OldDirtyCPUSchedulersOnline when
       DirtyCPUSchedulersOnline :: pos_integer(),
       OldDirtyCPUSchedulersOnline :: pos_integer();
+                        (erts_alloc, {Alloc, F, V}) -> ok | notsup when
+      Alloc :: atom(),
+      F :: atom(),
+      V :: integer();
                         (fullsweep_after, Number) -> OldNumber when
       Number :: non_neg_integer(),
       OldNumber :: non_neg_integer();
@@ -2434,7 +2476,7 @@ term_to_binary(_Term) ->
       Term :: term(),
       Options :: [compressed |
                   {compressed, Level :: 0..9} |
-                  {minor_version, Version :: 0..1} ].
+                  {minor_version, Version :: 0..2} ].
 term_to_binary(_Term, _Options) ->
     erlang:nif_error(undefined).
 
@@ -2539,9 +2581,9 @@ tuple_to_list(_Tuple) ->
       Settings :: [{Subsystem :: atom(),
                     [{Parameter :: atom(),
                       Value :: term()}]}];
-         (alloc_util_allocators) -> [Alloc] when
-      Alloc :: atom();
          ({allocator, Alloc}) -> [_] when %% More or less anything
+      Alloc :: atom();
+         (alloc_util_allocators) -> [Alloc] when
       Alloc :: atom();
          ({allocator_sizes, Alloc}) -> [_] when %% More or less anything
       Alloc :: atom();
@@ -2569,6 +2611,7 @@ tuple_to_list(_Tuple) ->
          (driver_version) -> string();
 	 (dynamic_trace) -> none | dtrace | systemtap;
          (dynamic_trace_probes) -> boolean();
+         (end_time) -> non_neg_integer();
          (elib_malloc) -> false;
          (eager_check_io) -> boolean();
          (ets_limit) -> pos_integer();
@@ -2596,6 +2639,7 @@ tuple_to_list(_Tuple) ->
          (otp_release) -> string();
          (os_monotonic_time_source) -> [{atom(),term()}];
          (os_system_time_source) -> [{atom(),term()}];
+         (port_parallelism) -> boolean();
          (port_count) -> non_neg_integer();
          (port_limit) -> pos_integer();
          (process_count) -> pos_integer();
@@ -2625,7 +2669,8 @@ tuple_to_list(_Tuple) ->
          (trace_control_word) -> non_neg_integer();
          (update_cpu_info) -> changed | unchanged;
          (version) -> string();
-         (wordsize | {wordsize, internal} | {wordsize, external}) -> 4 | 8.
+         (wordsize | {wordsize, internal} | {wordsize, external}) -> 4 | 8;
+         (overview) -> boolean().
 system_info(_Item) ->
     erlang:nif_error(undefined).
 
@@ -3196,33 +3241,51 @@ port_get_data(_Port) ->
     erlang:nif_error(undefined).
 
 %%
-%% If the emulator wants to perform a distributed command and
-%% a connection is not established to the actual node the following 
-%% functions are called in order to set up the connection and then
-%% reactivate the command.
+%% Distribution channel management
 %%
 
--spec erlang:dlink(pid() | port()) -> 'true'.
-dlink(Pid) ->
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:link(Pid);
-	false -> erlang:dist_exit(erlang:self(), noconnection, Pid), true
-    end.
+-spec erlang:dist_ctrl_input_handler(DHandle, InputHandler) -> 'ok' when
+      DHandle :: dist_handle(),
+      InputHandler :: pid().
 
-%% Can this ever happen?
--spec erlang:dunlink(identifier()) -> 'true'.
-dunlink(Pid) ->
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:unlink(Pid);
-	false -> true
-    end.
+dist_ctrl_input_handler(_DHandle, _InputHandler) ->
+    erlang:nif_error(undefined).
 
-dmonitor_node(Node, Flag, []) ->
-    case net_kernel:connect(Node) of
-	true -> erlang:monitor_node(Node, Flag, []);
-	false -> erlang:self() ! {nodedown, Node}, true
-    end;
+-spec erlang:dist_ctrl_put_data(DHandle, Data) -> 'ok' when
+      DHandle :: dist_handle(),
+      Data :: iodata().
 
+dist_ctrl_put_data(_DHandle, _Data) ->
+    erlang:nif_error(undefined).
+
+-spec erlang:dist_ctrl_get_data(DHandle) -> Data | 'none' when
+      DHandle :: dist_handle(),
+      Data :: iodata().
+
+dist_ctrl_get_data(_DHandle) ->
+    erlang:nif_error(undefined).
+
+-spec erlang:dist_ctrl_get_data_notification(DHandle) -> 'ok' when
+      DHandle :: dist_handle().
+
+dist_ctrl_get_data_notification(_DHandle) ->
+    erlang:nif_error(undefined).
+
+-spec erlang:dist_get_stat(DHandle) -> Res when
+      DHandle :: dist_handle(),
+      InputPackets :: non_neg_integer(),
+      OutputPackets :: non_neg_integer(),
+      PendingOutputPackets :: boolean(),
+      Res :: {'ok', InputPackets, OutputPackets, PendingOutputPackets}.
+
+dist_get_stat(_DHandle) ->
+    erlang:nif_error(undefined).
+
+
+dmonitor_node(Node, _Flag, []) ->
+    %% Only called when auto-connect attempt failed early in VM
+    erlang:self() ! {nodedown, Node},
+    true;
 dmonitor_node(Node, Flag, Opts) ->
     case lists:member(allow_passive_connect, Opts) of
 	true ->
@@ -3232,72 +3295,6 @@ dmonitor_node(Node, Flag, Opts) ->
 	    end;
 	_ ->
 	    dmonitor_node(Node,Flag,[])
-    end.
-
-dgroup_leader(Leader, Pid) ->
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:group_leader(Leader, Pid);
-	false -> true  %% bad arg ?
-    end.
-
-dexit(Pid, Reason) -> 
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:exit(Pid, Reason);
-	false -> true
-    end.
-
-dsend(Pid, Msg) when erlang:is_pid(Pid) ->
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:send(Pid, Msg);
-	false -> Msg
-    end;
-dsend(Port, Msg) when erlang:is_port(Port) ->
-    case net_kernel:connect(erlang:node(Port)) of
-	true -> erlang:send(Port, Msg);
-	false -> Msg
-    end;
-dsend({Name, Node}, Msg) ->
-    case net_kernel:connect(Node) of
-	true -> erlang:send({Name,Node}, Msg);
-	false -> Msg;
-	ignored -> Msg				% Not distributed.
-    end.
-
-dsend(Pid, Msg, Opts) when erlang:is_pid(Pid) ->
-    case net_kernel:connect(erlang:node(Pid)) of
-	true -> erlang:send(Pid, Msg, Opts);
-	false -> ok
-    end;
-dsend(Port, Msg, Opts) when erlang:is_port(Port) ->
-    case net_kernel:connect(erlang:node(Port)) of
-	true -> erlang:send(Port, Msg, Opts);
-	false -> ok
-    end;
-dsend({Name, Node}, Msg, Opts) ->
-    case net_kernel:connect(Node) of
-	true -> erlang:send({Name,Node}, Msg, Opts);
-	false -> ok;
-	ignored -> ok				% Not distributed.
-    end.
-
--spec erlang:dmonitor_p('process', pid() | {atom(),atom()}) -> reference().
-dmonitor_p(process, ProcSpec) ->
-    %% ProcSpec = pid() | {atom(),atom()}
-    %% ProcSpec CANNOT be an atom because a locally registered process
-    %% is never handled here.
-    Node = case ProcSpec of
-	       {S,N} when erlang:is_atom(S),
-                          erlang:is_atom(N),
-                          N =/= erlang:node() -> N;
-	       _ when erlang:is_pid(ProcSpec) -> erlang:node(ProcSpec)
-	   end,
-    case net_kernel:connect(Node) of
-	true ->
-	    erlang:monitor(process, ProcSpec);
-	false ->
-	    Ref = erlang:make_ref(),
-	    erlang:self() ! {'DOWN', Ref, process, ProcSpec, noconnection},
-	    Ref
     end.
 
 %%
@@ -3532,33 +3529,6 @@ rvrs(Xs) -> rvrs(Xs, []).
 rvrs([],Ys) -> Ys;
 rvrs([X|Xs],Ys) -> rvrs(Xs, [X|Ys]).
 
-%% erlang:await_proc_exit/3 is for internal use only!
-%%
-%% BIFs that need to await a specific process exit before
-%% returning traps to erlang:await_proc_exit/3.
-%%
-%% NOTE: This function is tightly coupled to
-%%       the implementation of the
-%%       erts_bif_prep_await_proc_exit_*()
-%%       functions in bif.c. Do not make
-%%       any changes to it without reading
-%%       the comment about them in bif.c!
--spec erlang:await_proc_exit(dst(), 'apply' | 'data' | 'reason', term()) -> term().
-await_proc_exit(Proc, Op, Data) ->
-    Mon = erlang:monitor(process, Proc),
-    receive
-	{'DOWN', Mon, process, _Proc, Reason} ->
-	    case Op of
-		apply ->
-		    {M, F, A} = Data,
-		    erlang:apply(M, F, A);
-		data ->
-		    Data;
-		reason ->
-		    Reason
-	    end
-    end.
-
 -spec min(Term1, Term2) -> Minimum when
       Term1 :: term(),
       Term2 :: term(),
@@ -3751,14 +3721,13 @@ memory_is_supported() ->
 
 get_blocks_size([{blocks_size, Sz, _, _} | Rest], Acc) ->
     get_blocks_size(Rest, Acc+Sz);
-get_blocks_size([{_, _, _, _} | Rest], Acc) ->
-    get_blocks_size(Rest, Acc);
 get_blocks_size([{blocks_size, Sz} | Rest], Acc) ->
     get_blocks_size(Rest, Acc+Sz);
-get_blocks_size([{_, _} | Rest], Acc) ->
+get_blocks_size([_ | Rest], Acc) ->
     get_blocks_size(Rest, Acc);
 get_blocks_size([], Acc) ->
     Acc.
+
 
 blocks_size([{Carriers, SizeList} | Rest], Acc) when Carriers == mbcs;
 						     Carriers == mbcs_pool;
@@ -3997,38 +3966,6 @@ receive_allocator(Ref, N, Acc) ->
     receive
 	{Ref, _, InfoList} ->
 	    receive_allocator(Ref, N-1, insert_info(InfoList, Acc))
-    end.
-
--spec erlang:await_sched_wall_time_modifications(Ref, Result) -> boolean() when
-      Ref :: reference(),
-      Result :: boolean().
-
-await_sched_wall_time_modifications(Ref, Result) ->
-    sched_wall_time(Ref, erlang:system_info(schedulers)),
-    Result.
-
--spec erlang:gather_sched_wall_time_result(Ref) -> [{pos_integer(),
-						     non_neg_integer(),
-						     non_neg_integer()}] when
-      Ref :: reference().
-
-gather_sched_wall_time_result(Ref) when erlang:is_reference(Ref) ->
-    sched_wall_time(Ref, erlang:system_info(schedulers), []).
-
-sched_wall_time(_Ref, 0) ->
-    ok;
-sched_wall_time(Ref, N) ->
-    receive Ref -> sched_wall_time(Ref, N-1) end.
-
-sched_wall_time(_Ref, 0, Acc) ->
-    Acc;
-sched_wall_time(Ref, N, undefined) ->
-    receive {Ref, _} -> sched_wall_time(Ref, N-1, undefined) end;
-sched_wall_time(Ref, N, Acc) ->
-    receive
-	{Ref, undefined} -> sched_wall_time(Ref, N-1, undefined);
-	{Ref, SWTL} when erlang:is_list(SWTL) -> sched_wall_time(Ref, N-1, Acc ++ SWTL);
-	{Ref, SWT} -> sched_wall_time(Ref, N-1, [SWT|Acc])
     end.
 
 -spec erlang:gather_gc_info_result(Ref) ->

@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>1996</year><year>2016</year>
+      <year>1996</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -126,6 +126,12 @@ ok</pre>
 	  <seealso marker="#error_report/1"><c>error_report/1</c></seealso>
 	  instead.</p>
         </warning>
+        <warning>
+          <p>If the Unicode translation modifier (<c>t</c>) is used in
+            the format string, all error handlers must ensure that the
+            formatted output is correctly encoded for the I/O
+            device.</p>
+        </warning>
       </desc>
     </func>
     <func>
@@ -163,6 +169,19 @@ ok</pre>
       </desc>
     </func>
     <func>
+      <name name="get_format_depth" arity="0"/>
+      <fsummary>Get the value of the Kernel application variable
+                <c>error_logger_format_depth</c>.</fsummary>
+      <desc>
+	<p>Returns <c>max(10, Depth)</c>, where <c>Depth</c> is the
+	value of
+	<seealso marker="kernel:kernel_app#error_logger_format_depth">
+	error_logger_format_depth</seealso>
+	in the Kernel application, if Depth is an integer. Otherwise,
+	<c>unlimited</c> is returned.</p>
+      </desc>
+    </func>
+    <func>
       <name name="info_msg" arity="1"/>
       <name name="info_msg" arity="2"/>
       <fsummary>Send a standard information event to the error logger.</fsummary>
@@ -183,6 +202,12 @@ ok</pre>
           <p>If called with bad arguments, this function can crash
             the standard event handler, meaning no further events are
             logged. When in doubt, use <c>info_report/1</c> instead.</p>
+        </warning>
+        <warning>
+          <p>If the Unicode translation modifier (<c>t</c>) is used in
+            the format string, all error handlers must ensure that the
+            formatted output is correctly encoded for the I/O
+            device.</p>
         </warning>
       </desc>
     </func>
@@ -249,7 +274,7 @@ ok</pre>
               successful, or <c>{error, allready_have_logfile}</c> if
               logging to file is already enabled, or an error tuple if
               another error occurred (for example, if <c><anno>Filename</anno></c>
-              cannot be opened).</p>
+              cannot be opened). The file is opened with encoding UTF-8.</p>
           </item>
           <tag><c>close</c></tag>
           <item>
@@ -331,6 +356,12 @@ ok</pre>
           <p>If called with bad arguments, this function can crash
             the standard event handler, meaning no further events are
             logged. When in doubt, use <c>warning_report/1</c> instead.</p>
+        </warning>
+        <warning>
+          <p>If the Unicode translation modifier (<c>t</c>) is used in
+            the format string, all error handlers must ensure that the
+            formatted output is correctly encoded for the I/O
+            device.</p>
         </warning>
       </desc>
     </func>

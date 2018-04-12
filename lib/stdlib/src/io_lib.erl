@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -84,6 +84,8 @@
 -export([write_unicode_string/1, write_unicode_char/1,
          deep_unicode_char_list/1]).
 
+-export([limit_term/2]).
+
 -export_type([chars/0, latin1_string/0, continuation/0,
               fread_error/0, fread_item/0, format_spec/0]).
 
@@ -147,7 +149,7 @@ fread(Chars, Format) ->
 
 -spec fread(Continuation, CharSpec, Format) -> Return when
       Continuation :: continuation() | [],
-      CharSpec :: string() | eof,
+      CharSpec :: string() | 'eof',
       Format :: string(),
       Return :: {'more', Continuation1 :: continuation()}
               | {'done', Result, LeftOverChars :: string()},
@@ -911,3 +913,127 @@ binrev(L) ->
 
 binrev(L, T) ->
     list_to_binary(lists:reverse(L, T)).
+
+-spec limit_term(term(), non_neg_integer()) -> term().
+
+%% The intention is to mimic the depth limitation of io_lib:write()
+%% and io_lib_pretty:print(). The leaves ('...') should never be
+%% seen when printed with the same depth. Bitstrings are never
+%% truncated, which is OK as long as they are not sent to other nodes.
+limit_term(Term, Depth) ->
+    try test_limit(Term, Depth) of
+        ok -> Term
+    catch
+        throw:limit ->
+            limit(Term, Depth)
+    end.
+
+limit(_, 0) -> '...';
+limit([H|T]=L, D) ->
+    if
+	D =:= 1 -> ['...'];
+	true ->
+            case printable_list(L) of
+                true -> L;
+                false ->
+                    [limit(H, D-1)|limit_tail(T, D-1)]
+            end
+    end;
+limit(Term, D) when is_map(Term) ->
+    limit_map(Term, D);
+limit({}=T, _D) -> T;
+limit(T, D) when is_tuple(T) ->
+    if
+	D =:= 1 -> {'...'};
+	true ->
+            list_to_tuple([limit(element(1, T), D-1)|
+                           limit_tail(tl(tuple_to_list(T)), D-1)])
+    end;
+limit(<<_/bitstring>>=Term, D) -> limit_bitstring(Term, D);
+limit(Term, _D) -> Term.
+
+limit_tail([], _D) -> [];
+limit_tail(_, 1) -> ['...'];
+limit_tail([H|T], D) ->
+    [limit(H, D-1)|limit_tail(T, D-1)];
+limit_tail(Other, D) ->
+    limit(Other, D-1).
+
+%% Cannot limit maps properly since there is no guarantee that
+%% maps:from_list() creates a map with the same internal ordering of
+%% the selected associations as in Map. Instead of subtracting one
+%% from the depth as the map associations are traversed (as is done
+%% for tuples and lists), the same depth is applied to each and every
+%% (returned) association.
+limit_map(Map, D) ->
+    %% Keep one extra association to make sure the final ',...' is included.
+    limit_map_body(maps:iterator(Map), D + 1, D, []).
+
+limit_map_body(_I, 0, _D0, Acc) ->
+    maps:from_list(Acc);
+limit_map_body(I, D, D0, Acc) ->
+    case maps:next(I) of
+        {K, V, NextI} ->
+            limit_map_body(NextI, D-1, D0, [limit_map_assoc(K, V, D0) | Acc]);
+        none ->
+            maps:from_list(Acc)
+    end.
+
+limit_map_assoc(K, V, D) ->
+    %% Keep keys as are to avoid creating duplicated keys.
+    {K, limit(V, D - 1)}.
+
+limit_bitstring(B, _D) -> B. % Keeps all printable binaries.
+
+test_limit(_, 0) -> throw(limit);
+test_limit([H|T]=L, D) when is_integer(D) ->
+    if
+	D =:= 1 -> throw(limit);
+	true ->
+            case printable_list(L) of
+                true -> ok;
+                false ->
+                    test_limit(H, D-1),
+                    test_limit_tail(T, D-1)
+            end
+    end;
+test_limit(Term, D) when is_map(Term) ->
+    test_limit_map(Term, D);
+test_limit({}, _D) -> ok;
+test_limit(T, D) when is_tuple(T) ->
+    test_limit_tuple(T, 1, tuple_size(T), D);
+test_limit(<<_/bitstring>>=Term, D) -> test_limit_bitstring(Term, D);
+test_limit(_Term, _D) -> ok.
+
+test_limit_tail([], _D) -> ok;
+test_limit_tail(_, 1) -> throw(limit);
+test_limit_tail([H|T], D) ->
+    test_limit(H, D-1),
+    test_limit_tail(T, D-1);
+test_limit_tail(Other, D) ->
+    test_limit(Other, D-1).
+
+test_limit_tuple(_T, I, Sz, _D) when I > Sz -> ok;
+test_limit_tuple(_, _, _, 1) -> throw(limit);
+test_limit_tuple(T, I, Sz, D) ->
+    test_limit(element(I, T), D-1),
+    test_limit_tuple(T, I+1, Sz, D-1).
+
+test_limit_map(Map, D) ->
+    test_limit_map_body(maps:iterator(Map), D).
+
+test_limit_map_body(_I, 0) -> throw(limit); % cannot happen
+test_limit_map_body(I, D) ->
+    case maps:next(I) of
+        {K, V, NextI} ->
+            test_limit_map_assoc(K, V, D),
+            test_limit_map_body(NextI, D-1);
+        none ->
+            ok
+    end.
+
+test_limit_map_assoc(K, V, D) ->
+    test_limit(K, D - 1),
+    test_limit(V, D - 1).
+
+test_limit_bitstring(_, _) -> ok.

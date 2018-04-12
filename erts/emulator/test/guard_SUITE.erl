@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -500,7 +500,7 @@ all_types() ->
      {atom, xxxx},
      {ref, make_ref()},
      {pid, self()},
-     {port, open_port({spawn, efile}, [])},
+     {port, make_port()},
      {function, fun(_) -> "" end},
      {function, fun erlang:abs/1},
      {binary, list_to_binary([])},
@@ -550,5 +550,8 @@ type_test(bitstring, X) when is_bitstring(X) ->
     bitstring;
 type_test(function, X) when is_function(X) ->
     function.
+
+make_port() ->
+    hd(erlang:ports()).
 
 id(I) -> I.

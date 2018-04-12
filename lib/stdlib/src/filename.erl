@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,6 +34,38 @@
 %% we flatten the arguments immediately on function entry as that makes
 %% it easier to ensure that the code works.
 
+%%
+%% *** Requirements on Raw Filename Format ***
+%%
+%% These requirements are due to the 'filename' module
+%% in stdlib. This since it is documented that it
+%% should be able to operate on raw filenames as well
+%% as ordinary filenames.
+%%
+%% A raw filename *must* be a byte sequence where:
+%% 1. Codepoints 0-127 (7-bit ascii) *must* be encoded
+%%    as a byte with the corresponding value. That is,
+%%    the most significant bit in the byte encoding the
+%%    codepoint is never set.
+%% 2. Codepoints greater than 127 *must* be encoded
+%%    with the most significant bit set in *every* byte
+%%    encoding it.
+%%
+%% Latin1 and UTF-8 meet these requirements while
+%% UTF-16 and UTF-32 don't.
+%%
+%% On Windows filenames are natively stored as malformed
+%% UTF-16LE (lonely surrogates may appear). A more correct
+%% description than UTF-16 would be an array of 16-bit
+%% words... In order to meet the requirements of the
+%% raw file format we convert the malformed UTF-16LE to
+%% malformed UTF-8 which meet the requirements.
+%%
+%% Note that these requirements are today only OTP
+%% internal (erts-stdlib internal) requirements that
+%% could be changed.
+%%
+
 -export([absname/1, absname/2, absname_join/2, 
 	 basename/1, basename/2, dirname/1,
 	 extension/1, join/1, join/2, pathtype/1,
@@ -41,6 +73,7 @@
          safe_relative_path/1]).
 -export([find_src/1, find_src/2]). % deprecated
 -export([basedir/2, basedir/3]).
+-export([validate/1]).
 
 %% Undocumented and unsupported exports.
 -export([append/2]).
@@ -439,6 +472,10 @@ join(Name1, Name2) when is_atom(Name2) ->
 join1([UcLetter, $:|Rest], RelativeName, [], win32)
 when is_integer(UcLetter), UcLetter >= $A, UcLetter =< $Z ->
     join1(Rest, RelativeName, [$:, UcLetter+$a-$A], win32);
+join1([$\\,$\\|Rest], RelativeName, [], win32) ->
+    join1([$/,$/|Rest], RelativeName, [], win32);
+join1([$/,$/|Rest], RelativeName, [], win32) ->
+    join1(Rest, RelativeName, [$/,$/], win32);
 join1([$\\|Rest], RelativeName, Result, win32) ->
     join1([$/|Rest], RelativeName, Result, win32);
 join1([$/|Rest], RelativeName, [$., $/|Result], OsType) ->
@@ -467,6 +504,10 @@ join1([Atom|Rest], RelativeName, Result, OsType) when is_atom(Atom) ->
 join1b(<<UcLetter, $:, Rest/binary>>, RelativeName, [], win32)
 when is_integer(UcLetter), UcLetter >= $A, UcLetter =< $Z ->
     join1b(Rest, RelativeName, [$:, UcLetter+$a-$A], win32);
+join1b(<<$\\,$\\,Rest/binary>>, RelativeName, [], win32) ->
+    join1b(<<$/,$/,Rest/binary>>, RelativeName, [], win32);
+join1b(<<$/,$/,Rest/binary>>, RelativeName, [], win32) ->
+    join1b(Rest, RelativeName, [$/,$/], win32);
 join1b(<<$\\,Rest/binary>>, RelativeName, Result, win32) ->
     join1b(<<$/,Rest/binary>>, RelativeName, Result, win32);
 join1b(<<$/,Rest/binary>>, RelativeName, [$., $/|Result], OsType) ->
@@ -477,6 +518,8 @@ join1b(<<>>, <<>>, Result, OsType) ->
     list_to_binary(maybe_remove_dirsep(Result, OsType));
 join1b(<<>>, RelativeName, [$:|Rest], win32) ->
     join1b(RelativeName, <<>>, [$:|Rest], win32);
+join1b(<<>>, RelativeName, [$/,$/|Result], win32) ->
+    join1b(RelativeName, <<>>, [$/,$/|Result], win32);
 join1b(<<>>, RelativeName, [$/|Result], OsType) ->
     join1b(RelativeName, <<>>, [$/|Result], OsType);
 join1b(<<>>, RelativeName, [$., $/|Result], OsType) ->
@@ -490,6 +533,8 @@ maybe_remove_dirsep([$/, $:, Letter], win32) ->
     [Letter, $:, $/];
 maybe_remove_dirsep([$/], _) ->
     [$/];
+maybe_remove_dirsep([$/,$/], win32) ->
+    [$/,$/];
 maybe_remove_dirsep([$/|Name], _) ->
     lists:reverse(Name);
 maybe_remove_dirsep(Name, _) ->
@@ -679,6 +724,9 @@ win32_splitb(<<Letter0,$:,Rest/binary>>) when ?IS_DRIVELETTER(Letter0) ->
     Letter = fix_driveletter(Letter0),
     L = binary:split(Rest,[<<"/">>,<<"\\">>],[global]),
     [<<Letter,$:>> | [ X || X <- L, X =/= <<>> ]];
+win32_splitb(<<Slash,Slash,Rest/binary>>) when ((Slash =:= $\\) orelse (Slash =:= $/)) ->
+    L = binary:split(Rest,[<<"/">>,<<"\\">>],[global]),
+    [<<"//">> | [ X || X <- L, X =/= <<>> ]];
 win32_splitb(<<Slash,Rest/binary>>) when ((Slash =:= $\\) orelse (Slash =:= $/)) ->
     L = binary:split(Rest,[<<"/">>,<<"\\">>],[global]),
     [<<$/>> | [ X || X <- L, X =/= <<>> ]];
@@ -690,6 +738,8 @@ win32_splitb(Name) ->
 unix_split(Name) ->
     split(Name, [], unix).
 
+win32_split([Slash,Slash|Rest]) when ((Slash =:= $\\) orelse (Slash =:= $/)) ->
+    split(Rest, [[$/,$/]], win32);
 win32_split([$\\|Rest]) ->
     win32_split([$/|Rest]);
 win32_split([X, $\\|Rest]) when is_integer(X) ->
@@ -1036,10 +1086,10 @@ basedir_linux(Type) ->
         user_log    -> getenv("XDG_CACHE_HOME", ?basedir_linux_user_log,   true);
         site_data   ->
             Base = getenv("XDG_DATA_DIRS",?basedir_linux_site_data,false),
-            string:tokens(Base,":");
+            string:lexemes(Base, ":");
         site_config ->
             Base = getenv("XDG_CONFIG_DIRS",?basedir_linux_site_config,false),
-            string:tokens(Base,":")
+            string:lexemes(Base, ":")
     end.
 
 -define(basedir_darwin_user_data,   "Library/Application Support").
@@ -1135,3 +1185,72 @@ basedir_os_type() ->
         {win32,_}     -> windows;
         _             -> linux
     end.
+
+%%
+%% validate/1
+%%
+
+-spec validate(FileName) -> boolean() when
+      FileName :: file:name_all().
+
+validate(FileName) when is_binary(FileName) ->
+    %% Raw filename...
+    validate_bin(FileName);
+validate(FileName) when is_list(FileName);
+                        is_atom(FileName) ->
+    validate_list(FileName,
+                  file:native_name_encoding(),
+                  os:type()).
+
+validate_list(FileName, Enc, Os) ->
+    try
+        true = validate_list(FileName, Enc, Os, 0) > 0
+    catch
+        _ : _ -> false
+    end.
+
+validate_list([], _Enc, _Os, Chars) ->
+    Chars;
+validate_list(C, Enc, Os, Chars) when is_integer(C) ->
+    validate_char(C, Enc, Os),
+    Chars+1;
+validate_list(A, Enc, Os, Chars) when is_atom(A) ->
+    validate_list(atom_to_list(A), Enc, Os, Chars);
+validate_list([H|T], Enc, Os, Chars) ->
+    NewChars = validate_list(H, Enc, Os, Chars),
+    validate_list(T, Enc, Os, NewChars).
+
+%% C is always an integer...
+% validate_char(C, _, _) when not is_integer(C) ->
+%     throw(invalid);
+validate_char(C, _, _) when C < 1 ->
+    throw(invalid); %% No negative or null characters...
+validate_char(C, latin1, _) when C > 255 ->
+    throw(invalid);
+validate_char(C, utf8, _) when C >= 16#110000 ->
+    throw(invalid);
+validate_char(C, utf8, {win32, _}) when C > 16#ffff ->
+    throw(invalid); %% invalid win wchar...
+validate_char(_C, utf8, {win32, _}) ->
+    ok; %% Range below is accepted on windows...
+validate_char(C, utf8, _) when 16#D800 =< C, C =< 16#DFFF ->
+    throw(invalid); %% invalid unicode range...
+validate_char(_, _, _) ->
+    ok.
+
+validate_bin(Bin) ->
+    %% Raw filename. That is, we do not interpret
+    %% the encoding, but we still do not accept
+    %% null characters...
+    try
+        true = validate_bin(Bin, 0) > 0
+    catch
+        _ : _ -> false
+    end.
+
+validate_bin(<<>>, Bs) ->
+    Bs;
+validate_bin(<<0, _Rest/binary>>, _Bs) ->
+    throw(invalid); %% No null characters allowed...
+validate_bin(<<_B, Rest/binary>>, Bs) ->
+    validate_bin(Rest, Bs+1).

@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 1996-2016. All Rights Reserved.
+# Copyright Ericsson AB 1996-2017. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -85,6 +85,8 @@ MODULES =  \
 	core_scan \
 	erl_bifs \
 	rec_env \
+	sys_core_alias \
+	sys_core_bsm \
 	sys_core_dsetel \
 	sys_core_fold \
 	sys_core_fold_lists \
@@ -93,16 +95,14 @@ MODULES =  \
 	v3_codegen \
 	v3_core \
 	v3_kernel \
-	v3_kernel_pp \
-	v3_life
+	v3_kernel_pp
 
 BEAM_H = $(wildcard ../priv/beam_h/*.h)
 
 HRL_FILES= \
 	beam_disasm.hrl \
 	core_parse.hrl \
-	v3_kernel.hrl \
-	v3_life.hrl
+	v3_kernel.hrl
 
 YRL_FILE = core_parse.yrl
 
@@ -187,7 +187,7 @@ release_docs_spec:
 # ---------------------------------------------------- 
 
 $(EBIN)/beam_disasm.beam: $(EGEN)/beam_opcodes.hrl beam_disasm.hrl
-$(EBIN)/beam_listing.beam: v3_life.hrl
+$(EBIN)/beam_listing.beam: core_parse.hrl v3_kernel.hrl
 $(EBIN)/beam_validator.beam: beam_disasm.hrl
 $(EBIN)/cerl.beam: core_parse.hrl
 $(EBIN)/compile.beam: core_parse.hrl ../../stdlib/include/erl_compile.hrl
@@ -195,12 +195,12 @@ $(EBIN)/core_lib.beam: core_parse.hrl
 $(EBIN)/core_lint.beam: core_parse.hrl
 $(EBIN)/core_parse.beam: core_parse.hrl $(EGEN)/core_parse.erl
 $(EBIN)/core_pp.beam: core_parse.hrl
+$(EBIN)/sys_core_alias.beam: core_parse.hrl
 $(EBIN)/sys_core_dsetel.beam: core_parse.hrl
 $(EBIN)/sys_core_fold.beam: core_parse.hrl
 $(EBIN)/sys_core_fold_lists.beam: core_parse.hrl
 $(EBIN)/sys_core_inline.beam: core_parse.hrl
-$(EBIN)/v3_codegen.beam: v3_life.hrl
+$(EBIN)/v3_codegen.beam: v3_kernel.hrl
 $(EBIN)/v3_core.beam: core_parse.hrl
 $(EBIN)/v3_kernel.beam: core_parse.hrl v3_kernel.hrl
 $(EBIN)/v3_kernel_pp.beam: v3_kernel.hrl
-$(EBIN)/v3_life.beam: v3_kernel.hrl v3_life.hrl

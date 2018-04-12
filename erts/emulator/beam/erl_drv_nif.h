@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 2010-2016. All Rights Reserved.
+ * Copyright Ericsson AB 2010-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -144,8 +144,25 @@ typedef signed int ErlNapiSInt;
 #define ERTS_NAPI_USEC__	2
 #define ERTS_NAPI_NSEC__	3
 
+#if (defined(__WIN32__) || defined(_WIN32) || defined(_WIN32_))
+/*
+ * This structure can be cast to a WSABUF structure.
+ */
+typedef struct _SysIOVec {
+    unsigned long iov_len;
+    char* iov_base;
+} SysIOVec;
+#else  /* Unix */
+#  include <sys/types.h>
+#  ifdef HAVE_SYS_UIO_H
+#    include <sys/uio.h>
+typedef struct iovec SysIOVec;
+#  else
+typedef struct {
+    char* iov_base;
+    size_t iov_len;
+} SysIOVec;
+#  endif
+#endif
+
 #endif  /* __ERL_DRV_NIF_H__ */
-
-
-
-

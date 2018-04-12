@@ -37,11 +37,12 @@ start() ->
   init(),
   Args = init:get_plain_arguments(),
   try
-    cl(Args)
+    Ret = cl(Args),
+    Ret
   catch
     throw:{dialyzer_cl_parse_error, Msg} -> {error, Msg};
-    _:R ->
-      Msg = io_lib:format("~p\n~p\n", [R, erlang:get_stacktrace()]),
+    _:R:S ->
+      Msg = io_lib:format("~tp\n~tp\n", [R, S]),
       {error, lists:flatten(Msg)}
   end.
 
@@ -81,7 +82,7 @@ cl(["--get_warnings"|T]) ->
 cl(["-D"|_]) ->
   cl_error("No defines specified after -D");
 cl(["-D"++Define|T]) ->
-  Def = re:split(Define, "=", [{return, list}]),
+  Def = re:split(Define, "=", [{return, list}, unicode]),
   append_defines(Def),
   cl(T);
 cl(["-h"|_]) ->

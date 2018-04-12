@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1999-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1999-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,11 +36,6 @@ typedef struct gen_op_entry {
 } GenOpEntry;
 
 extern const GenOpEntry gen_opc[];
-
-extern BeamInstr beam_debug_apply[];
-extern BeamInstr* em_call_error_handler;
-extern BeamInstr* em_apply_bif;
-extern BeamInstr* em_call_nif;
 
 struct ErtsLiteralArea_;
 
@@ -111,14 +106,11 @@ typedef struct beam_code_header {
 
 }BeamCodeHeader;
 
-#ifdef ERTS_DIRTY_SCHEDULERS
 #  define BEAM_NIF_MIN_FUNC_SZ 4
-#else
-#  define BEAM_NIF_MIN_FUNC_SZ 3
-#endif
 
 void erts_release_literal_area(struct ErtsLiteralArea_* literal_area);
 int erts_is_module_native(BeamCodeHeader* code);
+int erts_is_function_native(ErtsCodeInfo*);
 void erts_beam_bif_load_init(void);
 struct erl_fun_entry;
 void erts_purge_state_add_fun(struct erl_fun_entry *fe);

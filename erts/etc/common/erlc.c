@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1997-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1997-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,19 +20,7 @@
 /*
  * Purpose: Common compiler front-end.
  */
-#ifdef HAVE_CONFIG_H
-#  include "config.h"
-#endif
-
-#include "sys.h"
-#ifdef __WIN32__
-#include <winbase.h>
-/* FIXE ME config_win32.h? */
-#define HAVE_STRERROR 1
-#define snprintf _snprintf
-#endif
-
-#include <ctype.h>
+#include "etc_common.h"
 
 #define NO 0
 #define YES 1
@@ -246,7 +234,7 @@ int main(int argc, char** argv)
     PUSH("+A0");
     PUSH("-noinput");
     PUSH2("-mode", "minimal");
-    PUSH2("-boot", "start_clean");
+    PUSH2("-boot", "no_dot_erlang");
     PUSH3("-s", "erl_compile", "compile_cmdline");
     PUSH("-extra");
 

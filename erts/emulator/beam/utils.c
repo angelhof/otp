@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@
 #include "dist.h"
 #include "erl_printf.h"
 #include "erl_threads.h"
-#include "erl_smp.h"
+#include "erl_lock_count.h"
 #include "erl_time.h"
 #include "erl_thr_progress.h"
 #include "erl_thr_queue.h"
@@ -51,6 +51,7 @@
 #include "erl_ptab.h"
 #include "erl_check_io.h"
 #include "erl_bif_unique.h"
+#include "erl_io_queue.h"
 #define ERTS_WANT_TIMER_WHEEL_API
 #include "erl_time.h"
 #ifdef HIPE
@@ -1930,27 +1931,6 @@ do_allocate_logger_message(Eterm gleader, Eterm **hp, ErlOffHeap **ohp,
     gl_sz = IS_CONST(gleader) ? 0 : size_object(gleader);
     sz = sz + gl_sz;
 
-#ifndef ERTS_SMP
-#ifdef USE_THREADS
-    if (!erts_get_scheduler_data()) /* Must be scheduler thread */
-	*p = NULL;
-    else
-#endif
-    {
-	*p = erts_whereis_process(NULL, 0, am_error_logger, 0, 0);
-	if (*p) {
-	    erts_aint32_t state = erts_smp_atomic32_read_acqb(&(*p)->state);
-	    if (state & (ERTS_PSFLG_RUNNING|ERTS_PSFLG_RUNNING_SYS))
-		*p = NULL;
-	}
-    }
-
-    if (!*p) {
-	return NIL;
-    }
-
-    /* So we have an error logger, lets build the message */
-#endif
     *bp = new_message_buffer(sz);
     *ohp = &(*bp)->off_heap;
     *hp = (*bp)->mem;
@@ -1968,20 +1948,12 @@ static void do_send_logger_message(Eterm *hp, ErlOffHeap *ohp, ErlHeapFragment *
 #ifdef HARDDEBUG
     erts_fprintf(stderr, "%T\n", message);
 #endif
-#ifdef ERTS_SMP
     {
 	Eterm from = erts_get_current_pid();
 	if (is_not_internal_pid(from))
 	    from = NIL;
 	erts_queue_error_logger_message(from, message, bp);
     }
-#else
-    {
-	ErtsMessage *mp = erts_alloc_message(0, NULL);
-	mp->data.heap_frag = bp;
-	erts_queue_message(p, 0, mp, message, am_system);
-    }
-#endif
 }
 
 /* error_logger !
@@ -3180,6 +3152,9 @@ tailrecur_ne:
 		    int cmp;
 		    byte* a_ptr;
 		    byte* b_ptr;
+		    if (eq_only && a_size != b_size) {
+		        RETURN_NEQ(a_size - b_size);
+		    }
 		    ERTS_GET_BINARY_BYTES(a, a_ptr, a_bitoffs, a_bitsize);
 		    ERTS_GET_BINARY_BYTES(b, b_ptr, b_bitoffs, b_bitsize);
 		    if ((a_bitsize | b_bitsize | a_bitoffs | b_bitoffs) == 0) {
@@ -3555,7 +3530,7 @@ store_external_or_ref_(Uint **hpp, ErlOffHeap* oh, Eterm ns)
     if (is_external_header(*from_hp)) {
 	ExternalThing *etp = (ExternalThing *) from_hp;
 	ASSERT(is_external(ns));
-	erts_smp_refc_inc(&etp->node->refc, 2);
+	erts_refc_inc(&etp->node->refc, 2);
     }
     else if (is_ordinary_ref_thing(from_hp))
 	return make_internal_ref(to_hp);
@@ -3634,13 +3609,78 @@ intlist_to_buf(Eterm list, char *buf, Sint len)
     return -2;			/* not enough space */
 }
 
-/* Fill buf with the contents of the unicode list.
- * Return the number of bytes in the buffer,
- * or -1 for type error,
- * or -2 for not enough buffer space (buffer contains truncated result).
+/** @brief Fill buf with the UTF8 contents of the unicode list
+ * @param len Max number of characters to write.
+ * @param written NULL or bytes written.
+ * @return 0 ok,
+ *        -1 type error,
+ *        -2 list too long, only \c len characters written
  */
+int
+erts_unicode_list_to_buf(Eterm list, byte *buf, Sint len, Sint* written)
+{
+    Eterm* listptr;
+    Sint sz = 0;
+    Sint val;
+    int res;
+
+    while (1) {
+        if (is_nil(list)) {
+            res = 0;
+            break;
+        }
+        if (is_not_list(list)) {
+            res = -1;
+            break;
+        }
+        listptr = list_val(list);
+
+        if (len-- <= 0) {
+            res = -2;
+            break;
+        }
+
+	if (is_not_small(CAR(listptr))) {
+	    res = -1;
+            break;
+	}
+	val = signed_val(CAR(listptr));
+	if (0 <= val && val < 0x80) {
+	    buf[sz] = val;
+	    sz++;
+	} else if (val < 0x800) {
+	    buf[sz+0] = 0xC0 | (val >> 6);
+	    buf[sz+1] = 0x80 | (val & 0x3F);
+	    sz += 2;
+	} else if (val < 0x10000UL) {
+	    if (0xD800 <= val && val <= 0xDFFF) {
+		res = -1;
+                break;
+	    }
+	    buf[sz+0] = 0xE0 | (val >> 12);
+	    buf[sz+1] = 0x80 | ((val >> 6) & 0x3F);
+	    buf[sz+2] = 0x80 | (val & 0x3F);
+	    sz += 3;
+	} else if (val < 0x110000) {
+	    buf[sz+0] = 0xF0 | (val >> 18);
+	    buf[sz+1] = 0x80 | ((val >> 12) & 0x3F);
+	    buf[sz+2] = 0x80 | ((val >> 6) & 0x3F);
+	    buf[sz+3] = 0x80 | (val & 0x3F);
+	    sz += 4;
+	} else {
+            res = -1;
+            break;
+	}
+	list = CDR(listptr);
+    }
+
+    if (written)
+        *written = sz;
+    return res;
+}
+
 Sint
-erts_unicode_list_to_buf(Eterm list, byte *buf, Sint len)
+erts_unicode_list_to_buf_len(Eterm list)
 {
     Eterm* listptr;
     Sint sz = 0;
@@ -3653,7 +3693,7 @@ erts_unicode_list_to_buf(Eterm list, byte *buf, Sint len)
     }
     listptr = list_val(list);
 
-    while (len-- > 0) {
+    while (1) {
 	Sint val;
 
 	if (is_not_small(CAR(listptr))) {
@@ -3661,25 +3701,15 @@ erts_unicode_list_to_buf(Eterm list, byte *buf, Sint len)
 	}
 	val = signed_val(CAR(listptr));
 	if (0 <= val && val < 0x80) {
-	    buf[sz] = val;
 	    sz++;
 	} else if (val < 0x800) {
-	    buf[sz+0] = 0xC0 | (val >> 6);
-	    buf[sz+1] = 0x80 | (val & 0x3F);
 	    sz += 2;
 	} else if (val < 0x10000UL) {
 	    if (0xD800 <= val && val <= 0xDFFF) {
 		return -1;
 	    }
-	    buf[sz+0] = 0xE0 | (val >> 12);
-	    buf[sz+1] = 0x80 | ((val >> 6) & 0x3F);
-	    buf[sz+2] = 0x80 | (val & 0x3F);
 	    sz += 3;
 	} else if (val < 0x110000) {
-	    buf[sz+0] = 0xF0 | (val >> 18);
-	    buf[sz+1] = 0x80 | ((val >> 12) & 0x3F);
-	    buf[sz+2] = 0x80 | ((val >> 6) & 0x3F);
-	    buf[sz+3] = 0x80 | (val & 0x3F);
 	    sz += 4;
 	} else {
 	    return -1;
@@ -3693,7 +3723,6 @@ erts_unicode_list_to_buf(Eterm list, byte *buf, Sint len)
 	}
 	listptr = list_val(list);
     }
-    return -2;			/* not enough space */
 }
 
 /*
@@ -4334,15 +4363,20 @@ erts_read_env(char *key)
     char *value = erts_alloc(ERTS_ALC_T_TMP, value_len);
     int res;
     while (1) {
-	res = erts_sys_getenv_raw(key, value, &value_len);
-	if (res <= 0)
-	    break;
-	value = erts_realloc(ERTS_ALC_T_TMP, value, value_len);
+        res = erts_sys_explicit_8bit_getenv(key, value, &value_len);
+
+        if (res >= 0) {
+            break;
+        }
+
+        value = erts_realloc(ERTS_ALC_T_TMP, value, value_len);
     }
-    if (res != 0) {
-	erts_free(ERTS_ALC_T_TMP, value);
-	return NULL;
+
+    if (res != 1) {
+        erts_free(ERTS_ALC_T_TMP, value);
+        return NULL;
     }
+
     return value;
 }
 
@@ -4656,22 +4690,6 @@ void
 erts_interval_init(erts_interval_t *icp)
 {
     erts_atomic64_init_nob(&icp->counter.atomic, 0);
-#ifdef DEBUG
-    icp->smp_api = 0;
-#endif
-}
-
-void
-erts_smp_interval_init(erts_interval_t *icp)
-{
-#ifdef ERTS_SMP
-    erts_interval_init(icp);
-#else
-    icp->counter.not_atomic = 0;
-#endif
-#ifdef DEBUG
-    icp->smp_api = 1;
-#endif
 }
 
 static ERTS_INLINE Uint64
@@ -4711,79 +4729,25 @@ ensure_later_interval_acqb(erts_interval_t *icp, Uint64 ic)
 Uint64
 erts_step_interval_nob(erts_interval_t *icp)
 {
-    ASSERT(!icp->smp_api);
     return step_interval_nob(icp);
 }
 
 Uint64
 erts_step_interval_relb(erts_interval_t *icp)
 {
-    ASSERT(!icp->smp_api);
     return step_interval_relb(icp);
-}
-
-Uint64
-erts_smp_step_interval_nob(erts_interval_t *icp)
-{
-    ASSERT(icp->smp_api);
-#ifdef ERTS_SMP
-    return step_interval_nob(icp);
-#else
-    return ++icp->counter.not_atomic;
-#endif
-}
-
-Uint64
-erts_smp_step_interval_relb(erts_interval_t *icp)
-{
-    ASSERT(icp->smp_api);
-#ifdef ERTS_SMP
-    return step_interval_relb(icp);
-#else
-    return ++icp->counter.not_atomic;
-#endif
 }
 
 Uint64
 erts_ensure_later_interval_nob(erts_interval_t *icp, Uint64 ic)
 {
-    ASSERT(!icp->smp_api);
     return ensure_later_interval_nob(icp, ic);
 }
 
 Uint64
 erts_ensure_later_interval_acqb(erts_interval_t *icp, Uint64 ic)
 {
-    ASSERT(!icp->smp_api);
     return ensure_later_interval_acqb(icp, ic);
-}
-
-Uint64
-erts_smp_ensure_later_interval_nob(erts_interval_t *icp, Uint64 ic)
-{
-    ASSERT(icp->smp_api);
-#ifdef ERTS_SMP
-    return ensure_later_interval_nob(icp, ic);
-#else
-    if (icp->counter.not_atomic > ic)
-	return icp->counter.not_atomic;
-    else
-	return ++icp->counter.not_atomic;
-#endif
-}
-
-Uint64
-erts_smp_ensure_later_interval_acqb(erts_interval_t *icp, Uint64 ic)
-{
-    ASSERT(icp->smp_api);
-#ifdef ERTS_SMP
-    return ensure_later_interval_acqb(icp, ic);
-#else
-    if (icp->counter.not_atomic > ic)
-	return icp->counter.not_atomic;
-    else
-	return ++icp->counter.not_atomic;
-#endif
 }
 
 /*

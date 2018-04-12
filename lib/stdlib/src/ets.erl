@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -73,7 +73,8 @@
          select_count/2, select_delete/2, select_replace/2, select_reverse/1,
          select_reverse/2, select_reverse/3, setopts/2, slot/2,
          take/2,
-         update_counter/3, update_counter/4, update_element/3]).
+         update_counter/3, update_counter/4, update_element/3,
+         whereis/1]).
 
 %% internal exports
 -export([internal_request_all/0]).
@@ -145,6 +146,7 @@ give_away(_, _, _) ->
       InfoList :: [InfoTuple],
       InfoTuple :: {compressed, boolean()}
                  | {heir, pid() | none}
+                 | {id, tid()}
                  | {keypos, pos_integer()}
                  | {memory, non_neg_integer()}
                  | {name, atom()}
@@ -162,7 +164,7 @@ info(_) ->
 
 -spec info(Tab, Item) -> Value | undefined when
       Tab :: tab(),
-      Item :: compressed | fixed | heir | keypos | memory
+      Item :: compressed | fixed | heir | id | keypos | memory
             | name | named_table | node | owner | protection
             | safe_fixed | safe_fixed_monotonic_time | size | stats | type
 	    | write_concurrency | read_concurrency,
@@ -277,7 +279,7 @@ match_spec_compile(_) ->
     erlang:nif_error(undef).
 
 -spec match_spec_run_r(List, CompiledMatchSpec, list()) -> list() when
-      List :: [tuple()],
+      List :: [term()],
       CompiledMatchSpec :: comp_match_spec().
 
 match_spec_run_r(_, _, _) ->
@@ -512,12 +514,17 @@ update_counter(_, _, _, _) ->
 update_element(_, _, _) ->
     erlang:nif_error(undef).
 
+-spec whereis(TableName) -> tid() | undefined when
+    TableName :: atom().
+whereis(_) ->
+    erlang:nif_error(undef).
+
 %%% End of BIFs
 
 -opaque comp_match_spec() :: reference().
 
 -spec match_spec_run(List, CompiledMatchSpec) -> list() when
-      List :: [tuple()],
+      List :: [term()],
       CompiledMatchSpec :: comp_match_spec().
 
 match_spec_run(List, CompiledMS) ->
@@ -882,10 +889,10 @@ tab2file(Tab, File, Options) ->
 		_ = disk_log:close(Name),
 		_ = file:delete(File),
 		exit(ExReason);
-	    error:ErReason ->
+	    error:ErReason:StackTrace ->
 		_ = disk_log:close(Name),
 		_ = file:delete(File),
-	        erlang:raise(error,ErReason,erlang:get_stacktrace())
+	        erlang:raise(error,ErReason,StackTrace)
 	end
     catch
 	throw:TReason2 ->
@@ -1060,9 +1067,9 @@ file2tab(File, Opts) ->
 		exit:ExReason ->
 		    ets:delete(Tab),
 		    exit(ExReason);
-		error:ErReason ->
+		error:ErReason:StackTrace ->
 		    ets:delete(Tab),
-		    erlang:raise(error,ErReason,erlang:get_stacktrace())
+		    erlang:raise(error,ErReason,StackTrace)
 	    end
 	after
 	    _ = disk_log:close(Name)
@@ -1693,13 +1700,15 @@ choice(Height, Width, P, Mode, Tab, Key, Turn, Opos) ->
 		  end,
 	    choice(Height, Width, P, Mode, Tab, Key, Turn, Opos);
 	[$/|Regexp]   -> %% from regexp
-	    case re:compile(nonl(Regexp)) of
+	    case re:compile(nonl(Regexp),[unicode]) of
 		{ok,Re} ->
 		    re_search(Height, Width, Tab, ets:first(Tab), Re, 1, 1);
 		{error,{ErrorString,_Pos}} ->
 		    io:format("~ts\n", [ErrorString]),
 		    choice(Height, Width, P, Mode, Tab, Key, Turn, Opos)
 	    end;
+        eof ->
+            ok;
 	_  ->
 	    choice(Height, Width, P, Mode, Tab, Key, Turn, Opos)
     end.
@@ -1717,7 +1726,7 @@ get_line(P, Default) ->
 line_string(Binary) when is_binary(Binary) -> unicode:characters_to_list(Binary);
 line_string(Other) -> Other.
 
-nonl(S) -> string:strip(S, right, $\n).
+nonl(S) -> string:trim(S, trailing, "$\n").
 
 print_number(Tab, Key, Num) ->
     Os = ets:lookup(Tab, Key),
@@ -1746,7 +1755,7 @@ do_display_item(_Height, Width, I, Opos)  ->
     L = to_string(I),
     L2 = if
 	     length(L) > Width - 8 ->
-                 string:substr(L, 1, Width-13) ++ "  ...";
+                 string:slice(L, 0, Width-13) ++ "  ...";
 	     true ->
 		 L
 	 end,

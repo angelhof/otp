@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -81,7 +81,7 @@ check_runtime_config(accumulate,A) when A=:=true; A=:=false -> ok;
 check_runtime_config(_Key,_Value) -> error.
 
 dump(File) ->
-    case file:open(File,[write]) of
+    case file:open(File,[write,{encoding,utf8}]) of
 	{ok,Fd} -> etop_server ! {dump,Fd};
 	Error -> Error
     end.
@@ -161,7 +161,7 @@ data_handler(Reader, Opts) ->
 	{'EXIT', EPid, Reason} when EPid == Opts#opts.out_proc ->
 	    case Reason of
 		normal -> ok;
-		_ -> io:format("Output server crashed: ~p~n",[Reason])
+		_ -> io:format("Output server crashed: ~tp~n",[Reason])
 	    end,
 	    stop(Opts),
 	    out_proc_stopped;
@@ -180,10 +180,16 @@ stop(Opts) ->
     end,
     unregister(etop_server).
     
-update(#opts{store=Store,node=Node,tracing=Tracing}=Opts) ->
+update(#opts{store=Store,node=Node,tracing=Tracing,intv=Interval}=Opts) ->
     Pid = spawn_link(Node,observer_backend,etop_collect,[self()]),
     Info = receive {Pid,I} -> I 
-	   after 1000 -> exit(connection_lost)
+	   after Interval ->
+                   %% Took more than the update interval to fetch
+                   %% data. Either the connection is lost or the
+                   %% fetching took too long...
+                   io:format("Timeout when waiting for process info from "
+                             "node ~p; exiting~n", [Node]),
+                   exit(timeout)
 	   end,
     #etop_info{procinfo=ProcInfo} = Info,
     ProcInfo1 = 

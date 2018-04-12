@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,15 +29,13 @@
 %% Note: This directive should only be used in test suites.
 -compile(export_all).
 
--define(TIMEOUT, 35000).
-
 %%--------------------------------------------------------------------
 %% Common Test interface functions -----------------------------------
 %%--------------------------------------------------------------------
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
-     {timetrap,{seconds,40}}].
+     {timetrap,{seconds,round(1.5*?TIMEOUT/1000)}}].
 
 all() -> 
     %% [{group,kex},{group,cipher}... etc
@@ -68,7 +66,7 @@ groups() ->
 
     TagGroupSet ++ AlgoTcSet.
 
-tags() -> [kex,cipher,mac,compression].
+tags() -> [kex,cipher,mac,compression,public_key].
 two_way_tags() -> [cipher,mac,compression].
     
 %%--------------------------------------------------------------------
@@ -90,7 +88,7 @@ init_per_suite(Config) ->
 		  " -- Max num algorithms: ~p~n"
 		 ,[os:getenv("HOME"),
 		   init:get_argument(home),
-		   os:cmd("ssh -V"),
+		   ssh_test_lib:installed_ssh_version("TIMEOUT"),
 		   ssh:default_algorithms(),
 		   crypto:info_lib(),
 		   ssh_test_lib:default_algorithms(sshc),
@@ -123,19 +121,39 @@ init_per_group(Group, Config) ->
 	    Tag = proplists:get_value(name,
 				      hd(proplists:get_value(tc_group_path, Config))),
 	    Alg = Group,
-	    PA =
-		case split(Alg) of
-		    [_] ->
-			[Alg];
-		    [A1,A2] ->
-			[{client2server,[A1]},
-			 {server2client,[A2]}]
-		end,
-	    ct:log("Init tests for tag=~p alg=~p",[Tag,PA]),
-	    PrefAlgs = {preferred_algorithms,[{Tag,PA}]},
-	    start_std_daemon([PrefAlgs],
-			     [{pref_algs,PrefAlgs} | Config])
+            init_per_group(Tag, Alg, Config)
     end.
+
+
+init_per_group(public_key=Tag, Alg, Config) ->
+    ct:log("Init tests for public_key ~p",[Alg]),
+    PrefAlgs = {preferred_algorithms,[{Tag,[Alg]}]},
+    %% Daemon started later in init_per_testcase
+    try
+        setup_pubkey(Alg,
+                 [{pref_algs,PrefAlgs},
+                  {tag_alg,{Tag,Alg}}
+                  | Config])
+    catch
+        _:_ -> {skip, io_lib:format("Unsupported: ~p",[Alg])}
+    end;
+
+init_per_group(Tag, Alg, Config) ->
+    PA =
+        case split(Alg) of
+            [_] ->
+                [Alg];
+            [A1,A2] ->
+                [{client2server,[A1]},
+                 {server2client,[A2]}]
+        end,
+    ct:log("Init tests for tag=~p alg=~p",[Tag,PA]),
+    PrefAlgs = {preferred_algorithms,[{Tag,PA}]},
+    start_std_daemon([PrefAlgs],
+                     [{pref_algs,PrefAlgs},
+                      {tag_alg,{Tag,Alg}}
+                      | Config]).
+
 
 end_per_group(_Alg, Config) ->
     case proplists:get_value(srvr_pid,Config) of
@@ -148,22 +166,55 @@ end_per_group(_Alg, Config) ->
 
 
 
-init_per_testcase(sshc_simple_exec_os_cmd, Config) ->
-    start_pubkey_daemon([proplists:get_value(pref_algs,Config)], Config);
-init_per_testcase(_TC, Config) ->
-    Config.
+init_per_testcase(TC, Config) ->
+    init_per_testcase(TC, proplists:get_value(tag_alg,Config), Config).
 
 
-end_per_testcase(sshc_simple_exec_os_cmd, Config) ->
-    case proplists:get_value(srvr_pid,Config) of
-	Pid when is_pid(Pid) ->
-	    ssh:stop_daemon(Pid),
-	    ct:log("stopped ~p",[proplists:get_value(srvr_addr,Config)]);
-	_ ->
-	    ok
+init_per_testcase(TC, {public_key,Alg}, Config) ->
+    ExtraOpts = case TC of
+                    simple_connect ->
+                        [{user_dir, proplists:get_value(priv_dir,Config)}];
+                    _ ->
+                        []
+                end,
+    Opts = pubkey_opts(Config) ++ ExtraOpts,
+    case {ssh_file:user_key(Alg,Opts), ssh_file:host_key(Alg,Opts)} of
+        {{ok,_}, {ok,_}} ->
+            start_pubkey_daemon([proplists:get_value(pref_algs,Config)
+                                | ExtraOpts],
+                                [{extra_daemon,true}|Config]);
+        {{ok,_}, {error,Err}} ->
+            {skip, io_lib:format("No host key: ~p",[Err])};
+        
+        {{error,Err}, {ok,_}} ->
+            {skip, io_lib:format("No user key: ~p",[Err])};
+        
+        _ ->
+            {skip, "Neither host nor user key"}
     end;
-end_per_testcase(_TC, Config) ->
+
+init_per_testcase(sshc_simple_exec_os_cmd, _, Config) ->
+     start_pubkey_daemon([proplists:get_value(pref_algs,Config)],
+                         [{extra_daemon,true}|Config]);
+
+init_per_testcase(_, _, Config) ->
     Config.
+
+
+end_per_testcase(_TC, Config) ->
+    case proplists:get_value(extra_daemon, Config, false) of
+        true ->
+            case proplists:get_value(srvr_pid,Config) of
+                Pid when is_pid(Pid) ->
+                    ssh:stop_daemon(Pid),
+                    ct:log("stopped ~p",[proplists:get_value(srvr_addr,Config)]),
+                    Config;
+                _ ->
+                    Config
+            end;
+        _ ->
+            Config
+    end.
 
 %%--------------------------------------------------------------------
 %% Test Cases --------------------------------------------------------
@@ -180,6 +231,19 @@ simple_exec(Config) ->
     ssh_test_lib:std_simple_exec(Host, Port, Config).
 
 %%--------------------------------------------------------------------
+%% A simple exec call
+simple_connect(Config) ->
+    {Host,Port} = proplists:get_value(srvr_addr, Config),
+    Opts =
+        case proplists:get_value(tag_alg, Config) of
+            {public_key,Alg} -> [{pref_public_key_algs,[Alg]}];
+            _ -> []
+        end,
+    ConnectionRef = ssh_test_lib:std_connect(Config, Host, Port, Opts),
+    ct:log("~p:~p connected! ~p",[?MODULE,?LINE,ConnectionRef]),
+    ssh:close(ConnectionRef).
+
+%%--------------------------------------------------------------------
 %% Testing if no group matches
 simple_exec_groups_no_match_too_small(Config) ->
     try_exec_simple_group({400,500,600}, Config).
@@ -193,8 +257,7 @@ try_exec_simple_group(Group, Config) ->
     of
 	_ -> ct:fail("Exec though no group available")
     catch
-	error:{badmatch,{error,"No possible diffie-hellman-group-exchange group found"}} -> ok;
-	error:{badmatch,{error,"Connection closed"}} -> ok
+        error:{badmatch,{error,"Key exchange failed"}} -> ok
     end.
 
 %%--------------------------------------------------------------------
@@ -252,17 +315,24 @@ sshc_simple_exec_os_cmd(Config) ->
 		    ok;
 		false ->
 		    ct:log("Bad result: ~p~nExpected: ~p~nMangled result: ~p", [RawResult,Expect,Lines]),
-		    {fail, "Bad result"}
+		    {fail, "Bad result (see log in testcase)"}
 	    end
     after ?TIMEOUT ->
-	    ct:fail("Did not receive answer")
+	    ct:fail("Did not receive answer (timeout)")
     end.
 
 %%--------------------------------------------------------------------
 %% Connect to the ssh server of the OS
-sshd_simple_exec(_Config) ->
+sshd_simple_exec(Config) ->
+    ClientPubKeyOpts =
+        case proplists:get_value(tag_alg,Config) of
+            {public_key,Alg} -> [{pref_public_key_algs,[Alg]}];
+            _ -> []
+        end,
     ConnectionRef = ssh_test_lib:connect(22, [{silently_accept_hosts, true},
-					      {user_interaction, false}]),
+                                              proplists:get_value(pref_algs,Config),
+					      {user_interaction, false}
+                                              | ClientPubKeyOpts]),
     {ok, ChannelId0} = ssh_connection:session_channel(ConnectionRef, infinity),
     success = ssh_connection:exec(ConnectionRef, ChannelId0,
 				  "echo testing", infinity),
@@ -318,29 +388,32 @@ concat(A1, A2) -> list_to_atom(lists:concat([A1," + ",A2])).
 split(Alg) -> ssh_test_lib:to_atoms(string:tokens(atom_to_list(Alg), " + ")).
 
 specific_test_cases(Tag, Alg, SshcAlgos, SshdAlgos, TypeSSH) -> 
-    [simple_exec, simple_sftp] ++
-	case supports(Tag, Alg, SshcAlgos) of
-	    true when TypeSSH == openSSH ->
-                [sshc_simple_exec_os_cmd];
-            _ ->
-                []
-	end ++
-	case supports(Tag, Alg, SshdAlgos) of
-	    true ->
-		[sshd_simple_exec];
-	    _ ->
-		[]
-	end ++
-	case {Tag,Alg} of
-	    {kex,_} when Alg == 'diffie-hellman-group-exchange-sha1' ;
-			 Alg == 'diffie-hellman-group-exchange-sha256' ->
-		[simple_exec_groups,
-		 simple_exec_groups_no_match_too_large,
-		 simple_exec_groups_no_match_too_small
-		];
-	    _ ->
-		[]
-	end.
+    case Tag of
+        public_key -> [simple_connect];
+        _ -> [simple_connect, simple_exec, simple_sftp]
+    end 
+    ++ case supports(Tag, Alg, SshcAlgos) of
+           true when TypeSSH == openSSH ->
+               [sshc_simple_exec_os_cmd];
+           _ ->
+               []
+       end ++
+       case supports(Tag, Alg, SshdAlgos) of
+           true ->
+               [sshd_simple_exec];
+           _ ->
+               []
+       end ++
+       case {Tag,Alg} of
+           {kex,_} when Alg == 'diffie-hellman-group-exchange-sha1' ;
+                        Alg == 'diffie-hellman-group-exchange-sha256' ->
+               [simple_exec_groups,
+                simple_exec_groups_no_match_too_large,
+                simple_exec_groups_no_match_too_small
+               ];
+           _ ->
+               []
+       end.
 
 supports(Tag, Alg, Algos) ->
     lists:all(fun(A) ->
@@ -370,19 +443,46 @@ start_std_daemon(Opts, Config) ->
     ct:log("started ~p:~p  ~p",[Host,Port,Opts]),
     [{srvr_pid,Pid},{srvr_addr,{Host,Port}} | Config].
 
+
 start_pubkey_daemon(Opts0, Config) ->
-    Opts = [{auth_methods,"publickey"}|Opts0],
-    {Pid, Host, Port} = ssh_test_lib:std_daemon1(Config, Opts),
-    ct:log("started pubkey_daemon ~p:~p  ~p",[Host,Port,Opts]),
+    ct:log("starting pubkey_daemon",[]),
+    Opts = pubkey_opts(Config) ++ Opts0,
+    {Pid, Host, Port} = ssh_test_lib:daemon([{failfun, fun ssh_test_lib:failfun/2}
+                                             | Opts]),
+    ct:log("started ~p:~p  ~p",[Host,Port,Opts]),
     [{srvr_pid,Pid},{srvr_addr,{Host,Port}} | Config].
+
+
+pubkey_opts(Config) ->
+    SystemDir = filename:join(proplists:get_value(priv_dir,Config), "system"),
+    [{auth_methods,"publickey"},
+     {system_dir, SystemDir}].
 
 
 setup_pubkey(Config) ->
     DataDir = proplists:get_value(data_dir, Config),
     UserDir = proplists:get_value(priv_dir, Config),
-    ssh_test_lib:setup_dsa(DataDir, UserDir),
-    ssh_test_lib:setup_rsa(DataDir, UserDir),
-    ssh_test_lib:setup_ecdsa("256", DataDir, UserDir),
+    Keys =
+        [ssh_test_lib:setup_dsa(DataDir, UserDir),
+         ssh_test_lib:setup_rsa(DataDir, UserDir),
+         ssh_test_lib:setup_ecdsa("256", DataDir, UserDir)
+        ],
+    ssh_test_lib:write_auth_keys(Keys, UserDir), % 'authorized_keys' shall contain ALL pub keys
+    Config.
+
+setup_pubkey(Alg, Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    UserDir = proplists:get_value(priv_dir, Config),
+    ct:log("Setup keys for ~p",[Alg]),
+    case Alg of
+        'ssh-dss' -> ssh_test_lib:setup_dsa(DataDir, UserDir);
+        'ssh-rsa' -> ssh_test_lib:setup_rsa(DataDir, UserDir);
+        'rsa-sha2-256' -> ssh_test_lib:setup_rsa(DataDir, UserDir);
+        'rsa-sha2-512' -> ssh_test_lib:setup_rsa(DataDir, UserDir);
+        'ecdsa-sha2-nistp256' -> ssh_test_lib:setup_ecdsa("256", DataDir, UserDir);
+        'ecdsa-sha2-nistp384' -> ssh_test_lib:setup_ecdsa("384", DataDir, UserDir);
+        'ecdsa-sha2-nistp521' -> ssh_test_lib:setup_ecdsa("521", DataDir, UserDir)
+    end,
     Config.
 
 

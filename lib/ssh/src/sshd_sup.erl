@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -90,10 +90,8 @@ init(_) ->
 child_spec(Address, Port, Profile, Options) ->
     #{id       => id(Address, Port, Profile),
       start    => {ssh_system_sup, start_link, [Address, Port, Profile, Options]},
-      restart  => temporary,
-      shutdown => infinity,
-      type     => supervisor,
-      modules  => [ssh_system_sup]
+      restart  => temporary, 
+      type     => supervisor
      }.
 
 id(Address, Port, Profile) ->

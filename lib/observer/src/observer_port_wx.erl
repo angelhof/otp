@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2011-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2011-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -242,6 +242,10 @@ handle_event(#wx{id=?ID_REFRESH_INTERVAL},
     Timer = observer_lib:interval_dialog(Grid, Timer0, 10, 5*60),
     {noreply, State#state{timer=Timer}};
 
+handle_event(#wx{obj=MoreEntry,event=#wxMouse{type=left_down},userData={more,More}}, State) ->
+    observer_lib:add_scroll_entries(MoreEntry,More),
+    {noreply, State};
+
 handle_event(#wx{event=#wxMouse{type=left_down}, userData=TargetPid}, State) ->
     observer ! {open_link, TargetPid},
     {noreply, State};
@@ -338,7 +342,7 @@ handle_info({info, {port_info_not_available,NodeName}},
     {noreply, State};
 
 handle_info({error, Error}, #state{panel=Panel} = State) ->
-    Str = io_lib:format("ERROR: ~s~n",[Error]),
+    Str = io_lib:format("ERROR: ~ts~n",[Error]),
     observer_lib:display_info_dialog(Panel, Str),
     {noreply, State};
 

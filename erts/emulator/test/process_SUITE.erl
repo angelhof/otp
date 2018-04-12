@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@
 	 process_info_lock_reschedule3/1,
          process_info_garbage_collection/1,
 	 bump_reductions/1, low_prio/1, binary_owner/1, yield/1, yield2/1,
-	 process_status_exiting/1,
 	 otp_4725/1, bad_register/1, garbage_collect/1, otp_6237/1,
 	 process_info_messages/1, process_flag_badarg/1, process_flag_heap_size/1,
 	 spawn_opt_heap_size/1, spawn_opt_max_heap_size/1,
@@ -80,7 +79,6 @@ all() ->
      process_info_lock_reschedule2,
      process_info_lock_reschedule3,
      process_info_garbage_collection,
-     process_status_exiting,
      bump_reductions, low_prio, yield, yield2, otp_4725,
      bad_register, garbage_collect, process_info_messages,
      process_flag_badarg, process_flag_heap_size,
@@ -134,6 +132,11 @@ init_per_testcase(Func, Config) when is_atom(Func), is_list(Config) ->
     [{testcase, Func}|Config].
 
 end_per_testcase(Func, Config) when is_atom(Func), is_list(Config) ->
+    %% Restore max_heap_size to default value.
+    erlang:system_flag(max_heap_size,
+                       #{size => 0,
+                         kill => true,
+                         error_logger => true}),
     ok.
 
 fun_spawn(Fun) ->
@@ -147,7 +150,11 @@ spawn_with_binaries(Config) when is_list(Config) ->
     TwoMeg = lists:duplicate(1024, L),
     Fun = fun() -> spawn(?MODULE, binary_owner, [list_to_binary(TwoMeg)]),
 			 receive after 1 -> ok end end,
-    test_server:do_times(150, Fun),
+    Iter = case test_server:is_valgrind() of
+		     true -> 10;
+		     false -> 150
+		 end,
+    test_server:do_times(Iter, Fun),
     ok.
 
 binary_owner(Bin) when is_binary(Bin) ->
@@ -672,7 +679,7 @@ chk_pi_order([{Arg, _}| Values], [Arg|Args]) ->
     chk_pi_order(Values, Args).
 
 process_info_2_list(Config) when is_list(Config) ->
-    Proc = spawn(fun () -> receive after infinity -> ok end end),
+    Proc = spawn_link(fun () -> receive after infinity -> ok end end),
     register(process_SUITE_process_info_2_list1, self()),
     register(process_SUITE_process_info_2_list2, Proc),
     erts_debug:set_internal_state(available_internal_state,true),
@@ -832,28 +839,6 @@ process_info_lock_reschedule3(Config) when is_list(Config) ->
 		  ct:fail(BadStatus)
 	  end.
 
-process_status_exiting(Config) when is_list(Config) ->
-    %% Make sure that erts_debug:get_internal_state({process_status,P})
-    %% returns exiting if it is in status P_EXITING.
-    erts_debug:set_internal_state(available_internal_state,true),
-    Prio = process_flag(priority, max),
-    P = spawn_opt(fun () -> receive after infinity -> ok end end,
-			[{priority, normal}]),
-    erlang:yield(),
-    %% The tok_loop processes are here to make it hard for the exiting
-    %% process to be scheduled in for exit...
-    TokLoops = lists:map(fun (_) ->
-		spawn_opt(fun tok_loop/0,
-		    [link,{priority, high}])
-	end, lists:seq(1, erlang:system_info(schedulers_online))),
-    exit(P, boom),
-    wait_until(fun() ->
-		exiting =:= erts_debug:get_internal_state({process_status,P})
-	end),
-    lists:foreach(fun (Tok) -> unlink(Tok), exit(Tok,bang) end, TokLoops),
-    process_flag(priority, Prio),
-    ok.
-
 otp_4725(Config) when is_list(Config) ->
     Tester = self(),
     Ref1 = make_ref(),
@@ -991,7 +976,7 @@ gv(Key,List) ->
 %% Tests erlang:bump_reductions/1.
 bump_reductions(Config) when is_list(Config) ->
     erlang:garbage_collect(),
-    receive after 1 -> ok end,		% Clear reductions.
+    erlang:yield(),		% Clear reductions.
     {reductions,R1} = process_info(self(), reductions),
     true = erlang:bump_reductions(100),
     {reductions,R2} = process_info(self(), reductions),
@@ -1024,36 +1009,48 @@ bump_big(Prev, Limit) ->
 %% Priority 'low' should be mixed with 'normal' using a factor of
 %% about 8. (OTP-2644)
 low_prio(Config) when is_list(Config) ->
-    case erlang:system_info(schedulers_online) of
-	1 ->
-	    ok = low_prio_test(Config);
-	_ -> 
-	    erlang:system_flag(multi_scheduling, block_normal),
-	    ok = low_prio_test(Config),
-	    erlang:system_flag(multi_scheduling, unblock_normal),
-	    {comment,
-		   "Test not written for SMP runtime system. "
-		   "Multi scheduling blocked during test."}
-    end.
+    erlang:system_flag(multi_scheduling, block_normal),
+    Prop = low_prio_test(Config),
+    erlang:system_flag(multi_scheduling, unblock_normal),
+    Str = lists:flatten(io_lib:format("Low/high proportion is ~.3f",
+                                      [Prop])),
+    {comment,Str}.
 
 low_prio_test(Config) when is_list(Config) ->
     process_flag(trap_exit, true),
-    S = spawn_link(?MODULE, prio_server, [0, 0]),
+
+    %% Spawn the server running with high priority. The server must
+    %% not run at normal priority as that would skew the results for
+    %% two reasons:
+    %%
+    %% 1. There would be one more normal-priority processes than
+    %% low-priority processes.
+    %%
+    %% 2. The receive queue would grow faster than the server process
+    %% could process it. That would in turn trigger the reduction
+    %% punishment for the clients.
+    S = spawn_opt(?MODULE, prio_server, [0, 0], [link,{priority,high}]),
+
+    %% Spawn the clients and let them run for a while.
     PCs = spawn_prio_clients(S, erlang:system_info(schedulers_online)),
-    ct:sleep({seconds,3}),
+    ct:sleep({seconds,2}),
     lists:foreach(fun (P) -> exit(P, kill) end, PCs),
+
+    %% Stop the server and retrieve the result.
     S ! exit,
-    receive {'EXIT', S, {A, B}} -> check_prio(A, B) end,
-    ok.
+    receive
+        {'EXIT', S, {A, B}} ->
+            check_prio(A, B)
+    end.
 
 check_prio(A, B) ->
     Prop = A/B,
     ok = io:format("Low=~p, High=~p, Prop=~p\n", [A, B, Prop]),
 
-    %% It isn't 1/8, it's more like 0.3, but let's check that
-    %% the low-prio processes get some little chance to run at all.
-    true = (Prop < 1.0),
-    true = (Prop > 1/32).
+    %% Prop is expected to be appr. 1/8. Allow a reasonable margin.
+    true = Prop < 1/4,
+    true = Prop > 1/16,
+    Prop.
 
 prio_server(A, B) ->
     receive
@@ -2057,6 +2054,7 @@ max_heap_size_test(Option, Size, Kill, ErrorLogger) ->
     end,
     if ErrorLogger ->
             receive
+                %% There must be at least one error message.
                 {error, _, {emulator, _, [Pid|_]}} ->
                     ok
             end;
@@ -2069,22 +2067,33 @@ max_heap_size_test(Option, Size, Kill, ErrorLogger) ->
                 {'DOWN', Ref, process, Pid, die} ->
                     ok
             end,
-            flush();
+            %% If the process was not killed, the limit may have
+            %% been reached more than once and there may be
+            %% more {error, ...} messages left.
+            receive_error_messages(Pid);
        true ->
             ok
     end,
+
+    %% Make sure that there are no unexpected messages.
+    receive_unexpected().
+
+receive_error_messages(Pid) ->
     receive
-        M ->
-            ct:fail({unexpected_message, M})
-    after 10 ->
+        {error, _, {emulator, _, [Pid|_]}} ->
+            receive_error_messages(Pid)
+    after 1000 ->
             ok
     end.
 
-flush() ->
+receive_unexpected() ->
     receive
-        _M ->
-            flush()
-    after 1000 ->
+        {info_report, _, _} ->
+            %% May be an alarm message from os_mon. Ignore.
+            receive_unexpected();
+        M ->
+            ct:fail({unexpected_message, M})
+    after 10 ->
             ok
     end.
 
@@ -2499,8 +2508,13 @@ system_task_on_suspended(Config) when is_list(Config) ->
     end.
 
 gc_request_when_gc_disabled(Config) when is_list(Config) ->
-    Master = self(),
     AIS = erts_debug:set_internal_state(available_internal_state, true),
+    gc_request_when_gc_disabled_do(ref),
+    gc_request_when_gc_disabled_do(immed),
+    erts_debug:set_internal_state(available_internal_state, AIS).
+
+gc_request_when_gc_disabled_do(ReqIdType) ->
+    Master = self(),
     {P, M} = spawn_opt(fun () ->
 			       true = erts_debug:set_internal_state(gc_state,
 								    false),
@@ -2512,7 +2526,10 @@ gc_request_when_gc_disabled(Config) when is_list(Config) ->
 			       receive after 100 -> ok end
 		       end, [monitor, link]),
     receive {P, gc_state, false} -> ok end,
-    ReqId = make_ref(),
+    ReqId = case ReqIdType of
+                ref -> make_ref();
+                immed -> immed
+            end,
     async = garbage_collect(P, [{async, ReqId}]),
     receive
 	{garbage_collect, ReqId, Result} ->
@@ -2521,7 +2538,6 @@ gc_request_when_gc_disabled(Config) when is_list(Config) ->
 	    ok
     end,
     receive {garbage_collect, ReqId, true} -> ok end,
-    erts_debug:set_internal_state(available_internal_state, AIS),
     receive {'DOWN', M, process, P, _Reason} -> ok end,
     ok.
 

@@ -92,6 +92,14 @@ value_option(Flag, Default, On, OnVal, Off, OffVal, Opts) ->
               :: dict:dict(ta(), line())
          }).
 
+
+%% Are we outside or inside a catch or try/catch?
+-type catch_scope() :: 'none'
+                     | 'after_old_catch'
+                     | 'after_try'
+                     | 'wrong_part_of_try'
+                     | 'try_catch'.
+
 %% Define the lint state record.
 %% 'called' and 'exports' contain {Line, {Function, Arity}},
 %% the other function collections contain {Function, Arity}.
@@ -135,7 +143,10 @@ value_option(Flag, Default, On, OnVal, Off, OffVal, Opts) ->
                types = dict:new()               %Type definitions
                    :: dict:dict(ta(), #typeinfo{}),
                exp_types=gb_sets:empty()        %Exported types
-                   :: gb_sets:set(ta())
+                   :: gb_sets:set(ta()),
+               in_try_head=false :: boolean(),  %In a try head.
+               catch_scope = none               %Inside/outside try or catch
+                   :: catch_scope()
               }).
 
 -type lint_state() :: #lint{}.
@@ -165,49 +176,48 @@ format_error(invalid_record) ->
     "invalid record expression";
 
 format_error({attribute,A}) ->
-    io_lib:format("attribute '~w' after function definitions", [A]);
+    io_lib:format("attribute ~tw after function definitions", [A]);
 format_error({missing_qlc_hrl,A}) ->
     io_lib:format("qlc:q/~w called, but \"qlc.hrl\" not included", [A]);
 format_error({redefine_import,{{F,A},M}}) ->
-    io_lib:format("function ~w/~w already imported from ~w", [F,A,M]);
+    io_lib:format("function ~tw/~w already imported from ~w", [F,A,M]);
 format_error({bad_inline,{F,A}}) ->
-    io_lib:format("inlined function ~w/~w undefined", [F,A]);
+    io_lib:format("inlined function ~tw/~w undefined", [F,A]);
 format_error({invalid_deprecated,D}) ->
-    io_lib:format("badly formed deprecated attribute ~w", [D]);
+    io_lib:format("badly formed deprecated attribute ~tw", [D]);
 format_error({bad_deprecated,{F,A}}) ->
-    io_lib:format("deprecated function ~w/~w undefined or not exported", [F,A]);
+    io_lib:format("deprecated function ~tw/~w undefined or not exported",
+                  [F,A]);
 format_error({bad_nowarn_unused_function,{F,A}}) ->
-    io_lib:format("function ~w/~w undefined", [F,A]);
+    io_lib:format("function ~tw/~w undefined", [F,A]);
 format_error({bad_nowarn_bif_clash,{F,A}}) ->
-    io_lib:format("function ~w/~w undefined", [F,A]);
+    io_lib:format("function ~tw/~w undefined", [F,A]);
 format_error(disallowed_nowarn_bif_clash) ->
     io_lib:format("compile directive nowarn_bif_clash is no longer allowed,~n"
 		  " - use explicit module names or -compile({no_auto_import, [F/A]})", []);
-format_error({bad_nowarn_deprecated_function,{M,F,A}}) ->
-    io_lib:format("~w:~w/~w is not a deprecated function", [M,F,A]);
 format_error({bad_on_load,Term}) ->
-    io_lib:format("badly formed on_load attribute: ~w", [Term]);
+    io_lib:format("badly formed on_load attribute: ~tw", [Term]);
 format_error(multiple_on_loads) ->
     "more than one on_load attribute";
 format_error({bad_on_load_arity,{F,A}}) ->
-    io_lib:format("function ~w/~w has wrong arity (must be 0)", [F,A]);
+    io_lib:format("function ~tw/~w has wrong arity (must be 0)", [F,A]);
 format_error({undefined_on_load,{F,A}}) ->
-    io_lib:format("function ~w/~w undefined", [F,A]);
+    io_lib:format("function ~tw/~w undefined", [F,A]);
 
 format_error(export_all) ->
     "export_all flag enabled - all functions will be exported";
 format_error({duplicated_export, {F,A}}) ->
-    io_lib:format("function ~w/~w already exported", [F,A]);
+    io_lib:format("function ~tw/~w already exported", [F,A]);
 format_error({unused_import,{{F,A},M}}) ->
-    io_lib:format("import ~w:~w/~w is unused", [M,F,A]);
+    io_lib:format("import ~w:~tw/~w is unused", [M,F,A]);
 format_error({undefined_function,{F,A}}) ->
-    io_lib:format("function ~w/~w undefined", [F,A]);
+    io_lib:format("function ~tw/~w undefined", [F,A]);
 format_error({redefine_function,{F,A}}) ->
-    io_lib:format("function ~w/~w already defined", [F,A]);
+    io_lib:format("function ~tw/~w already defined", [F,A]);
 format_error({define_import,{F,A}}) ->
-    io_lib:format("defining imported function ~w/~w", [F,A]);
+    io_lib:format("defining imported function ~tw/~w", [F,A]);
 format_error({unused_function,{F,A}}) ->
-    io_lib:format("function ~w/~w is unused", [F,A]);
+    io_lib:format("function ~tw/~w is unused", [F,A]);
 format_error({call_to_redefined_bif,{F,A}}) ->
     io_lib:format("ambiguous call of overridden auto-imported BIF ~w/~w~n"
 		  " - use erlang:~w/~w or \"-compile({no_auto_import,[~w/~w]}).\" "
@@ -223,7 +233,15 @@ format_error({redefine_old_bif_import,{F,A}}) ->
 format_error({redefine_bif_import,{F,A}}) ->
     io_lib:format("import directive overrides auto-imported BIF ~w/~w~n"
 		  " - use \"-compile({no_auto_import,[~w/~w]}).\" to resolve name clash", [F,A,F,A]);
-
+format_error({get_stacktrace,wrong_part_of_try}) ->
+    "erlang:get_stacktrace/0 used in the wrong part of 'try' expression. "
+        "(Use it in the block between 'catch' and 'end'.)";
+format_error({get_stacktrace,after_old_catch}) ->
+    "erlang:get_stacktrace/0 used following an old-style 'catch' "
+        "may stop working in a future release. (Use it inside 'try'.)";
+format_error({get_stacktrace,after_try}) ->
+    "erlang:get_stacktrace/0 used following a 'try' expression "
+        "may stop working in a future release. (Use it inside 'try'.)";
 format_error({deprecated, MFA, ReplacementMFA, Rel}) ->
     io_lib:format("~s is deprecated and will be removed in ~s; use ~s",
 		  [format_mfa(MFA), Rel, format_mfa(ReplacementMFA)]);
@@ -255,7 +273,7 @@ format_error(illegal_bin_pattern) ->
     "binary patterns cannot be matched in parallel using '='";
 format_error(illegal_expr) -> "illegal expression";
 format_error({illegal_guard_local_call, {F,A}}) -> 
-    io_lib:format("call to local/imported function ~w/~w is illegal in guard",
+    io_lib:format("call to local/imported function ~tw/~w is illegal in guard",
 		  [F,A]);
 format_error(illegal_guard_expr) -> "illegal guard expression";
 %% --- maps ---
@@ -263,23 +281,23 @@ format_error(illegal_map_construction) ->
     "only association operators '=>' are allowed in map construction";
 %% --- records ---
 format_error({undefined_record,T}) ->
-    io_lib:format("record ~w undefined", [T]);
+    io_lib:format("record ~tw undefined", [T]);
 format_error({redefine_record,T}) ->
-    io_lib:format("record ~w already defined", [T]);
+    io_lib:format("record ~tw already defined", [T]);
 format_error({redefine_field,T,F}) ->
-    io_lib:format("field ~w already defined in record ~w", [F,T]);
+    io_lib:format("field ~tw already defined in record ~tw", [F,T]);
 format_error({undefined_field,T,F}) ->
-    io_lib:format("field ~w undefined in record ~w", [F,T]);
+    io_lib:format("field ~tw undefined in record ~tw", [F,T]);
 format_error(illegal_record_info) ->
     "illegal record info";
 format_error({field_name_is_variable,T,F}) ->
-    io_lib:format("field ~w is not an atom or _ in record ~w", [F,T]);
+    io_lib:format("field ~tw is not an atom or _ in record ~tw", [F,T]);
 format_error({wildcard_in_update,T}) ->
-    io_lib:format("meaningless use of _ in update of record ~w", [T]);
+    io_lib:format("meaningless use of _ in update of record ~tw", [T]);
 format_error({unused_record,T}) ->
-    io_lib:format("record ~w is unused", [T]);
+    io_lib:format("record ~tw is unused", [T]);
 format_error({untyped_record,T}) ->
-    io_lib:format("record ~w has field(s) without type information", [T]);
+    io_lib:format("record ~tw has field(s) without type information", [T]);
 %% --- variables ----
 format_error({unbound_var,V}) ->
     io_lib:format("variable ~w is unbound", [V]);
@@ -295,9 +313,13 @@ format_error({unused_var, V}) ->
     io_lib:format("variable ~w is unused", [V]);
 format_error({variable_in_record_def,V}) ->
     io_lib:format("variable ~w in record definition", [V]);
+format_error({stacktrace_guard,V}) ->
+    io_lib:format("stacktrace variable ~w must not be used in a guard", [V]);
+format_error({stacktrace_bound,V}) ->
+    io_lib:format("stacktrace variable ~w must not be previously bound", [V]);
 %% --- binaries ---
 format_error({undefined_bittype,Type}) ->
-    io_lib:format("bit type ~w undefined", [Type]);
+    io_lib:format("bit type ~tw undefined", [Type]);
 format_error({bittype_mismatch,Val1,Val2,What}) ->
     io_lib:format("conflict in ~s specification for bit field: '~p' and '~p'",
 		  [What,Val1,Val2]);
@@ -317,13 +339,13 @@ format_error(unsized_binary_in_bin_gen_pattern) ->
     "binary fields without size are not allowed in patterns of bit string generators";
 %% --- behaviours ---
 format_error({conflicting_behaviours,{Name,Arity},B,FirstL,FirstB}) ->
-    io_lib:format("conflicting behaviours - callback ~w/~w required by both '~p' "
+    io_lib:format("conflicting behaviours - callback ~tw/~w required by both '~p' "
 		  "and '~p' ~s", [Name,Arity,B,FirstB,format_where(FirstL)]);
 format_error({undefined_behaviour_func, {Func,Arity}, Behaviour}) ->
-    io_lib:format("undefined callback function ~w/~w (behaviour '~w')",
+    io_lib:format("undefined callback function ~tw/~w (behaviour '~w')",
 		  [Func,Arity,Behaviour]);
 format_error({undefined_behaviour,Behaviour}) ->
-    io_lib:format("behaviour ~w undefined", [Behaviour]);
+    io_lib:format("behaviour ~tw undefined", [Behaviour]);
 format_error({undefined_behaviour_callbacks,Behaviour}) ->
     io_lib:format("behaviour ~w callback functions are undefined",
 		  [Behaviour]);
@@ -334,23 +356,23 @@ format_error({ill_defined_optional_callbacks,Behaviour}) ->
     io_lib:format("behaviour ~w optional callback functions erroneously defined",
 		  [Behaviour]);
 format_error({behaviour_info, {_M,F,A}}) ->
-    io_lib:format("cannot define callback attibute for ~w/~w when "
+    io_lib:format("cannot define callback attibute for ~tw/~w when "
                   "behaviour_info is defined",[F,A]);
 format_error({redefine_optional_callback, {F, A}}) ->
-    io_lib:format("optional callback ~w/~w duplicated", [F, A]);
+    io_lib:format("optional callback ~tw/~w duplicated", [F, A]);
 format_error({undefined_callback, {_M, F, A}}) ->
-    io_lib:format("callback ~w/~w is undefined", [F, A]);
+    io_lib:format("callback ~tw/~w is undefined", [F, A]);
 %% --- types and specs ---
 format_error({singleton_typevar, Name}) ->
     io_lib:format("type variable ~w is only used once (is unbound)", [Name]);
 format_error({bad_export_type, _ETs}) ->
     io_lib:format("bad export_type declaration", []);
 format_error({duplicated_export_type, {T, A}}) ->
-    io_lib:format("type ~w/~w already exported", [T, A]);
+    io_lib:format("type ~tw/~w already exported", [T, A]);
 format_error({undefined_type, {TypeName, Arity}}) ->
-    io_lib:format("type ~w~s undefined", [TypeName, gen_type_paren(Arity)]);
+    io_lib:format("type ~tw~s undefined", [TypeName, gen_type_paren(Arity)]);
 format_error({unused_type, {TypeName, Arity}}) ->
-    io_lib:format("type ~w~s is unused", [TypeName, gen_type_paren(Arity)]);
+    io_lib:format("type ~tw~s is unused", [TypeName, gen_type_paren(Arity)]);
 format_error({new_builtin_type, {TypeName, Arity}}) ->
     io_lib:format("type ~w~s is a new builtin type; "
 		  "its (re)definition is allowed only until the next release",
@@ -362,25 +384,26 @@ format_error({renamed_type, OldName, NewName}) ->
     io_lib:format("type ~w() is now called ~w(); "
 		  "please use the new name instead", [OldName, NewName]);
 format_error({redefine_type, {TypeName, Arity}}) ->
-    io_lib:format("type ~w~s already defined",
+    io_lib:format("type ~tw~s already defined",
 		  [TypeName, gen_type_paren(Arity)]);
 format_error({type_syntax, Constr}) ->
-    io_lib:format("bad ~w type", [Constr]);
+    io_lib:format("bad ~tw type", [Constr]);
 format_error(old_abstract_code) ->
     io_lib:format("abstract code generated before Erlang/OTP 19.0 and "
                   "having typed record fields cannot be compiled", []);
 format_error({redefine_spec, {M, F, A}}) ->
-    io_lib:format("spec for ~w:~w/~w already defined", [M, F, A]);
+    io_lib:format("spec for ~tw:~tw/~w already defined", [M, F, A]);
 format_error({redefine_spec, {F, A}}) ->
-    io_lib:format("spec for ~w/~w already defined", [F, A]);
+    io_lib:format("spec for ~tw/~w already defined", [F, A]);
 format_error({redefine_callback, {F, A}}) ->
-    io_lib:format("callback ~w/~w already defined", [F, A]);
+    io_lib:format("callback ~tw/~w already defined", [F, A]);
 format_error({bad_callback, {M, F, A}}) ->
-    io_lib:format("explicit module not allowed for callback ~w:~w/~w ", [M, F, A]);
+    io_lib:format("explicit module not allowed for callback ~tw:~tw/~w",
+                  [M, F, A]);
 format_error({spec_fun_undefined, {F, A}}) ->
-    io_lib:format("spec for undefined function ~w/~w", [F, A]);
+    io_lib:format("spec for undefined function ~tw/~w", [F, A]);
 format_error({missing_spec, {F,A}}) ->
-    io_lib:format("missing specification for function ~w/~w", [F, A]);
+    io_lib:format("missing specification for function ~tw/~w", [F, A]);
 format_error(spec_wrong_arity) ->
     "spec has wrong arity";
 format_error(callback_wrong_arity) ->
@@ -399,15 +422,15 @@ format_error({deprecated_builtin_type, {Name, Arity},
                   "removed in ~s; use ~s",
                   [Name, Arity, Rel, UseS]);
 format_error({not_exported_opaque, {TypeName, Arity}}) ->
-    io_lib:format("opaque type ~w~s is not exported",
+    io_lib:format("opaque type ~tw~s is not exported",
                   [TypeName, gen_type_paren(Arity)]);
 format_error({underspecified_opaque, {TypeName, Arity}}) ->
-    io_lib:format("opaque type ~w~s is underspecified and therefore meaningless",
+    io_lib:format("opaque type ~tw~s is underspecified and therefore meaningless",
                   [TypeName, gen_type_paren(Arity)]);
 format_error({bad_dialyzer_attribute,Term}) ->
-    io_lib:format("badly formed dialyzer attribute: ~w", [Term]);
+    io_lib:format("badly formed dialyzer attribute: ~tw", [Term]);
 format_error({bad_dialyzer_option,Term}) ->
-    io_lib:format("unknown dialyzer warning option: ~w", [Term]);
+    io_lib:format("unknown dialyzer warning option: ~tw", [Term]);
 %% --- obsolete? unused? ---
 format_error({format_error, {Fmt, Args}}) ->
     io_lib:format(Fmt, Args).
@@ -568,7 +591,10 @@ start(File, Opts) ->
 		      false, Opts)},
 	 {missing_spec_all,
 	  bool_option(warn_missing_spec_all, nowarn_missing_spec_all,
-		      false, Opts)}
+		      false, Opts)},
+         {get_stacktrace,
+          bool_option(warn_get_stacktrace, nowarn_get_stacktrace,
+                      true, Opts)}
 	],
     Enabled1 = [Category || {Category,true} <- Enabled0],
     Enabled = ordsets:from_list(Enabled1),
@@ -742,12 +768,7 @@ start_state({attribute,Line,module,{_,_}}=Form, St0) ->
 start_state({attribute,Line,module,M}, St0) ->
     St1 = St0#lint{module=M},
     St2 = St1#lint{state=attribute},
-    case is_non_latin1_name(M) of
-        true ->
-            add_error(Line, non_latin1_module_unsupported, St2);
-        false ->
-            St2
-    end;
+    check_module_name(M, Line, St2);
 start_state(Form, St) ->
     Anno = case Form of
                {eof, L} -> erl_anno:new(L);
@@ -756,9 +777,6 @@ start_state(Form, St) ->
            end,
     St1 = add_error(Anno, undefined_module, St),
     attribute_state(Form, St1#lint{state=attribute}).
-
-is_non_latin1_name(Name) ->
-    lists:any(fun(C) -> C > 255 end, atom_to_list(Name)).
 
 %% attribute_state(Form, State) ->
 %%      State'
@@ -841,9 +859,10 @@ not_deprecated(Forms, St0) ->
                 {nowarn_deprecated_function, MFAs0} <- lists:flatten([Args]),
                 MFA <- lists:flatten([MFAs0])],
     Nowarn = [MFA || {MFA,_L} <- MFAsL],
-    Bad = [MFAL || {{M,F,A},_L}=MFAL <- MFAsL,
-                   otp_internal:obsolete(M, F, A) =:= no],
-    St1 = func_line_warning(bad_nowarn_deprecated_function, Bad, St0),
+    ML = [{M,L} || {{M,_F,_A},L} <- MFAsL, is_atom(M)],
+    St1 = foldl(fun ({M,L}, St2) ->
+                        check_module_name(M, L, St2)
+                end, St0, ML),
     St1#lint{not_deprecated = ordsets:from_list(Nowarn)}.
 
 %% The nowarn_bif_clash directive is not only deprecated, it's actually an error from R14A
@@ -951,7 +970,8 @@ behaviour_callbacks(Line, B, St0) ->
     catch
         _:_ ->
             St1 = add_warning(Line, {undefined_behaviour, B}, St0),
-            {[], [], St1}
+            St2 = check_module_name(B, Line, St1),
+            {[], [], St2}
     end.
 
 behaviour_missing_callbacks([{{Line,B},Bfs0,OBfs}|T], St0) ->
@@ -1289,7 +1309,8 @@ exports(#lint{compile = Opts, defined = Defs, exports = Es}) ->
 -type import() :: {module(), [fa()]} | module().
 -spec import(line(), import(), lint_state()) -> lint_state().
 
-import(Line, {Mod,Fs}, St) ->
+import(Line, {Mod,Fs}, St00) ->
+    St = check_module_name(Mod, Line, St00),
     Mfs = ordsets:from_list(Fs),
     case check_imports(Line, Mfs, St#lint.imports) of
 	[] ->
@@ -1405,8 +1426,9 @@ call_function(Line, F, A, #lint{usage=Usage0,called=Cd,func=Func,file=File}=St) 
 %% function(Line, Name, Arity, Clauses, State) -> State.
 
 function(Line, Name, Arity, Cs, St0) ->
-    St1 = define_function(Line, Name, Arity, St0#lint{func={Name,Arity}}),
-    clauses(Cs, St1).
+    St1 = St0#lint{func={Name,Arity},catch_scope=none},
+    St2 = define_function(Line, Name, Arity, St1),
+    clauses(Cs, St2).
 
 -spec define_function(line(), atom(), arity(), lint_state()) -> lint_state().
 
@@ -2272,11 +2294,18 @@ expr({call,L,{tuple,Lt,[{atom,Lm,erlang},{atom,Lf,is_record}]},As}, Vt, St) ->
 expr({call,Line,{remote,_Lr,{atom,_Lm,M},{atom,Lf,F}},As}, Vt, St0) ->
     St1 = keyword_warning(Lf, F, St0),
     St2 = check_remote_function(Line, M, F, As, St1),
-    expr_list(As, Vt, St2);
+    St3 = check_module_name(M, Line, St2),
+    expr_list(As, Vt, St3);
 expr({call,Line,{remote,_Lr,M,F},As}, Vt, St0) ->
     St1 = keyword_warning(Line, M, St0),
     St2 = keyword_warning(Line, F, St1),
-    expr_list([M,F|As], Vt, St2);
+    St3 = case M of
+              {atom,Lm,Mod} ->
+                  check_module_name(Mod, Lm, St2);
+              _ ->
+                  St2
+          end,
+    expr_list([M,F|As], Vt, St3);
 expr({call,Line,{atom,La,F},As}, Vt, St0) ->
     St1 = keyword_warning(La, F, St0),
     {Asvt,St2} = expr_list(As, Vt, St1),
@@ -2338,22 +2367,24 @@ expr({call,Line,F,As}, Vt, St0) ->
 expr({'try',Line,Es,Scs,Ccs,As}, Vt, St0) ->
     %% Currently, we don't allow any exports because later
     %% passes cannot handle exports in combination with 'after'.
-    {Evt0,St1} = exprs(Es, Vt, St0),
+    {Evt0,St1} = exprs(Es, Vt, St0#lint{catch_scope=wrong_part_of_try}),
     TryLine = {'try',Line},
     Uvt = vtunsafe(TryLine, Evt0, Vt),
     Evt1 = vtupdate(Uvt, Evt0),
-    {Sccs,St2} = icrt_clauses(Scs++Ccs, TryLine, vtupdate(Evt1, Vt), St1),
+    {Sccs,St2} = try_clauses(Scs, Ccs, TryLine,
+                             vtupdate(Evt1, Vt), St1),
     Rvt0 = Sccs,
     Rvt1 = vtupdate(vtunsafe(TryLine, Rvt0, Vt), Rvt0),
     Evt2 = vtmerge(Evt1, Rvt1),
     {Avt0,St} = exprs(As, vtupdate(Evt2, Vt), St2),
     Avt1 = vtupdate(vtunsafe(TryLine, Avt0, Vt), Avt0),
     Avt = vtmerge(Evt2, Avt1),
-    {Avt,St};
+    {Avt,St#lint{catch_scope=after_try}};
 expr({'catch',Line,E}, Vt, St0) ->
     %% No new variables added, flag new variables as unsafe.
     {Evt,St} = expr(E, Vt, St0),
-    {vtupdate(vtunsafe({'catch',Line}, Evt, Vt), Evt),St};
+    {vtupdate(vtunsafe({'catch',Line}, Evt, Vt), Evt),
+     St#lint{catch_scope=after_old_catch}};
 expr({match,_Line,P,E}, Vt, St0) ->
     {Evt,St1} = expr(E, Vt, St0),
     {Pvt,Bvt,St2} = pattern(P, vtupdate(Evt, Vt), St1),
@@ -2790,7 +2821,8 @@ check_type(Types, St) ->
 check_type({ann_type, _L, [_Var, Type]}, SeenVars, St) ->
     check_type(Type, SeenVars, St);
 check_type({remote_type, L, [{atom, _, Mod}, {atom, _, Name}, Args]},
-	   SeenVars, St0) ->
+	   SeenVars, St00) ->
+    St0 = check_module_name(Mod, L, St00),
     St = deprecated_type(L, Mod, Name, Args, St0),
     CurrentMod = St#lint.module,
     case Mod =:= CurrentMod of
@@ -2949,11 +2981,12 @@ obsolete_builtin_type({Name, A}) when is_atom(Name), is_integer(A) -> no.
 
 %% spec_decl(Line, Fun, Types, State) -> State.
 
-spec_decl(Line, MFA0, TypeSpecs, St0 = #lint{specs = Specs, module = Mod}) ->
+spec_decl(Line, MFA0, TypeSpecs, St00 = #lint{specs = Specs, module = Mod}) ->
     MFA = case MFA0 of
 	      {F, Arity} -> {Mod, F, Arity};
 	      {_M, _F, Arity} -> MFA0
 	  end,
+    St0 = check_module_name(element(1, MFA), Line, St00),
     St1 = St0#lint{specs = dict:store(MFA, Line, Specs)},
     case dict:is_key(MFA, Specs) of
 	true -> add_error(Line, {redefine_spec, MFA0}, St1);
@@ -2965,7 +2998,9 @@ spec_decl(Line, MFA0, TypeSpecs, St0 = #lint{specs = Specs, module = Mod}) ->
 callback_decl(Line, MFA0, TypeSpecs,
 	      St0 = #lint{callbacks = Callbacks, module = Mod}) ->
     case MFA0 of
-        {_M, _F, _A} -> add_error(Line, {bad_callback, MFA0}, St0);
+        {M, _F, _A} ->
+            St1 = check_module_name(M, Line, St0),
+            add_error(Line, {bad_callback, MFA0}, St1);
         {F, Arity} ->
             MFA = {Mod, F, Arity},
             St1 = St0#lint{callbacks = dict:store(MFA, Line, Callbacks)},
@@ -3008,6 +3043,16 @@ is_fa_list(_) -> false.
 is_fa({FuncName, Arity})
   when is_atom(FuncName), is_integer(Arity), Arity >= 0 -> true;
 is_fa(_) -> false.
+
+check_module_name(M, Line, St) ->
+    case is_latin1_name(M) of
+        true -> St;
+        false ->
+            add_error(Line, non_latin1_module_unsupported, St)
+    end.
+
+is_latin1_name(Name) ->
+    io_lib:latin1_char_list(atom_to_list(Name)).
 
 check_specs([FunType|Left], ETag, Arity, St0) ->
     {FunType1, CTypes} =
@@ -3173,6 +3218,17 @@ is_module_dialyzer_option(Option) ->
                   error_handling,race_conditions,no_missing_calls,
                   specdiffs,overspecs,underspecs,unknown]).
 
+%% try_catch_clauses(Scs, Ccs, In, ImportVarTable, State) ->
+%%      {UpdVt,State}.
+
+try_clauses(Scs, Ccs, In, Vt, St0) ->
+    {Csvt0,St1} = icrt_clauses(Scs, Vt, St0),
+    St2 = St1#lint{catch_scope=try_catch,in_try_head=true},
+    {Csvt1,St3} = icrt_clauses(Ccs, Vt, St2),
+    Csvt = Csvt0 ++ Csvt1,
+    UpdVt = icrt_export(Csvt, Vt, In, St3),
+    {UpdVt,St3#lint{in_try_head=false}}.
+
 %% icrt_clauses(Clauses, In, ImportVarTable, State) ->
 %%      {UpdVt,State}.
 
@@ -3187,13 +3243,30 @@ icrt_clauses(Cs, In, Vt, St0) ->
 icrt_clauses(Cs, Vt, St) ->
     mapfoldl(fun (C, St0) -> icrt_clause(C, Vt, St0) end, St, Cs).
 
-icrt_clause({clause,_Line,H,G,B}, Vt0, St0) ->
-    {Hvt,Binvt,St1} = head(H, Vt0, St0),
-    Vt1 = vtupdate(Hvt, Binvt),
-    {Gvt,St2} = guard(G, vtupdate(Vt1, Vt0), St1),
-    Vt2 = vtupdate(Gvt, Vt1),
-    {Bvt,St3} = exprs(B, vtupdate(Vt2, Vt0), St2),
-    {vtupdate(Bvt, Vt2),St3}.
+icrt_clause({clause,_Line,H,G,B}, Vt0, #lint{catch_scope=Scope}=St0) ->
+    Vt1 = taint_stack_var(Vt0, H, St0),
+    {Hvt,Binvt,St1} = head(H, Vt1, St0),
+    Vt2 = vtupdate(Hvt, Binvt),
+    Vt3 = taint_stack_var(Vt2, H, St0),
+    {Gvt,St2} = guard(G, vtupdate(Vt3, Vt0), St1#lint{in_try_head=false}),
+    Vt4 = vtupdate(Gvt, Vt2),
+    {Bvt,St3} = exprs(B, vtupdate(Vt4, Vt0), St2),
+    {vtupdate(Bvt, Vt4),St3#lint{catch_scope=Scope}}.
+
+taint_stack_var(Vt, Pat, #lint{in_try_head=true}) ->
+    [{tuple,_,[_,_,{var,_,Stk}]}] = Pat,
+    case Stk of
+        '_' ->
+            Vt;
+        _ ->
+            lists:map(fun({V,{bound,Used,Lines}}) when V =:= Stk ->
+                              {V,{stacktrace,Used,Lines}};
+                         (B) ->
+                              B
+                      end, Vt)
+    end;
+taint_stack_var(Vt, _Pat, #lint{in_try_head=false}) ->
+    Vt.
 
 icrt_export(Vts, Vt, {Tag,Attrs}, St) ->
     {_File,Loc} = loc(Attrs, St),
@@ -3433,6 +3506,9 @@ pat_var(V, Line, Vt, Bvt, St) ->
                     {[{V,{bound,used,Ls}}],[],
                      %% As this is matching, exported vars are risky.
                      add_warning(Line, {exported_var,V,From}, St)};
+                {ok,{stacktrace,_Usage,Ls}} ->
+                    {[{V,{bound,used,Ls}}],[],
+                     add_error(Line, {stacktrace_bound,V}, St)};
                 error when St#lint.recdef_top ->
                     {[],[{V,{bound,unused,[Line]}}],
                      add_error(Line, {variable_in_record_def,V}, St)};
@@ -3490,6 +3566,9 @@ expr_var(V, Line, Vt, St) ->
                 false ->
                     {[{V,{{export,From},used,Ls}}],St}
             end;
+        {ok,{stacktrace,_Usage,Ls}} ->
+            {[{V,{bound,used,Ls}}],
+             add_error(Line, {stacktrace_guard,V}, St)};
         error ->
             {[{V,{bound,used,[Line]}}],
              add_error(Line, {unbound_var,V}, St)}
@@ -3657,7 +3736,8 @@ has_wildcard_field([]) -> false.
 check_remote_function(Line, M, F, As, St0) ->
     St1 = deprecated_function(Line, M, F, As, St0),
     St2 = check_qlc_hrl(Line, M, F, As, St1),
-    format_function(Line, M, F, As, St2).
+    St3 = check_get_stacktrace(Line, M, F, As, St2),
+    format_function(Line, M, F, As, St3).
 
 %% check_qlc_hrl(Line, ModName, FuncName, [Arg], State) -> State
 %%  Add warning if qlc:q/1,2 has been called but qlc.hrl has not
@@ -3705,6 +3785,23 @@ deprecated_function(Line, M, F, As, St) ->
         no ->
 	    St
     end.
+
+check_get_stacktrace(Line, erlang, get_stacktrace, [], St) ->
+    case St of
+        #lint{catch_scope=none} ->
+            St;
+        #lint{catch_scope=try_catch} ->
+            St;
+        #lint{catch_scope=Scope} ->
+            case is_warn_enabled(get_stacktrace, St) of
+                false ->
+                    St;
+                true ->
+                    add_warning(Line, {get_stacktrace,Scope}, St)
+            end
+    end;
+check_get_stacktrace(_, _, _, _, St) ->
+    St.
 
 -dialyzer({no_match, deprecated_type/5}).
 
@@ -3841,10 +3938,9 @@ check_format_string(Fmt) ->
     extract_sequences(Fmt, []).
 
 extract_sequences(Fmt, Need0) ->
-    case string:chr(Fmt, $~) of
-        0 -> {ok,lists:reverse(Need0)};         %That's it
-        Pos ->
-            Fmt1 = string:substr(Fmt, Pos+1),   %Skip ~
+    case string:find(Fmt, [$~]) of
+        nomatch -> {ok,lists:reverse(Need0)};         %That's it
+        [$~|Fmt1] ->
             case extract_sequence(1, Fmt1, Need0) of
                 {ok,Need1,Rest} -> extract_sequences(Rest, Need1);
                 Error -> Error
@@ -3875,6 +3971,8 @@ extract_sequence(3, [$.,_|Fmt], Need) ->
     extract_sequence(4, Fmt, Need);
 extract_sequence(3, Fmt, Need) ->
     extract_sequence(4, Fmt, Need);
+extract_sequence(4, [$t, $l | Fmt], Need) ->
+    extract_sequence(4, [$l, $t | Fmt], Need);
 extract_sequence(4, [$t, $c | Fmt], Need) ->
     extract_sequence(5, [$c|Fmt], Need);
 extract_sequence(4, [$t, $s | Fmt], Need) ->
@@ -3891,8 +3989,14 @@ extract_sequence(4, [$t, C | _Fmt], _Need) ->
     {error,"invalid control ~t" ++ [C]};
 extract_sequence(4, [$l, $p | Fmt], Need) ->
     extract_sequence(5, [$p|Fmt], Need);
+extract_sequence(4, [$l, $t, $p | Fmt], Need) ->
+    extract_sequence(5, [$p|Fmt], Need);
 extract_sequence(4, [$l, $P | Fmt], Need) ->
     extract_sequence(5, [$P|Fmt], Need);
+extract_sequence(4, [$l, $t, $P | Fmt], Need) ->
+    extract_sequence(5, [$P|Fmt], Need);
+extract_sequence(4, [$l, $t, C | _Fmt], _Need) ->
+    {error,"invalid control ~lt" ++ [C]};
 extract_sequence(4, [$l, C | _Fmt], _Need) ->
     {error,"invalid control ~l" ++ [C]};
 extract_sequence(4, Fmt, Need) ->

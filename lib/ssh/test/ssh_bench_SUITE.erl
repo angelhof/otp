@@ -1,7 +1,7 @@
 %%%-------------------------------------------------------------------
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2015-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2015-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -57,12 +57,19 @@ init_per_suite(Config) ->
         ok ->
             DataSize = 1000000,
             SystemDir = proplists:get_value(data_dir, Config),
-            Algs = insert_none(ssh:default_algorithms()),
+            Algs = ssh:default_algorithms(),
             {_ServerPid, _Host, Port} =
                 ssh_test_lib:daemon([{system_dir, SystemDir},
                                      {user_passwords, [{?UID,?PWD}]},
                                      {failfun, fun ssh_test_lib:failfun/2},
                                      {preferred_algorithms, Algs},
+                                     {modify_algorithms,[{prepend,[{cipher,[none]},
+                                                                   {mac,[none]}
+                                                                  ]},
+                                                         {rm, [{cipher,['aes256-gcm@openssh.com',
+                                                                        'aes128-gcm@openssh.com']}
+                                                              ]}
+                                                        ]},
                                      {max_random_length_padding, 0},
                                      {subsystems, [{"/dev/null", {ssh_bench_dev_null,[DataSize]}}]}
                                     ]),
@@ -175,11 +182,34 @@ gen_data(DataSz) ->
 %%              {suite, ?MODULE},
 %%              {name, mk_name(["Transfer 1M bytes ",Cipher,"/",Mac," [µs]"])}]);
 connect_measure(Port, Cipher, Mac, Data, Options) ->
+    AES_GCM = {cipher,['aes256-gcm@openssh.com',
+                       'aes128-gcm@openssh.com']},
+
+    AlgOpt = case {Cipher,Mac} of
+                 {none,none} ->
+                     [{modify_algorithms,[{prepend, [{cipher,[Cipher]},
+                                                     {mac,[Mac]}]},
+                                          {rm,[AES_GCM]}
+                                         ]}];
+                 {none,_} ->
+                     [{modify_algorithms,[{prepend, [{cipher,[Cipher]}]},
+                                          {rm,[AES_GCM]}
+                                         ]},
+                      {preferred_algorithms, [{mac,[Mac]}]}];
+                 {_,none} ->
+                     [{modify_algorithms,[{prepend, [{mac,[Mac]}]},
+                                          {rm,[AES_GCM]}
+                                         ]},
+                      {preferred_algorithms, [{cipher,[Cipher]}]}];
+                 _ ->
+                     [{preferred_algorithms, [{cipher,[Cipher]},
+                                              {mac,[Mac]}]},
+                      {modify_algorithms, [{rm,[AES_GCM]}]}
+                     ]
+             end,
     Times =
         [begin
-             {ok,C} = ssh:connect("localhost", Port, [{preferred_algorithms, [{cipher,[Cipher]},
-                                                                              {mac,[Mac]}]}
-                                                      |Options]),
+             {ok,C} = ssh:connect("localhost", Port, AlgOpt ++ Options),
              {ok,Ch} = ssh_connection:session_channel(C, 10000),
              success = ssh_connection:subsystem(C, Ch, "/dev/null", 10000),
              {Time,ok} = timer:tc(?MODULE, send_wait_acc, [C, Ch, Data]),
@@ -203,16 +233,6 @@ send_wait_acc(C, Ch, Data) ->
 %%%
 %%% Private
 %%% 
-
-%%%----------------------------------------------------------------
-insert_none(L) ->
-    lists:foldl(fun insert_none/2, [], L).
-
-insert_none({T,L}, Acc) when T==cipher ;
-                             T==mac    ->
-    [{T, [{T1,L1++[none]} || {T1,L1} <- L]} | Acc];
-insert_none(_, Acc) ->
-    Acc.
 
 %%%----------------------------------------------------------------
 mk_name(Name) -> [char(C) || C <- lists:concat(Name)].

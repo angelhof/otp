@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -365,11 +365,18 @@ do_list_dir(Dir, Mod) ->     eval_list_dir(Dir, Mod).
 	    
 %%% Compiling a wildcard.
 
+
+%% Define characters used for escaping a \.
+-define(ESCAPE_PREFIX, $@).
+-define(ESCAPE_CHARACTER, [?ESCAPE_PREFIX,$e]).
+-define(ESCAPED_ESCAPE_PREFIX, [?ESCAPE_PREFIX,?ESCAPE_PREFIX]).
+
 %% Only for debugging.
 compile_wildcard(Pattern) when is_list(Pattern) ->
     {compiled_wildcard,?HANDLE_ERROR(compile_wildcard(Pattern, "."))}.
 
-compile_wildcard(Pattern, Cwd0) ->
+compile_wildcard(Pattern0, Cwd0) ->
+    Pattern = convert_escapes(Pattern0),
     [Root|Rest] = filename:split(Pattern),
     case filename:pathtype(Root) of
 	relative ->
@@ -409,7 +416,8 @@ compile_join({cwd,Cwd}, File0) ->
 compile_join({root,PrefixLen,Root}, File) ->
     {root,PrefixLen,filename:join(Root, File)}.
 
-compile_part(Part) ->
+compile_part(Part0) ->
+    Part = wrap_escapes(Part0),
     compile_part(Part, false, []).
 
 compile_part_to_sep(Part) ->
@@ -445,6 +453,8 @@ compile_part([${|Rest], Upto, Result) ->
 	error ->
 	    compile_part(Rest, Upto, [${|Result])
     end;
+compile_part([{escaped,X}|Rest], Upto, Result) ->
+    compile_part(Rest, Upto, [X|Result]);
 compile_part([X|Rest], Upto, Result) ->
     compile_part(Rest, Upto, [X|Result]);
 compile_part([], _Upto, Result) ->
@@ -461,6 +471,8 @@ compile_charset1([Lower, $-, Upper|Rest], Ordset) when Lower =< Upper ->
     compile_charset1(Rest, compile_range(Lower, Upper, Ordset));
 compile_charset1([$]|Rest], Ordset) ->
     {ok, {one_of, gb_sets:from_ordset(Ordset)}, Rest};
+compile_charset1([{escaped,X}|Rest], Ordset) ->
+    compile_charset1(Rest, ordsets:add_element(X, Ordset));
 compile_charset1([X|Rest], Ordset) ->
     compile_charset1(Rest, ordsets:add_element(X, Ordset));
 compile_charset1([], _Ordset) ->
@@ -485,6 +497,32 @@ compile_alt(Pattern, Result) ->
 	Pattern ->
 	    error
     end.
+
+%% Convert backslashes to an illegal Unicode character to
+%% protect in from filename:split/1.
+
+convert_escapes([?ESCAPE_PREFIX|T]) ->
+    ?ESCAPED_ESCAPE_PREFIX ++ convert_escapes(T);
+convert_escapes([$\\|T]) ->
+    ?ESCAPE_CHARACTER ++ convert_escapes(T);
+convert_escapes([H|T]) ->
+    [H|convert_escapes(T)];
+convert_escapes([]) ->
+    [].
+
+%% Wrap each escape in a tuple to remove the special meaning for
+%% the character that follows.
+
+wrap_escapes(?ESCAPED_ESCAPE_PREFIX ++ T) ->
+    [?ESCAPE_PREFIX|wrap_escapes(T)];
+wrap_escapes(?ESCAPE_CHARACTER ++ [C|T]) ->
+    [{escaped,C}|wrap_escapes(T)];
+wrap_escapes(?ESCAPE_CHARACTER) ->
+    [];
+wrap_escapes([H|T]) ->
+    [H|wrap_escapes(T)];
+wrap_escapes([]) ->
+    [].
 
 badpattern(Reason) ->
     error({badpattern,Reason}).
@@ -544,17 +582,16 @@ default_search_rules() ->
      {"", ".c", c_source_search_rules()},
      {"", ".in", basic_source_search_rules()},
      %% plain old directory rules, backwards compatible
-     {"", ""},
-     {"ebin","src"},
-     {"ebin","esrc"}
-    ].
+     {"", ""}] ++ erl_source_search_rules().
 
 basic_source_search_rules() ->
     (erl_source_search_rules()
      ++ c_source_search_rules()).
 
 erl_source_search_rules() ->
-    [{"ebin","src"}, {"ebin","esrc"}].
+    [{"ebin","src"}, {"ebin","esrc"},
+     {"ebin",filename:join("src", "*")},
+     {"ebin",filename:join("esrc", "*")}].
 
 c_source_search_rules() ->
     [{"priv","c_src"}, {"priv","src"}, {"bin","c_src"}, {"bin","src"}, {"", "src"}].
@@ -634,8 +671,16 @@ try_dir_rule(Dir, Filename, From, To) ->
 	    Src = filename:join(NewDir, Filename),
 	    case is_regular(Src) of
 		true -> {ok, Src};
-		false -> error
+		false -> find_regular_file(wildcard(Src))
 	    end;
 	false ->
 	    error
+    end.
+
+find_regular_file([]) ->
+    error;
+find_regular_file([File|Files]) ->
+    case is_regular(File) of
+        true -> {ok, File};
+        false -> find_regular_file(Files)
     end.

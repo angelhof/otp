@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2007-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2007-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,7 +19,9 @@
 %%
 
 -module(crashdump_helper).
--export([n1_proc/2,remote_proc/2]).
+-export([n1_proc/2,remote_proc/2,
+         dump_maps/0,create_maps/0,
+         create_binaries/0,create_sub_binaries/1]).
 -compile(r18).
 -include_lib("common_test/include/ct.hrl").
 
@@ -60,7 +62,9 @@ n1_proc(Creator,_N2,Pid2,Port2,_L) ->
     put(ref,Ref),
     put(pid,Pid),
     put(bin,Bin),
+    put(bins,create_binaries()),
     put(sub_bin,SubBin),
+    put(sub_bins,create_sub_binaries(get(bins))),
     put(bignum,83974938738373873),
     put(neg_bignum,-38748762783736367),
     put(ext_pid,Pid2),
@@ -79,6 +83,7 @@ n1_proc(Creator,_N2,Pid2,Port2,_L) ->
     link(OtherPid), % own node
     link(Pid2),     % external node
     erlang:monitor(process,OtherPid),
+    erlang:monitor(process,init), % named process
     erlang:monitor(process,Pid2),
 
     code:load_file(?MODULE),
@@ -92,3 +97,49 @@ remote_proc(P1,Creator) ->
 		  Creator ! {self(),done},
 		  receive after infinity -> ok end
 	  end).
+
+create_binaries() ->
+    Sizes = lists:seq(60, 70) ++ lists:seq(120, 140),
+    [begin
+         <<H:16/unit:8>> = erlang:md5(<<Size:32>>),
+         Data = ((H bsl (8*150)) div (H+7919)),
+         <<Data:Size/unit:8>>
+     end || Size <- Sizes].
+
+create_sub_binaries(Bins) ->
+    [create_sub_binary(Bin, Start, LenSub) ||
+        Bin <- Bins,
+        Start <- [0,1,2,3,4,5,10,22],
+        LenSub <- [0,1,2,3,4,6,9]].
+
+create_sub_binary(Bin, Start, LenSub) ->
+    Len = byte_size(Bin) - LenSub - Start,
+    <<_:Start/bytes,Sub:Len/bytes,_/bytes>> = Bin,
+    Sub.
+
+%%%
+%%% Test dumping of maps. Dumping of maps only from OTP 20.2.
+%%%
+
+dump_maps() ->
+    Parent = self(),
+    F = fun() ->
+                register(aaaaaaaa_maps, self()),
+                put(maps, create_maps()),
+                Parent ! {self(),done},
+                receive _ -> ok end
+        end,
+    Pid = spawn_link(F),
+    receive
+        {Pid,done} ->
+            {ok,Pid}
+    end.
+
+create_maps() ->
+    Map0 = maps:from_list([{I,[I,I+1]} || I <- lists:seq(1, 40)]),
+    Map1 = maps:from_list([{I,{a,[I,I*I],{}}} || I <- lists:seq(1, 100)]),
+    Map2 = maps:from_list([{{I},(I*I) bsl 24} || I <- lists:seq(1, 10000)]),
+    Map3 = lists:foldl(fun(I, A) ->
+                               A#{I=>I*I}
+                       end, Map2, lists:seq(-10, 0)),
+    #{a=>Map0,b=>Map1,c=>Map2,d=>Map3,e=>#{}}.

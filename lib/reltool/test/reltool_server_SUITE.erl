@@ -19,11 +19,7 @@
 
 -module(reltool_server_SUITE).
 
--export([all/0, suite/0,groups/0,init_per_group/2,end_per_group/2, 
-	 init_per_suite/1, end_per_suite/1, 
-         init_per_testcase/2, end_per_testcase/2]).
-
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 -include_lib("reltool/src/reltool.hrl").
 -include("reltool_test_lib.hrl").
@@ -251,6 +247,7 @@ get_config(_Config) ->
 		    {app,stdlib,[{incl_cond,include},{vsn,undefined},
 				 {lib_dir,StdLibDir}]},
 		    {boot_rel,"start_clean"},
+                    {rel,"no_dot_erlang","1.0",[]},
 		    {rel,"start_clean","1.0",[]},
 		    {rel,"start_sasl","1.0",[sasl]},
 		    {emu_name,"beam"},
@@ -281,6 +278,7 @@ get_config(_Config) ->
 		    {app,stdlib,[{incl_cond,include},{vsn,StdVsn},
 				 {lib_dir,StdLibDir},{mod,_,[]}|_]},
 		    {boot_rel,"start_clean"},
+                    {rel,"no_dot_erlang","1.0",[]},
 		    {rel,"start_clean","1.0",[]},
 		    {rel,"start_sasl","1.0",[sasl]},
 		    {emu_name,"beam"},
@@ -2108,6 +2106,7 @@ save_config(Config) ->
 		     {app,stdlib,[{incl_cond,include},{vsn,undefined},
 				  {lib_dir,undefined}]},
 		     {boot_rel,"start_clean"},
+                     {rel,"no_dot_erlang","1.0",[]},
 		     {rel,"start_clean","1.0",[]},
 		     {rel,"start_sasl","1.0",[sasl]},
 		     {emu_name,"beam"},
@@ -2148,6 +2147,7 @@ save_config(Config) ->
 		     {app,stdlib,[{incl_cond,include},{vsn,StdVsn},
 				  {lib_dir,StdLibDir},{mod,_,[]}|_]},
 		     {boot_rel,"start_clean"},
+                     {rel,"no_dot_erlang","1.0",[]},
 		     {rel,"start_clean","1.0",[]},
 		     {rel,"start_sasl","1.0",[sasl]},
 		     {emu_name,"beam"},
@@ -2549,7 +2549,7 @@ undefined_regexp(_Config) ->
 %% Library functions
 
 erl_libs() ->
-    string:tokens(os:getenv("ERL_LIBS", ""), ":;").
+    string:lexemes(os:getenv("ERL_LIBS", ""), ":;").
 
 datadir(Config) ->
     %% Removes the trailing slash...
@@ -2559,7 +2559,7 @@ latest(App) ->
     AppStr = atom_to_list(App),
     AppDirs = filelib:wildcard(filename:join(code:lib_dir(),AppStr++"-*")),
     [LatestAppDir|_] = lists:reverse(AppDirs),
-    [_,Vsn] = string:tokens(filename:basename(LatestAppDir),"-"),
+    [_,Vsn] = string:lexemes(filename:basename(LatestAppDir),"-"),
     Vsn.
 
 rm_missing_app(Apps) ->
@@ -2635,16 +2635,11 @@ os_cmd(Cmd) when is_list(Cmd) ->
         Return->
             %% Find the position of the status code wich is last in the string
             %% prepended with #
-            case string:rchr(Return, $#) of
-                
-                %% This happens only if the sh command pipe is somehow interrupted
-                0->
-                {98, Return};
-                
-                Position->
-                Result = string:left(Return,Position - 1),
-                Status = string:substr(Return,Position + 1, length(Return) - Position - 1),
-                {list_to_integer(Status), Result}
+            case string:split(Return, "$#", trailing) of
+                [_] -> %% This happens only if the sh command pipe is somehow interrupted
+                    {98, Return};
+                [Result, Status0] ->
+                    {list_to_integer(string:trim(Status0)), Result}
             end
     end.
 

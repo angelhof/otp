@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 1997-2016. All Rights Reserved.
+# Copyright Ericsson AB 1997-2017. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,6 +57,7 @@ MODULES= \
 	dirty_nif_SUITE \
 	distribution_SUITE \
 	driver_SUITE \
+	dump_SUITE \
 	efile_SUITE \
 	erts_debug_SUITE \
 	estone_SUITE \
@@ -71,8 +72,10 @@ MODULES= \
 	hash_SUITE \
 	hibernate_SUITE \
 	hipe_SUITE \
+	iovec_SUITE \
 	list_bif_SUITE \
 	lttng_SUITE \
+	lcnt_SUITE \
 	map_SUITE \
 	match_spec_SUITE \
 	module_info_SUITE \
@@ -117,7 +120,6 @@ MODULES= \
 	tracer_SUITE \
 	tracer_test \
 	scheduler_SUITE \
-	old_scheduler_SUITE \
 	port_trace_SUITE \
 	unique_SUITE \
 	z_SUITE \

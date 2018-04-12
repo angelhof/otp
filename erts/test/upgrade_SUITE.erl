@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2014-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2014-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@
 %% - dialyzer requires hipe (in the .app file)
 %% - erl_interface, jinterface support no upgrade
 -define(appup_exclude, 
-	[dialyzer,hipe,erl_interface,jinterface,ose]).
+	[dialyzer,hipe,typer,erl_interface,jinterface,ose]).
 
 init_per_suite(Config) ->
     %% Check that a real release is running, not e.g. cerl
@@ -287,7 +287,7 @@ create_relfile(Node,CreateDir,RelName0,RelVsn) ->
 			 true ->
 			     case filename:split(Path) -- SplitLibDir of
 				 [AppVsn,"ebin"] ->
-				     case string:tokens(AppVsn,"-") of
+				     case string:lexemes(AppVsn,"-") of
 					 [AppStr,Vsn] ->
 					     App = list_to_atom(AppStr),
 					     case lists:member(App,Exclude) of

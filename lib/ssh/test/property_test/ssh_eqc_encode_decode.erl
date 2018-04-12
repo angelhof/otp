@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -280,11 +280,21 @@ msg_code(Num) -> Name
 -include_lib("ssh/src/ssh_transport.hrl").
 
 %%% Encoding and decodeing is asymetric so out=binary in=string. Sometimes. :(
+-define(fix_asym_Xdh_reply(S),
+ fix_asym(#S{public_host_key = Key, h_sig = {Alg,Sig}} = M) ->
+      M#S{public_host_key = {Key, list_to_atom(Alg)}, h_sig = Sig}
+).
+
+
 fix_asym(#ssh_msg_global_request{name=N} = M) -> M#ssh_msg_global_request{name = binary_to_list(N)};
 fix_asym(#ssh_msg_debug{message=D,language=L} = M) -> M#ssh_msg_debug{message = binary_to_list(D),
 								      language = binary_to_list(L)};
 fix_asym(#ssh_msg_kexinit{cookie=C} = M) -> M#ssh_msg_kexinit{cookie = <<C:128>>};
+?fix_asym_Xdh_reply(ssh_msg_kexdh_reply);
+?fix_asym_Xdh_reply(ssh_msg_kex_dh_gex_reply);
+?fix_asym_Xdh_reply(ssh_msg_kex_ecdh_reply);
 fix_asym(M) -> M.
+
 
 %%% Message codes 30 and 31 are overloaded depending on kex family so arrange the decoder
 %%% input as the test object does

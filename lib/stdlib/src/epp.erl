@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -194,27 +194,27 @@ format_error(missing_parenthesis) ->
 format_error(premature_end) ->
     "premature end";
 format_error({call,What}) ->
-    io_lib:format("illegal macro call '~s'",[What]);
+    io_lib:format("illegal macro call '~ts'",[What]);
 format_error({undefined,M,none}) ->
-    io_lib:format("undefined macro '~s'", [M]);
+    io_lib:format("undefined macro '~ts'", [M]);
 format_error({undefined,M,A}) ->
-    io_lib:format("undefined macro '~s/~p'", [M,A]);
+    io_lib:format("undefined macro '~ts/~p'", [M,A]);
 format_error({depth,What}) ->
     io_lib:format("~s too deep",[What]);
 format_error({mismatch,M}) ->
-    io_lib:format("argument mismatch for macro '~s'", [M]);
+    io_lib:format("argument mismatch for macro '~ts'", [M]);
 format_error({arg_error,M}) ->
-    io_lib:format("badly formed argument for macro '~s'", [M]);
+    io_lib:format("badly formed argument for macro '~ts'", [M]);
 format_error({redefine,M}) ->
-    io_lib:format("redefining macro '~s'", [M]);
+    io_lib:format("redefining macro '~ts'", [M]);
 format_error({redefine_predef,M}) ->
     io_lib:format("redefining predefined macro '~s'", [M]);
 format_error({circular,M,none}) ->
-    io_lib:format("circular macro '~s'", [M]);
+    io_lib:format("circular macro '~ts'", [M]);
 format_error({circular,M,A}) ->
-    io_lib:format("circular macro '~s/~p'", [M,A]);
+    io_lib:format("circular macro '~ts/~p'", [M,A]);
 format_error({include,W,F}) ->
-    io_lib:format("can't find include ~s \"~s\"", [W,F]);
+    io_lib:format("can't find include ~s \"~ts\"", [W,F]);
 format_error({illegal,How,What}) ->
     io_lib:format("~s '-~s'", [How,What]);
 format_error({illegal_function,Macro}) ->
@@ -224,9 +224,9 @@ format_error({illegal_function_usage,Macro}) ->
 format_error({'NYI',What}) ->
     io_lib:format("not yet implemented '~s'", [What]);
 format_error({error,Term}) ->
-    io_lib:format("-error(~p).", [Term]);
+    io_lib:format("-error(~tp).", [Term]);
 format_error({warning,Term}) ->
-    io_lib:format("-warning(~p).", [Term]);
+    io_lib:format("-warning(~tp).", [Term]);
 format_error(E) -> file:format_error(E).
 
 -spec parse_file(FileName, IncludePath, PredefMacros) ->
@@ -479,7 +479,7 @@ com_enc(_B, _Fun, _N, L, Ps) ->
     com_enc_end([L | Ps]).
 
 com_enc_end(Ps0) ->
-    Ps = lists:reverse([lists:reverse(string:to_lower(P)) || P <- Ps0]),
+    Ps = lists:reverse([lists:reverse(lowercase(P)) || P <- Ps0]),
     com_encoding(Ps).
 
 com_encoding(["latin","1"|_]) ->
@@ -488,6 +488,9 @@ com_encoding(["utf","8"|_]) ->
     utf8;
 com_encoding(_) ->
     throw(no). % Don't try any further
+
+lowercase(S) ->
+    unicode:characters_to_list(string:lowercase(S)).
 
 normalize_typed_record_fields([]) ->
     {typed, []};
@@ -1194,21 +1197,21 @@ skip_else(_Else, From, St, Sis) ->
 %% macro_expansion(Tokens, Anno)
 %%  Extract the macro parameters and the expansion from a macro definition.
 
-macro_pars([{')',_Lp}, {',',Ld}|Ex], Args) ->
-    {ok, {lists:reverse(Args), macro_expansion(Ex, Ld)}};
-macro_pars([{var,_,Name}, {')',_Lp}, {',',Ld}|Ex], Args) ->
+macro_pars([{')',_Lp}, {',',_Ld}=Comma|Ex], Args) ->
+    {ok, {lists:reverse(Args), macro_expansion(Ex, Comma)}};
+macro_pars([{var,_,Name}, {')',_Lp}, {',',_Ld}=Comma|Ex], Args) ->
     false = lists:member(Name, Args),		%Prolog is nice
-    {ok, {lists:reverse([Name|Args]), macro_expansion(Ex, Ld)}};
+    {ok, {lists:reverse([Name|Args]), macro_expansion(Ex, Comma)}};
 macro_pars([{var,_L,Name}, {',',_}|Ts], Args) ->
     false = lists:member(Name, Args),
     macro_pars(Ts, [Name|Args]).
 
-macro_expansion([{')',_Lp},{dot,_Ld}], _Anno0) -> [];
-macro_expansion([{dot,_}=Dot], _Anno0) ->
+macro_expansion([{')',_Lp},{dot,_Ld}], _T0) -> [];
+macro_expansion([{dot,_}=Dot], _T0) ->
     throw({error,loc(Dot),missing_parenthesis});
-macro_expansion([T|Ts], _Anno0) ->
+macro_expansion([T|Ts], _T0) ->
     [T|macro_expansion(Ts, T)];
-macro_expansion([], Anno0) -> throw({error,loc(Anno0),premature_end}).
+macro_expansion([], T0) -> throw({error,loc(T0),premature_end}).
 
 %% expand_macros(Tokens, St)
 %% expand_macro(Tokens, MacroToken, RestTokens)
@@ -1307,7 +1310,7 @@ expand_macros([{'?',_Lq},Token|_Toks], _St) ->
                 Text;
             undefined ->
                 Symbol = erl_scan:symbol(Token),
-                io_lib:write(Symbol)
+                io_lib:fwrite(<<"~tp">>, [Symbol])
         end,
     throw({error,loc(Token),{call,[$?|T]}});
 expand_macros([T|Ts], St) ->

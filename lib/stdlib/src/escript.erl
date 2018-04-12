@@ -224,8 +224,8 @@ return_sections(S, Bin) ->
 normalize_section(Name, undefined) ->
     {Name, undefined};
 normalize_section(shebang, "#!" ++ Chars) ->
-    Chopped = string:strip(Chars, right, $\n),
-    Stripped = string:strip(Chopped, both),
+    Chopped = string:trim(Chars, trailing, "$\n"),
+    Stripped = string:trim(Chopped, both),
     if
 	Stripped =:= ?SHEBANG ->
 	    {shebang, default};
@@ -233,8 +233,8 @@ normalize_section(shebang, "#!" ++ Chars) ->
 	    {shebang, Stripped}
     end;
 normalize_section(comment, Chars) ->
-    Chopped = string:strip(Chars, right, $\n),
-    Stripped = string:strip(string:strip(Chopped, left, $%), both),
+    Chopped = string:trim(Chars, trailing, "$\n"),
+    Stripped = string:trim(string:trim(Chopped, leading, "$%"), both),
     if
 	Stripped =:= ?COMMENT ->
 	    {comment, default};
@@ -242,8 +242,8 @@ normalize_section(comment, Chars) ->
 	    {comment, Stripped}
     end;
 normalize_section(emu_args, "%%!" ++ Chars) ->
-    Chopped = string:strip(Chars, right, $\n),
-    Stripped = string:strip(Chopped, both),
+    Chopped = string:trim(Chars, trailing, "$\n"),
+    Stripped = string:trim(Chopped, both),
     {emu_args, Stripped};
 normalize_section(Name, Chars) ->
     {Name, Chars}.
@@ -281,11 +281,11 @@ start(EscriptOptions) ->
         end
     catch
         throw:Str ->
-            io:format("escript: ~s\n", [Str]),
+            io:format("escript: ~ts\n", [Str]),
             my_halt(127);
-        _:Reason ->
-            io:format("escript: Internal error: ~p\n", [Reason]),
-            io:format("~p\n", [erlang:get_stacktrace()]),
+        _:Reason:Stk ->
+            io:format("escript: Internal error: ~tp\n", [Reason]),
+            io:format("~tp\n", [Stk]),
             my_halt(127)
     end.
 
@@ -758,8 +758,8 @@ run(Module, Args) ->
         Module:main(Args),
         my_halt(0)
     catch
-        Class:Reason ->
-            fatal(format_exception(Class, Reason))
+        Class:Reason:StackTrace ->
+            fatal(format_exception(Class, Reason, StackTrace))
     end.
 
 -spec interpret(_, _, _, _) -> no_return().
@@ -792,8 +792,8 @@ interpret(Forms, HasRecs,  File, Args) ->
                                  end}),
         my_halt(0)
     catch
-        Class:Reason ->
-            fatal(format_exception(Class, Reason))
+        Class:Reason:StackTrace ->
+            fatal(format_exception(Class, Reason, StackTrace))
     end.
 
 report_errors(Errors) ->
@@ -859,7 +859,7 @@ code_handler(Name, Args, Dict, File) ->
                     %% io:format("Calling:~p~n",[{Mod,Name,Args}]),
                     apply(Mod, Name, Args);
                 error ->
-                    io:format("Script does not export ~w/~w\n", [Name,Arity]),
+                    io:format("Script does not export ~tw/~w\n", [Name,Arity]),
                     my_halt(127)
             end
     end.
@@ -872,7 +872,7 @@ eval_exprs([E|Es], Bs0, Lf, Ef, RBs) ->
     {value,_V,Bs} = erl_eval:expr(E, Bs0, Lf, Ef, RBs1),
     eval_exprs(Es, Bs, Lf, Ef, RBs).
 
-format_exception(Class, Reason) ->
+format_exception(Class, Reason, StackTrace) ->
     Enc = encoding(),
     P = case Enc of
             latin1 -> "P";
@@ -881,7 +881,6 @@ format_exception(Class, Reason) ->
     PF = fun(Term, I) ->
                  io_lib:format("~." ++ integer_to_list(I) ++ P, [Term, 50])
          end,
-    StackTrace = erlang:get_stacktrace(),
     StackFun = fun(M, _F, _A) -> (M =:= erl_eval) or (M =:= ?MODULE) end,
     lib:format_exception(1, Class, Reason, StackTrace, StackFun, PF, Enc).
 
@@ -915,8 +914,8 @@ hidden_apply(App, M, F, Args) ->
     try
 	apply(fun() -> M end(), F, Args)
     catch
-	error:undef ->
-	    case erlang:get_stacktrace() of
+	error:undef:StackTrace ->
+	    case StackTrace of
 		[{M,F,Args,_} | _] ->
 		    Arity = length(Args),
 		    Text = io_lib:format("Call to ~w:~w/~w in application ~w failed.\n",

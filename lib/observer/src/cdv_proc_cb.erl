@@ -71,7 +71,7 @@ get_details(Id, _) ->
 	    Proplist0 =
 		crashdump_viewer:to_proplist(record_info(fields,proc),Info),
 	    Proplist = [{expand_table,Tab}|Proplist0],
-	    Title = io_lib:format("~s (~s)",[Info#proc.name, Id]),
+	    Title = io_lib:format("~ts (~s)",[Info#proc.name, Id]),
 	    {ok,{Title,Proplist,TW}};
 	{error,{other_node,NodeId}} ->
 	    Info = "The process you are searching for was residing on "
@@ -149,6 +149,10 @@ info_fields() ->
        {"Old Heap",         old_heap},
        {"Heap Unused",      heap_unused},
        {"Old Heap Unused",  old_heap_unused},
+       {"Binary vheap",     bin_vheap},
+       {"Old Binary vheap", old_bin_vheap},
+       {"Binary vheap unused",  bin_vheap_unused},
+       {"Old Binary vheap unused", old_bin_vheap_unused},
        {"Number of Heap Fragements", num_heap_frag},
        {"Heap Fragment Data",heap_frag_data},
        {"New Heap Start",   new_heap_start},

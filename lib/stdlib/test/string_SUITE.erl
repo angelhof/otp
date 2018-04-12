@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -47,7 +47,8 @@
 -export([to_upper_to_lower/1]).
 
 %% Run tests when debugging them
--export([debug/0]).
+-export([debug/0, time_func/4]).
+-compile([nowarn_deprecated_function]).
 
 suite() ->
     [{ct_hooks,[ts_install_cth]},
@@ -92,14 +93,11 @@ end_per_testcase(_Case, _Config) ->
     ok.
 
 debug() ->
-    Config = [{data_dir, ?MODULE_STRING++"_data"}],
+    Config = [{data_dir, "./" ++ ?MODULE_STRING++"_data"}],
     [io:format("~p:~p~n",[Test,?MODULE:Test(Config)]) ||
         {_,Tests} <- groups(), Test <- Tests].
 
 -define(TEST(B,C,D), test(?LINE,?FUNCTION_NAME,B,C,D, true)).
--define(TEST_EQ(B,C,D),
-        test(?LINE,?FUNCTION_NAME,B,C,D, true),
-        test(?LINE,?FUNCTION_NAME,hd(C),[B|tl(C),D, true)).
 
 -define(TEST_NN(B,C,D),
         test(?LINE,?FUNCTION_NAME,B,C,D, false),
@@ -294,6 +292,7 @@ trim(_) ->
     ?TEST(["..h", ".e", <<"j..">>], [both, ". "], "h.ej"),
     ?TEST(["..h", <<".ejsa"/utf8>>, "n.."], [both, ". "], "h.ejsan"),
     %% Test that it behaves with graphemes (i.e. nfd tests are the hard part)
+    ?TEST([1013,101,778,101,101], [trailing, [101]], [1013,101,778]),
     ?TEST("aaåaa", [both, "a"], "å"),
     ?TEST(["aaa",778,"äöoo"], [both, "ao"], "åäö"),
     ?TEST([<<"aaa">>,778,"äöoo"], [both, "ao"], "åäö"),
@@ -353,6 +352,7 @@ take(_) ->
     ?TEST([<<>>,<<"..">>, " h.ej", <<" ..">>], [Chars, true, leading], {".. ", "h.ej .."}),
     ?TEST(["..h", <<".ejsa"/utf8>>, "n.."], [Chars, true, leading], {"..", "h.ejsan.."}),
     %% Test that it behaves with graphemes (i.e. nfd tests are the hard part)
+    ?TEST([101,778], [[[101, 779]], true], {[101,778], []}),
     ?TEST(["aaee",778,"äöoo"], [[[$e,778]], true, leading], {"aae", [$e,778|"äöoo"]}),
     ?TEST([<<"aae">>,778,"äöoo"], [[[$e,778]],true,leading], {"aa", [$e,778|"äöoo"]}),
     ?TEST([<<"e">>,778,"åäöe", <<778/utf8>>], [[[$e,778]], true, leading], {[], [$e,778]++"åäöe"++[778]}),
@@ -486,6 +486,10 @@ to_float(_) ->
 prefix(_) ->
     ?TEST("", ["a"], nomatch),
     ?TEST("a", [""], "a"),
+    ?TEST("a", [[[]]], "a"),
+    ?TEST("a", [<<>>], "a"),
+    ?TEST("a", [[<<>>]], "a"),
+    ?TEST("a", [[[<<>>]]], "a"),
     ?TEST("b", ["a"], nomatch),
     ?TEST("a", ["a"], ""),
     ?TEST("å", ["a"], nomatch),
@@ -582,6 +586,8 @@ cd_gc(_) ->
     [$e,778] = string:next_codepoint([$e,778]),
     [$e|<<204,138>>] = string:next_codepoint(<<$e,778/utf8>>),
     [778|_] = string:next_codepoint(tl(string:next_codepoint(<<$e,778/utf8>>))),
+    [0|<<128,1>>] = string:next_codepoint(<<0,128,1>>),
+    {error,<<128,1>>} = string:next_codepoint(<<128,1>>),
 
     [] = string:next_grapheme(""),
     [] = string:next_grapheme(<<>>),
@@ -589,6 +595,8 @@ cd_gc(_) ->
     "abcd" = string:next_grapheme("abcd"),
     [[$e,778]] = string:next_grapheme([$e,778]),
     [[$e,778]] = string:next_grapheme(<<$e,778/utf8>>),
+    [0|<<128,1>>] = string:next_grapheme(<<0,128,1>>),
+    {error,<<128,1>>} = string:next_grapheme(<<128,1>>),
 
     ok.
 
@@ -709,29 +717,123 @@ nth_lexeme(_) ->
 
 
 meas(Config) ->
+    Parent = self(),
+    Exec = fun() ->
+                   DataDir0 = proplists:get_value(data_dir, Config),
+                   DataDir = filename:join(lists:droplast(filename:split(DataDir0))),
+                   case proplists:get_value(profile, Config, false) of
+                       false ->
+                           do_measure(DataDir);
+                       eprof ->
+                           eprof:profile(fun() -> do_measure(DataDir) end, [set_on_spawn]),
+                           eprof:stop_profiling(),
+                           eprof:analyze(),
+                           eprof:stop()
+                   end,
+                   Parent ! {test_done, self()},
+                   normal
+           end,
+    ct:timetrap({minutes,2}),
     case ct:get_timetrap_info() of
         {_,{_,Scale}} when Scale > 1 ->
             {skip,{will_not_run_in_debug,Scale}};
-        _ -> % No scaling
-            DataDir = proplists:get_value(data_dir, Config),
-            TestDir = filename:dirname(string:trim(DataDir, trailing, "/")),
-            do_measure(TestDir)
+        _ -> % No scaling, run at most 1.5 min
+            Tester = spawn(Exec),
+            receive {test_done, Tester} -> ok
+            after 90000 ->
+                    io:format("Timelimit reached stopping~n",[]),
+                    exit(Tester, die)
+            end,
+            ok
     end.
 
-do_measure(TestDir) ->
-    File =  filename:join(TestDir, ?MODULE_STRING ++ ".erl"),
+do_measure(DataDir) ->
+    File =  filename:join([DataDir,"unicode_util_SUITE_data","NormalizationTest.txt"]),
     io:format("File ~s ",[File]),
     {ok, Bin} = file:read_file(File),
     io:format("~p~n",[byte_size(Bin)]),
     Do = fun(Name, Func, Mode) ->
-                 {N, Mean, Stddev, _} = time_func(Func, Mode, Bin),
-                 io:format("~10w ~6w ~6.2fms ±~4.2fms #~.2w gc included~n",
+                 {N, Mean, Stddev, _} = time_func(Func, Mode, Bin, 20),
+                 io:format("~15w ~6w ~6.2fms ±~5.2fms #~.2w gc included~n",
                            [Name, Mode, Mean/1000, Stddev/1000, N])
          end,
+    Do2 = fun(Name, Func, Mode) ->
+                  {N, Mean, Stddev, _} = time_func(Func, binary, <<>>, 20),
+                  io:format("~15w ~6w ~6.2fms ±~5.2fms #~.2w gc included~n",
+                            [Name, Mode, Mean/1000, Stddev/1000, N])
+          end,
     io:format("----------------------~n"),
-    Do(tokens, fun(Str) -> string:tokens(Str, [$\n,$\r]) end, list),
+
+    Do(old_tokens, fun(Str) -> string:tokens(Str, [$\n,$\r]) end, list),
     Tokens = {lexemes, fun(Str) -> string:lexemes(Str, [$\n,$\r]) end},
     [Do(Name,Fun,Mode) || {Name,Fun} <- [Tokens], Mode <- [list, binary]],
+
+    S0 = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy.....",
+    S0B = <<"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy.....">>,
+    Do2(old_strip_l, repeat(fun() -> string:strip(S0, left, $x) end), list),
+    Do2(trim_l,  repeat(fun() -> string:trim(S0, leading, [$x]) end), list),
+    Do2(trim_l,  repeat(fun() -> string:trim(S0B, leading, [$x]) end), binary),
+    Do2(old_strip_r, repeat(fun() -> string:strip(S0, right, $.) end), list),
+    Do2(trim_t,  repeat(fun() -> string:trim(S0, trailing, [$.]) end), list),
+    Do2(trim_t,  repeat(fun() -> string:trim(S0B, trailing, [$.]) end), binary),
+
+    Do2(old_chr_sub, repeat(fun() -> string:sub_string(S0, string:chr(S0, $.)) end), list),
+    Do2(old_str_sub, repeat(fun() -> string:sub_string(S0, string:str(S0, [$.])) end), list),
+    Do2(find, repeat(fun() -> string:find(S0, [$.]) end), list),
+    Do2(find, repeat(fun() -> string:find(S0B, [$.]) end), binary),
+    Do2(old_str_sub2, repeat(fun() -> N = string:str(S0, "xy.."),
+                        {string:sub_string(S0,1,N), string:sub_string(S0,N+4)} end), list),
+    Do2(split, repeat(fun() -> string:split(S0, "xy..") end), list),
+    Do2(split, repeat(fun() -> string:split(S0B, "xy..") end), binary),
+
+    Do2(old_rstr_sub, repeat(fun() -> string:sub_string(S0, string:rstr(S0, [$y])) end), list),
+    Do2(find_t, repeat(fun() -> string:find(S0, [$y], trailing) end), list),
+    Do2(find_t, repeat(fun() -> string:find(S0B, [$y], trailing) end), binary),
+    Do2(old_rstr_sub2, repeat(fun() -> N = string:rstr(S0, "y.."),
+                         {string:sub_string(S0,1,N), string:sub_string(S0,N+3)} end), list),
+    Do2(split_t, repeat(fun() -> string:split(S0, "y..", trailing) end), list),
+    Do2(split_t, repeat(fun() -> string:split(S0B, "y..", trailing) end), binary),
+
+    Do2(old_span, repeat(fun() -> N=string:span(S0, [$x, $y]),
+                                  {string:sub_string(S0,1,N),string:sub_string(S0,N+1)}
+                         end), list),
+    Do2(take, repeat(fun() -> string:take(S0, [$x, $y]) end), list),
+    Do2(take, repeat(fun() -> string:take(S0B, [$x, $y]) end), binary),
+
+    Do2(old_cspan, repeat(fun() -> N=string:cspan(S0, [$.,$y]),
+                                   {string:sub_string(S0,1,N),string:sub_string(S0,N+1)}
+                          end), list),
+    Do2(take_c, repeat(fun() -> string:take(S0, [$.,$y], true) end), list),
+    Do2(take_c, repeat(fun() -> string:take(S0B, [$.,$y], true) end), binary),
+
+    Do2(old_substr, repeat(fun() -> string:substr(S0, 21, 15) end), list),
+    Do2(slice, repeat(fun() -> string:slice(S0, 20, 15) end), list),
+    Do2(slice, repeat(fun() -> string:slice(S0B, 20, 15) end), binary),
+
+    io:format("--~n",[]),
+    NthTokens = {nth_lexemes, fun(Str) -> string:nth_lexeme(Str, 18000, [$\n,$\r]) end},
+    [Do(Name,Fun,Mode) || {Name,Fun} <- [NthTokens], Mode <- [list, binary]],
+    Do2(take_t, repeat(fun() -> string:take(S0, [$.,$y], false, trailing) end), list),
+    Do2(take_t, repeat(fun() -> string:take(S0B, [$.,$y], false, trailing) end), binary),
+    Do2(take_tc, repeat(fun() -> string:take(S0, [$x], true, trailing) end), list),
+    Do2(take_tc, repeat(fun() -> string:take(S0B, [$x], true, trailing) end), binary),
+
+    Length = {length, fun(Str) -> string:length(Str) end},
+    [Do(Name,Fun,Mode) || {Name,Fun} <- [Length], Mode <- [list, binary]],
+
+    Reverse = {reverse, fun(Str) -> string:reverse(Str) end},
+    [Do(Name,Fun,Mode) || {Name,Fun} <- [Reverse], Mode <- [list, binary]],
+
+    ok.
+
+repeat(F) ->
+    fun(_) -> repeat_1(F,20000) end.
+
+repeat_1(F, N) when N > 0 ->
+    F(),
+    repeat_1(F, N-1);
+repeat_1(_, _) ->
+    erlang:garbage_collect(),
     ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -779,9 +881,9 @@ test_1(Line, Func, Str, Args, Exp) ->
     catch
         error:Exp ->
             ok;
-        error:Reason ->
+        error:Reason:Stacktrace ->
             io:format("~p:~p: Crash ~p ~p~n",
-                      [?MODULE,Line, Reason, erlang:get_stacktrace()]),
+                      [?MODULE,Line, Reason, Stacktrace]),
             exit({error, Func})
     end.
 
@@ -846,10 +948,10 @@ check_types(Line, Func, [Str|_], Res)  ->
             io:format("Failed: ~p ~p: ~p ~p~n",[Line, Func, T1, T2]),
             io:format("  ~p  => ~p~n", [Str, Res]),
             error;
-          _:Reason ->
-            io:format("Crash: ~p in~n ~p~n",[Reason, erlang:get_stacktrace()]),
+          _:Reason:Stacktrace ->
+            io:format("Crash: ~p in~n ~p~n",[Reason, Stacktrace]),
             io:format("Failed: ~p ~p: ~p => ~p~n", [Line, Func, Str, Res]),
-            exit({Reason, erlang:get_stacktrace()})
+            exit({Reason, Stacktrace})
     end.
 
 check_types_1(T, T) ->
@@ -860,8 +962,6 @@ check_types_1(Str, Res)
 check_types_1({list, _},{list, undefined}) ->
     ok;
 check_types_1({list, _},{list, codepoints}) ->
-    ok;
-check_types_1({list, _},{list, {list, codepoints}}) ->
     ok;
 check_types_1({list, {list, _}},{list, {list, codepoints}}) ->
     ok;
@@ -934,19 +1034,19 @@ needs_check(_) -> true.
 
 %%%% Timer stuff
 
-time_func(Fun, Mode, Bin) ->
+time_func(Fun, Mode, Bin, Repeat) ->
     timer:sleep(100), %% Let emulator catch up and clean things before test runs
     Self = self(),
     Pid = spawn_link(fun() ->
                              Str = mode(Mode, Bin),
-                             Self ! {self(),time_func(0,0,0, Fun, Str, undefined)}
+                             Self ! {self(),time_func(0,0,0, Fun, Str, undefined, Repeat)}
                      end),
     receive {Pid,Msg} -> Msg end.
 
-time_func(N,Sum,SumSq, Fun, Str, _) when N < 50 ->
+time_func(N,Sum,SumSq, Fun, Str, _, Repeat) when N < Repeat ->
     {Time, Res} = timer:tc(fun() -> Fun(Str) end),
-    time_func(N+1,Sum+Time,SumSq+Time*Time, Fun, Str, Res);
-time_func(N,Sum,SumSq, _, _, Res) ->
+    time_func(N+1,Sum+Time,SumSq+Time*Time, Fun, Str, Res, Repeat);
+time_func(N,Sum,SumSq, _, _, Res, _) ->
     Mean = round(Sum / N),
     Stdev = round(math:sqrt((SumSq - (Sum*Sum/N))/(N - 1))),
     {N, Mean, Stdev, Res}.

@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>1996</year><year>2016</year>
+      <year>1996</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -308,7 +308,7 @@
           format to the file. The events are formatted with a function that is 
           defined by the process that generated the event (with a call to
           <seealso marker="#handle_debug/4"><c>handle_debug/4</c></seealso>).
-        </p>
+	  The file is opened with encoding UTF-8.</p>
       </desc>
     </func>
 

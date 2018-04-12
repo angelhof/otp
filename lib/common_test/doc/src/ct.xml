@@ -4,7 +4,7 @@
 <erlref>
   <header>
     <copyright>
-      <year>2010</year><year>2016</year>
+      <year>2010</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -70,17 +70,69 @@
     <marker id="types"/>
     <taglist>
 
-      <tag><c>handle() = pid()</c></tag>
-        <item><marker id="type-handle"/>
-          <p>The identity (handle) of a connection.</p></item>
+      <tag>
+	<marker id="type-handle"/>
+	<c>handle() = pid()</c>
+      </tag>
+      <item>
+        <p>The identity (handle) of a connection.</p>
+      </item>
 
-      <tag><c>target_name() = atom()</c></tag>
-        <item><marker id="type-target_name"/>
-          <p>A name and association to configuration data introduced
-            through a require statement, or a call to
-            <seealso marker="#require-2"><c>ct:require/2</c></seealso>,
-            for example,
-            <c>ct:require(mynodename,{node,[telnet]})</c>.</p></item>
+      <tag>
+	<marker id="type-config_key"/>
+	<c>config_key() = atom()</c>
+      </tag>
+      <item>
+	<p>A configuration key which exists in a configuration file</p>
+      </item>
+
+      <tag>
+	<marker id="type-target_name"/><c>target_name() = atom()</c>
+      </tag>
+      <item>
+        <p>A name and association to configuration data introduced
+          through a require statement, or a call to
+          <seealso marker="#require-2"><c>ct:require/2</c></seealso>,
+          for example,
+          <c>ct:require(mynodename,{node,[telnet]})</c>.</p>
+      </item>
+
+      <tag>
+	<marker id="type-key_or_name"/>
+	<c>key_or_name() = config_key() | target_name()</c>
+      </tag>
+      <item/>
+
+      <tag>
+	<marker id="type-conn_log_options"/>
+	<c>conn_log_options() = [conn_log_option()]</c>
+      </tag>
+      <item>
+	<p>Options that can be given to the <c>cth_conn_log</c> hook,
+	  which is used for logging of NETCONF and Telnet
+	  connections. See
+	  <seealso marker="ct_netconfc#Logging">ct_netconfc</seealso>
+	  or <seealso marker="ct_telnet#Logging">ct_telnet</seealso>
+	  for description and examples of how to use this hook.</p>
+      </item>
+
+      <tag>
+	<marker id="type-conn_log_option"/>
+	<c>conn_log_option() = {log_type,conn_log_type()} | {hosts,[key_or_name()]}</c>
+      </tag>
+      <item/>
+
+      <tag>
+	<marker id="type-conn_log_type"/>
+	<c>conn_log_type() = raw | pretty | html | silent</c>
+      </tag>
+      <item/>
+
+      <tag>
+	<marker id="type-conn_log_mod"/>
+	<c>conn_log_mod() = ct_netconfc | ct_telnet</c>
+      </tag>
+      <item/>
 
     </taglist>
   </section>
@@ -1007,6 +1059,42 @@
           configuration table together with their aliases.</p>
       </desc>
     </func>
+
+     <func>
+      <name>remaining_test_procs() -&gt; {TestProcs,SharedGL,OtherGLs}</name>
+      <fsummary>>This function will return the identity of test- and group
+       leader processes that are still running at the time of this call.</fsummary>
+      <type>
+        <v>TestProcs = [{pid(),GL}]</v>
+	<v>GL = pid()</v>
+        <v>SharedGL = pid()</v>
+        <v>OtherGLs = [pid()]</v>
+      </type>
+      <desc><marker id="remaining_test_procs-0"/>
+        <p>This function will return the identity of test- and group
+	leader processes that are still running at the time of this call.
+	<c>TestProcs</c> are processes in the system that have a Common Test IO
+	process as group leader. <c>SharedGL</c> is the central Common Test
+	IO process, responsible for printing to log files for configuration
+	functions and sequentially executing test cases. <c>OtherGLs</c> are
+	Common Test IO processes that print to log files for test cases
+	in parallel test case groups.</p>
+	<p>The process information returned by this function may be
+	used to locate and terminate remaining processes after tests have
+	finished executing. The function would typically by called from
+	Common Test Hook functions.</p>
+	<p>Note that processes that execute configuration functions or
+	test cases are never included in <c>TestProcs</c>. It is therefore safe
+	to use post configuration hook functions (such as post_end_per_suite,
+	post_end_per_group, post_end_per_testcase) to terminate all processes
+	in <c>TestProcs</c> that have the current group leader process as its group
+	leader.</p>
+	<p>Note also that the shared group leader (<c>SharedGL</c>) must never be
+	terminated by the user, only by Common Test. Group leader processes
+	for parallel test case groups (<c>OtherGLs</c>) may however be terminated
+	in post_end_per_group hook functions.</p>
+      </desc>
+    </func>   
 
     <func>
       <name>remove_config(Callback, Config) -&gt; ok</name>

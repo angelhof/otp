@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2018. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -645,8 +645,7 @@ eval_exprs(Es, Shell, Bs0, RT, Lf, Ef, W) ->
     catch 
         exit:normal ->
             exit(normal);
-        Class:Reason ->
-            Stacktrace = erlang:get_stacktrace(),
+        Class:Reason:Stacktrace ->
             M = {self(),Class,{Reason,Stacktrace}},
             case do_catch(Class, Reason) of
                 true ->
@@ -701,7 +700,9 @@ exprs([E0|Es], Bs1, RT, Lf, Ef, Bs0, W) ->
                                 {W,V0};
                             true -> case result_will_be_saved() of
                                      true -> V0;
-                                     false -> ignored
+                                     false ->
+                                         erlang:garbage_collect(),
+                                         ignored
                                  end
                         end,
                     {{value,V,Bs,get()},Bs};
@@ -727,7 +728,7 @@ result_will_be_saved() ->
 used_record_defs(E, RT) ->
     %% Be careful to return a list where used records come before
     %% records that use them. The linter wants them ordered that way.
-    UR = case used_records(E, [], RT) of
+    UR = case used_records(E, [], RT, []) of
              [] -> 
                  [];
              L0 ->
@@ -737,13 +738,19 @@ used_record_defs(E, RT) ->
          end,
     record_defs(RT, UR).
 
-used_records(E, U0, RT) ->
+used_records(E, U0, RT, Skip) ->
     case used_records(E) of
         {name,Name,E1} ->
-            U = used_records(ets:lookup(RT, Name), [Name | U0], RT),
-            used_records(E1, U, RT);
+            U = case lists:member(Name, Skip) of
+                    true ->
+                        U0;
+                    false ->
+                        R = ets:lookup(RT, Name),
+                        used_records(R, [Name | U0], RT, [Name | Skip])
+                end,
+            used_records(E1, U, RT, Skip);
         {expr,[E1 | Es]} ->
-            used_records(Es, used_records(E1, U0, RT), RT);
+            used_records(Es, used_records(E1, U0, RT, Skip), RT, Skip);
         _ ->
             U0
     end.
@@ -799,8 +806,8 @@ restrict_handlers(RShMod, Shell, RT) ->
 
 -define(BAD_RETURN(M, F, V),
         try erlang:error(reason)
-        catch _:_ -> erlang:raise(exit, {restricted_shell_bad_return,V}, 
-                                  [{M,F,3} | erlang:get_stacktrace()])
+        catch _:_:S -> erlang:raise(exit, {restricted_shell_bad_return,V}, 
+                                    [{M,F,3} | S])
         end).
 
 local_allowed(F, As, RShMod, Bs, Shell, RT) when is_atom(F) ->
@@ -1238,22 +1245,22 @@ read_file_records(File, Opts) ->
     end.
 
 %% This is how the debugger searches for source files. See int.erl.
-try_source(Beam, CB) ->
-    Os = case lists:keyfind(options, 1, binary_to_term(CB)) of
-             false -> [];
-             {_, Os0} -> Os0
-	 end,
+try_source(Beam, RawCB) ->
+    EbinDir = filename:dirname(Beam),
+    CB = binary_to_term(RawCB),
+    Os = proplists:get_value(options,CB, []),
     Src0 = filename:rootname(Beam) ++ ".erl",
-    case is_file(Src0) of
-	true -> parse_file(Src0, Os);
-	false ->
-	    EbinDir = filename:dirname(Beam),
-	    Src = filename:join([filename:dirname(EbinDir), "src",
-				 filename:basename(Src0)]),
-	    case is_file(Src) of
-		true -> parse_file(Src, Os);
-		false -> {error, nofile}
-	    end
+    Src1 = filename:join([filename:dirname(EbinDir), "src",
+                          filename:basename(Src0)]),
+    Src2 = proplists:get_value(source, CB, []),
+    try_sources([Src0,Src1,Src2], Os).
+
+try_sources([], _) ->
+    {error, nofile};
+try_sources([Src|Rest], Os) ->
+    case is_file(Src) of
+        true -> parse_file(Src, Os);
+        false -> try_sources(Rest, Os)
     end.
 
 is_file(Name) ->
@@ -1453,7 +1460,7 @@ check_env(V) ->
         {ok, Val} ->
             Txt = io_lib:fwrite
                     ("Invalid value of STDLIB configuration parameter"
-                     "~w: ~tp\n", [V, Val]),
+                     "~tw: ~tp\n", [V, Val]),
 	    error_logger:info_report(lists:flatten(Txt))
     end.
 	    

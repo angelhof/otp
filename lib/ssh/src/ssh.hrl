@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -35,6 +35,8 @@
 
 -define(DEFAULT_TRANSPORT,  {tcp, gen_tcp, tcp_closed} ).
 
+-define(DEFAULT_SHELL, {shell, start, []} ).
+
 -define(MAX_RND_PADDING_LEN, 15).
 
 -define(SUPPORTED_AUTH_METHODS, "publickey,keyboard-interactive,password").
@@ -63,8 +65,8 @@
 -define(uint16(X), << ?UINT16(X) >> ).
 -define(uint32(X), << ?UINT32(X) >> ).
 -define(uint64(X), << ?UINT64(X) >> ).
--define(string(X), << ?STRING(list_to_binary(X)) >> ).
 -define(string_utf8(X), << ?STRING(unicode:characters_to_binary(X)) >> ).
+-define(string(X), ?string_utf8(X)).
 -define(binary(X), << ?STRING(X) >>).
 
 %% Cipher details
@@ -112,7 +114,7 @@
                              | {mac, double_algs()}
                              | {compression, double_algs()} .
 -type simple_algs()         :: list( atom() ) .
--type double_algs()         :: list( {client2serverlist,simple_algs()} | {server2client,simple_algs()} )
+-type double_algs()         :: list( {client2server,simple_algs()} | {server2client,simple_algs()} )
                              | simple_algs() .
 
 -type options() :: #{socket_options   := socket_options(),
@@ -135,6 +137,8 @@
                   {inet:hostname(),
                    {inet:ip_address(),inet:port_number()}},         %% string version of peer address 
 
+          local,        %% Local sockname. Need this AFTER a socket is closed by i.e. a crash
+
 	  c_vsn,        %% client version {Major,Minor}
 	  s_vsn,        %% server version {Major,Minor}
 
@@ -149,8 +153,6 @@
 
 	  algorithms,   %% #alg{}
 	  
-	  kex,          %% key exchange algorithm
-	  hkey,         %% host key algorithm
 	  key_cb,       %% Private/Public key callback module
 	  io_cb,        %% Interaction callback module
 
@@ -245,5 +247,14 @@
 	    true -> ok;
 	    _ -> exit(Reason)
 	end).
+
+
+%% dbg help macros
+-define(wr_record(N,BlackList),
+        wr_record(R=#N{}) ->  ssh_dbg:wr_record(R, record_info(fields,N), BlackList)
+        ).
+
+-define(wr_record(N), ?wr_record(N, [])).
+
 
 -endif. % SSH_HRL defined

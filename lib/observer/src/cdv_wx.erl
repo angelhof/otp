@@ -130,8 +130,9 @@ init(File0) ->
 	{ok,File} ->
 	    %% Set window title
 	    T1 = "Crashdump Viewer: ",
+            FileLength = string:length(File),
 	    Title =
-		if length(File) > 70 ->
+		if FileLength > 70 ->
 			T1 ++ filename:basename(File);
 		   true ->
 			T1 ++ File
@@ -306,7 +307,7 @@ handle_info({'EXIT', Pid, normal}, #state{server=Pid}=State) ->
     {stop, normal, State};
 
 handle_info({'EXIT', Pid, _Reason}, State) ->
-    io:format("Child (~s) crashed exiting:  ~p ~p~n",
+    io:format("Child (~s) crashed exiting:  ~p ~tp~n",
 	      [pid2panel(Pid, State), Pid,_Reason]),
     {stop, normal, State};
 
@@ -412,15 +413,25 @@ load_dump(Frame,undefined) ->
 	    error
     end;
 load_dump(Frame,FileName) ->
-    ok = observer_lib:display_progress_dialog("Crashdump Viewer",
+    case maybe_warn_filename(FileName) of
+        continue ->
+            do_load_dump(Frame,FileName);
+        stop ->
+            error
+    end.
+
+do_load_dump(Frame,FileName) ->
+    ok = observer_lib:display_progress_dialog(wx:null(),
+                                              "Crashdump Viewer",
 					      "Loading crashdump"),
     crashdump_viewer:read_file(FileName),
     case observer_lib:wait_for_progress() of
 	ok    ->
 	    %% Set window title
 	    T1 = "Crashdump Viewer: ",
+            FileLength = string:length(FileName),
 	    Title =
-		if length(FileName) > 70 ->
+		if FileLength > 70 ->
 			T1 ++ filename:basename(FileName);
 		   true ->
 			T1 ++ FileName
@@ -429,6 +440,33 @@ load_dump(Frame,FileName) ->
 	    {ok,FileName};
 	error ->
 	    error
+    end.
+
+maybe_warn_filename(FileName) ->
+    case os:getenv("ERL_CRASH_DUMP_SECONDS")=="0" orelse
+        os:getenv("ERL_CRASH_DUMP_BYTES")=="0" of
+        true ->
+            continue;
+        false ->
+            DumpName = case os:getenv("ERL_CRASH_DUMP") of
+                           false -> filename:absname("erl_crash.dump");
+                           Name -> filename:absname(Name)
+                       end,
+            case filename:absname(FileName) of
+                DumpName ->
+                    Warning =
+                        "WARNING: the current crashdump might be overwritten "
+                        "if the crashdump_viewer node crashes.\n\n"
+                        "Renaming the file before inspecting it will "
+                        "remove the problem.\n\n"
+                        "Do you want to continue?",
+                    case observer_lib:display_yes_no_dialog(Warning) of
+                        ?wxID_YES -> continue;
+                        ?wxID_NO -> stop
+                    end;
+                _ ->
+                    continue
+            end
     end.
 
 %%%-----------------------------------------------------------------

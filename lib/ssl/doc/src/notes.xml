@@ -4,7 +4,7 @@
 <chapter>
   <header>
     <copyright>
-      <year>1999</year><year>2016</year>
+      <year>1999</year><year>2017</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -27,6 +27,457 @@
   </header>
   <p>This document describes the changes made to the SSL application.</p>
 
+<section><title>SSL 8.2.5</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix filter function to not incorrectly exclude AEAD
+	    cipher suites</p>
+          <p>
+	    Own Id: OTP-14981</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 8.2.4</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Optimization of bad merge conflict resolution causing
+	    dubble decode</p>
+          <p>
+	    Own Id: OTP-14843</p>
+        </item>
+        <item>
+          <p>
+	    Restore error propagation to OTP-19.3 behaviour, in
+	    OTP-20.2 implementation adjustments to gen_statem needed
+	    some further adjustments to avoid a race condition. This
+	    could cause a TLS server to not always report file path
+	    errors correctly.</p>
+          <p>
+	    Own Id: OTP-14852</p>
+        </item>
+        <item>
+          <p>
+	    Corrected RC4 suites listing function to regard TLS
+	    version</p>
+          <p>
+	    Own Id: OTP-14871</p>
+        </item>
+        <item>
+          <p>
+	    Fix alert handling so that unexpected messages are logged
+	    and alerted correctly</p>
+          <p>
+	    Own Id: OTP-14919</p>
+        </item>
+        <item>
+          <p>
+	    Correct handling of anonymous cipher suites</p>
+          <p>
+	    Own Id: OTP-14952</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Added new API functions to facilitate cipher suite
+	    handling</p>
+          <p>
+	    Own Id: OTP-14760</p>
+        </item>
+        <item>
+          <p>
+	    Correct TLS_FALLBACK_SCSV handling so that this special
+	    flag suite is always placed last in the cipher suite list
+	    in accordance with the specs. Also make sure this
+	    functionality is used in DTLS.</p>
+          <p>
+	    Own Id: OTP-14828</p>
+        </item>
+        <item>
+          <p>
+	    Add TLS record version sanity check for early as possible
+	    error detection and consistency in ALERT codes generated</p>
+          <p>
+	    Own Id: OTP-14892</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 8.2.3</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Packet options cannot be supported for unreliable
+	    transports, that is, packet option for DTLS over udp will
+	    not be supported.</p>
+          <p>
+	    Own Id: OTP-14664</p>
+        </item>
+        <item>
+          <p>
+	    Ensure data delivery before close if possible. This fix
+	    is related to fix in PR-1479.</p>
+          <p>
+	    Own Id: OTP-14794</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    The crypto API is extended to use private/public keys
+	    stored in an Engine for sign/verify or encrypt/decrypt
+	    operations.</p>
+          <p>
+	    The ssl application provides an API to use this new
+	    engine concept in TLS.</p>
+          <p>
+	    Own Id: OTP-14448</p>
+        </item>
+        <item>
+          <p>
+	    Implemented renegotiation for DTLS</p>
+          <p>
+	    Own Id: OTP-14563</p>
+        </item>
+        <item>
+          <p>
+	    A new command line option <c>-ssl_dist_optfile</c> has
+	    been added to facilitate specifying the many options
+	    needed when using SSL as the distribution protocol.</p>
+          <p>
+	    Own Id: OTP-14657</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 8.2.2</title>
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    TLS sessions must be registered with SNI if provided, so
+	    that sessions where client hostname verification would
+	    fail can not connect reusing a session created when the
+	    server name verification succeeded.</p>
+          <p>
+	    Own Id: OTP-14632</p>
+        </item>
+        <item>
+	    <p> An erlang TLS server configured with cipher suites
+	    using rsa key exchange, may be vulnerable to an Adaptive
+	    Chosen Ciphertext attack (AKA Bleichenbacher attack)
+	    against RSA, which when exploited, may result in
+	    plaintext recovery of encrypted messages and/or a
+	    Man-in-the-middle (MiTM) attack, despite the attacker not
+	    having gained access to the server’s private key
+	    itself. <url
+	    href="https://nvd.nist.gov/vuln/detail/CVE-2017-1000385">CVE-2017-1000385</url>
+	    </p> <p> Exploiting this vulnerability to perform
+	    plaintext recovery of encrypted messages will, in most
+	    practical cases, allow an attacker to read the plaintext
+	    only after the session has completed. Only TLS sessions
+	    established using RSA key exchange are vulnerable to this
+	    attack. </p> <p> Exploiting this vulnerability to conduct
+	    a MiTM attack requires the attacker to complete the
+	    initial attack, which may require thousands of server
+	    requests, during the handshake phase of the targeted
+	    session within the window of the configured handshake
+	    timeout. This attack may be conducted against any TLS
+	    session using RSA signatures, but only if cipher suites
+	    using RSA key exchange are also enabled on the server.
+	    The limited window of opportunity, limitations in
+	    bandwidth, and latency make this attack significantly
+	    more difficult to execute. </p> <p> RSA key exchange is
+	    enabled by default although least prioritized if server
+	    order is honored. For such a cipher suite to be chosen it
+	    must also be supported by the client and probably the
+	    only shared cipher suite. </p> <p> Captured TLS sessions
+	    encrypted with ephemeral cipher suites (DHE or ECDHE) are
+	    not at risk for subsequent decryption due to this
+	    vulnerability. </p> <p> As a workaround if default cipher
+	    suite configuration was used you can configure the server
+	    to not use vulnerable suites with the ciphers option like
+	    this: </p> <c> {ciphers, [Suite || Suite &lt;-
+	    ssl:cipher_suites(), element(1,Suite) =/= rsa]} </c> <p>
+	    that is your code will look somethingh like this: </p>
+	    <c> ssl:listen(Port, [{ciphers, [Suite || Suite &lt;-
+	    ssl:cipher_suites(), element(1,S) =/= rsa]} | Options]).
+	    </c> <p> Thanks to Hanno Böck, Juraj Somorovsky and
+	    Craig Young for reporting this vulnerability. </p>
+          <p>
+	    Own Id: OTP-14748</p>
+        </item>
+      </list>
+    </section>
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    If no SNI is available and the hostname is an IP-address
+	    also check for IP-address match. This check is not as
+	    good as a DNS hostname check and certificates using
+	    IP-address are not recommended.</p>
+          <p>
+	    Own Id: OTP-14655</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 8.2.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Max session table works correctly again</p>
+          <p>
+	    Own Id: OTP-14556</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    Customize alert handling for DTLS over UDP to mitigate
+	    DoS attacks</p>
+          <p>
+	    Own Id: OTP-14078</p>
+        </item>
+        <item>
+          <p>
+	    Improved error propagation and reports</p>
+          <p>
+	    Own Id: OTP-14236</p>
+        </item>
+      </list>
+    </section>
+
+</section>
+
+<section><title>SSL 8.2</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    ECDH-ECDSA key exchange supported, was accidently
+	    dismissed in earlier versions.</p>
+          <p>
+	    Own Id: OTP-14421</p>
+        </item>
+        <item>
+          <p>
+	    Correct close semantics for active once connections. This
+	    was a timing dependent bug the resulted in the close
+	    message not always reaching the ssl user process.</p>
+          <p>
+	    Own Id: OTP-14443</p>
+        </item>
+      </list>
+    </section>
+
+
+    <section><title>Improvements and New Features</title>
+      <list>
+        <item>
+          <p>
+	    TLS-1.2 clients will now always send hello messages on
+	    its own format, as opposed to earlier versions that will
+	    send the hello on the lowest supported version, this is a
+	    change supported by the latest RFC.</p>
+          <p>
+	    This will make interoperability with some newer servers
+	    smoother. Potentially, but unlikely, this could cause a
+	    problem with older servers if they do not adhere to the
+	    RFC and ignore unknown extensions.</p>
+          <p>
+	    *** POTENTIAL INCOMPATIBILITY ***</p>
+          <p>
+	    Own Id: OTP-13820</p>
+        </item>
+        <item>
+          <p>
+	    Allow Erlang/OTP to use OpenSSL in FIPS-140 mode, in
+	    order to satisfy specific security requirements (mostly
+	    by different parts of the US federal government). </p>
+          <p>
+	    See the new crypto users guide "FIPS mode" chapter about
+	    building and using the FIPS support which is disabled by
+	    default.</p>
+          <p>
+	    (Thanks to dszoboszlay and legoscia)</p>
+          <p>
+	    Own Id: OTP-13921 Aux Id: PR-1180 </p>
+        </item>
+        <item>
+          <p>
+	    Implemented DTLS cookie generation, required by spec,
+	    instead of using a hardcoded value.</p>
+          <p>
+	    Own Id: OTP-14076</p>
+        </item>
+        <item>
+          <p>
+	    Implement sliding window replay protection of DTLS
+	    records.</p>
+          <p>
+	    Own Id: OTP-14077</p>
+        </item>
+        <item>
+          <p>
+	    TLS client processes will by default call
+	    public_key:pkix_verify_hostname/2 to verify the hostname
+	    of the connection with the server certificates specified
+	    hostname during certificate path validation. The user may
+	    explicitly disables it. Also if the hostname can not be
+	    derived from the first argument to connect or is not
+	    supplied by the server name indication option, the check
+	    will not be performed.</p>
+          <p>
+	    Own Id: OTP-14197</p>
+        </item>
+        <item>
+          <p>
+	    Extend connection_information/[1,2] . The values
+	    session_id, master_secret, client_random and
+	    server_random can no be accessed by
+	    connection_information/2. Note only session_id will be
+	    added to connection_information/1. The rational is that
+	    values concerning the connection security should have to
+	    be explicitly requested.</p>
+          <p>
+	    Own Id: OTP-14291</p>
+        </item>
+        <item>
+          <p>
+	    Chacha cipher suites are currently not tested enough to
+	    be most preferred ones</p>
+          <p>
+	    Own Id: OTP-14382</p>
+        </item>
+        <item>
+          <p>
+	    Basic support for DTLS that been tested together with
+	    OpenSSL.</p>
+          <p>
+	    Test by providing the option {protocol, dtls} to the ssl
+	    API functions connect and listen.</p>
+          <p>
+	    Own Id: OTP-14388</p>
+        </item>
+      </list>
+    </section>
+</section>
+
+<section><title>SSL 8.1.3.1.1</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Fix alert handling so that unexpected messages are logged
+	    and alerted correctly</p>
+          <p>
+	    Own Id: OTP-14929</p>
+        </item>
+      </list>
+    </section>
+</section>
+
+<section><title>SSL 8.1.3.1</title>
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+	    <p> An erlang TLS server configured with cipher suites
+	    using rsa key exchange, may be vulnerable to an Adaptive
+	    Chosen Ciphertext attack (AKA Bleichenbacher attack)
+	    against RSA, which when exploited, may result in
+	    plaintext recovery of encrypted messages and/or a
+	    Man-in-the-middle (MiTM) attack, despite the attacker not
+	    having gained access to the server’s private key
+	    itself. <url
+	    href="https://nvd.nist.gov/vuln/detail/CVE-2017-1000385">CVE-2017-1000385</url>
+	    </p> <p> Exploiting this vulnerability to perform
+	    plaintext recovery of encrypted messages will, in most
+	    practical cases, allow an attacker to read the plaintext
+	    only after the session has completed. Only TLS sessions
+	    established using RSA key exchange are vulnerable to this
+	    attack. </p> <p> Exploiting this vulnerability to conduct
+	    a MiTM attack requires the attacker to complete the
+	    initial attack, which may require thousands of server
+	    requests, during the handshake phase of the targeted
+	    session within the window of the configured handshake
+	    timeout. This attack may be conducted against any TLS
+	    session using RSA signatures, but only if cipher suites
+	    using RSA key exchange are also enabled on the server.
+	    The limited window of opportunity, limitations in
+	    bandwidth, and latency make this attack significantly
+	    more difficult to execute. </p> <p> RSA key exchange is
+	    enabled by default although least prioritized if server
+	    order is honored. For such a cipher suite to be chosen it
+	    must also be supported by the client and probably the
+	    only shared cipher suite. </p> <p> Captured TLS sessions
+	    encrypted with ephemeral cipher suites (DHE or ECDHE) are
+	    not at risk for subsequent decryption due to this
+	    vulnerability. </p> <p> As a workaround if default cipher
+	    suite configuration was used you can configure the server
+	    to not use vulnerable suites with the ciphers option like
+	    this: </p> <c> {ciphers, [Suite || Suite &lt;-
+	    ssl:cipher_suites(), element(1,Suite) =/= rsa]} </c> <p>
+	    that is your code will look somethingh like this: </p>
+	    <c> ssl:listen(Port, [{ciphers, [Suite || Suite &lt;-
+	    ssl:cipher_suites(), element(1,S) =/= rsa]} | Options]).
+	    </c> <p> Thanks to Hanno Böck, Juraj Somorovsky and
+	    Craig Young for reporting this vulnerability. </p>
+          <p>
+	    Own Id: OTP-14748</p>
+        </item>
+      </list>
+    </section>
+</section>
+<section><title>SSL 8.1.3</title>
+
+    <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+        <item>
+          <p>
+	    Remove debug printout</p>
+          <p>
+	    Own Id: OTP-14396</p>
+        </item>
+      </list>
+    </section>
+
+</section>
 
 <section><title>SSL 8.1.2</title>
 
@@ -391,6 +842,60 @@
 
 </section>
 
+ <section><title>SSL 7.3.3.2</title>
+
+      <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+	<item>
+	  <p> An erlang TLS server configured with cipher suites
+	  using rsa key exchange, may be vulnerable to an Adaptive
+	  Chosen Ciphertext attack (AKA Bleichenbacher attack)
+	  against RSA, which when exploited, may result in
+	  plaintext recovery of encrypted messages and/or a
+	  Man-in-the-middle (MiTM) attack, despite the attacker not
+	  having gained access to the server’s private key
+	  itself. <url
+	  href="https://nvd.nist.gov/vuln/detail/CVE-2017-1000385">CVE-2017-1000385</url>
+	  </p> <p> Exploiting this vulnerability to perform
+	  plaintext recovery of encrypted messages will, in most
+	  practical cases, allow an attacker to read the plaintext
+	  only after the session has completed. Only TLS sessions
+	  established using RSA key exchange are vulnerable to this
+	  attack. </p> <p> Exploiting this vulnerability to conduct
+	  a MiTM attack requires the attacker to complete the
+	  initial attack, which may require thousands of server
+	  requests, during the handshake phase of the targeted
+	  session within the window of the configured handshake
+	  timeout. This attack may be conducted against any TLS
+	  session using RSA signatures, but only if cipher suites
+	  using RSA key exchange are also enabled on the server.
+	  The limited window of opportunity, limitations in
+	  bandwidth, and latency make this attack significantly
+	  more difficult to execute. </p> <p> RSA key exchange is
+	  enabled by default although least prioritized if server
+	  order is honored. For such a cipher suite to be chosen it
+	  must also be supported by the client and probably the
+	  only shared cipher suite. </p> <p> Captured TLS sessions
+	  encrypted with ephemeral cipher suites (DHE or ECDHE) are
+	  not at risk for subsequent decryption due to this
+	  vulnerability. </p> <p> As a workaround if default cipher
+	  suite configuration was used you can configure the server
+	  to not use vulnerable suites with the ciphers option like
+	  this: </p> <c> {ciphers, [Suite || Suite &lt;-
+	  ssl:cipher_suites(), element(1,Suite) =/= rsa]} </c> <p>
+	  that is your code will look somethingh like this: </p>
+	  <c> ssl:listen(Port, [{ciphers, [Suite || Suite &lt;-
+	  ssl:cipher_suites(), element(1,S) =/= rsa]} | Options]).
+	  </c> <p> Thanks to Hanno Böck, Juraj Somorovsky and
+	  Craig Young for reporting this vulnerability. </p>
+	  <p>
+	  Own Id: OTP-14748</p>
+	</item>
+	    </list>
+      </section>
+      
+  </section>
+
 <section><title>SSL 7.3.3</title>
 
     <section><title>Fixed Bugs and Malfunctions</title>
@@ -420,7 +925,59 @@
       </list>
     </section>
 
+ <section><title>SSL 7.3.3.0.1</title>
 
+      <section><title>Fixed Bugs and Malfunctions</title>
+      <list>
+	<item>
+	  <p> An erlang TLS server configured with cipher suites
+	  using rsa key exchange, may be vulnerable to an Adaptive
+	  Chosen Ciphertext attack (AKA Bleichenbacher attack)
+	  against RSA, which when exploited, may result in
+	  plaintext recovery of encrypted messages and/or a
+	  Man-in-the-middle (MiTM) attack, despite the attacker not
+	  having gained access to the server’s private key
+	  itself. <url
+	  href="https://nvd.nist.gov/vuln/detail/CVE-2017-1000385">CVE-2017-1000385</url>
+	  </p> <p> Exploiting this vulnerability to perform
+	  plaintext recovery of encrypted messages will, in most
+	  practical cases, allow an attacker to read the plaintext
+	  only after the session has completed. Only TLS sessions
+	  established using RSA key exchange are vulnerable to this
+	  attack. </p> <p> Exploiting this vulnerability to conduct
+	  a MiTM attack requires the attacker to complete the
+	  initial attack, which may require thousands of server
+	  requests, during the handshake phase of the targeted
+	  session within the window of the configured handshake
+	  timeout. This attack may be conducted against any TLS
+	  session using RSA signatures, but only if cipher suites
+	  using RSA key exchange are also enabled on the server.
+	  The limited window of opportunity, limitations in
+	  bandwidth, and latency make this attack significantly
+	  more difficult to execute. </p> <p> RSA key exchange is
+	  enabled by default although least prioritized if server
+	  order is honored. For such a cipher suite to be chosen it
+	  must also be supported by the client and probably the
+	  only shared cipher suite. </p> <p> Captured TLS sessions
+	  encrypted with ephemeral cipher suites (DHE or ECDHE) are
+	  not at risk for subsequent decryption due to this
+	  vulnerability. </p> <p> As a workaround if default cipher
+	  suite configuration was used you can configure the server
+	  to not use vulnerable suites with the ciphers option like
+	  this: </p> <c> {ciphers, [Suite || Suite &lt;-
+	  ssl:cipher_suites(), element(1,Suite) =/= rsa]} </c> <p>
+	  that is your code will look somethingh like this: </p>
+	  <c> ssl:listen(Port, [{ciphers, [Suite || Suite &lt;-
+	  ssl:cipher_suites(), element(1,S) =/= rsa]} | Options]).
+	  </c> <p> Thanks to Hanno Böck, Juraj Somorovsky and
+	  Craig Young for reporting this vulnerability. </p>
+	  <p>
+	  Own Id: OTP-14748</p>
+	</item>
+	    </list>
+      </section>
+      
+  </section>
     <section><title>Improvements and New Features</title>
       <list>
         <item>

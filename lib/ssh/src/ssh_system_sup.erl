@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -63,9 +63,7 @@ init([Address, Port, Profile, Options]) ->
                 [#{id       => id(ssh_acceptor_sup, Address, Port, Profile),
                    start    => {ssh_acceptor_sup, start_link, [Address, Port, Profile, Options]},
                    restart  => transient,
-                   shutdown => infinity,
-                   type     => supervisor,
-                   modules  => [ssh_acceptor_sup]
+                   type     => supervisor
                   }];
             _ ->
                 []
@@ -90,11 +88,11 @@ stop_listener(Address, Port, Profile) ->
 
 
 stop_system(SysSup) ->
-    spawn(fun() -> sshd_sup:stop_child(SysSup) end),
+    catch sshd_sup:stop_child(SysSup),
     ok.
 
 stop_system(Address, Port, Profile) ->
-    spawn(fun() -> sshd_sup:stop_child(Address, Port, Profile) end),
+    catch sshd_sup:stop_child(Address, Port, Profile),
     ok.
 
 
@@ -124,9 +122,8 @@ start_subsystem(SystemSup, Role, Address, Port, Profile, Options) ->
         #{id       => make_ref(),
           start    => {ssh_subsystem_sup, start_link, [Role, Address, Port, Profile, Options]},
           restart  => temporary,
-          shutdown => infinity,
-          type     => supervisor,
-          modules  => [ssh_subsystem_sup]},
+          type     => supervisor
+         },
     supervisor:start_child(SystemSup, SubsystemSpec).
 
 stop_subsystem(SystemSup, SubSys) ->

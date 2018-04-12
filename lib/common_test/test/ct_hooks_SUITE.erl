@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2009-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2009-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -257,7 +257,7 @@ cth_log(Config) when is_list(Config) ->
     lists:foreach(
       fun(UnexpIoLog) ->
 	      {ok,Bin} = file:read_file(UnexpIoLog),
-	      Ts = string:tokens(binary_to_list(Bin),[$\n]),
+	      Ts = string:lexemes(binary_to_list(Bin),[$\n]),
 	      Matches = lists:foldl(fun([$=,$E,$R,$R,$O,$R|_],  N) ->
 					    N+1;
 				       ([$L,$o,$g,$g,$e,$r|_],  N) ->

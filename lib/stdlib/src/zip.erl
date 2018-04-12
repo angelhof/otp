@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2006-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2006-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -457,8 +457,7 @@ do_zip(F, Files, Options) ->
         Out3 = Output({close, F}, Out2),
         {ok, Out3}
     catch
-        C:R ->
-            Stk = erlang:get_stacktrace(),
+        C:R:Stk ->
             zlib:close(Z),
             Output({close, F}, Out0),
             erlang:raise(C, R, Stk)

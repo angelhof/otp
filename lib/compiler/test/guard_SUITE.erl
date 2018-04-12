@@ -35,7 +35,8 @@
 	 basic_andalso_orelse/1,traverse_dcd/1,
 	 check_qlc_hrl/1,andalso_semi/1,t_tuple_size/1,binary_part/1,
 	 bad_constants/1,bad_guards/1,
-	 guard_in_catch/1,beam_bool_SUITE/1]).
+         guard_in_catch/1,beam_bool_SUITE/1,
+         cover_beam_dead/1]).
 
 suite() -> [{ct_hooks,[ts_install_cth]}].
 
@@ -54,7 +55,8 @@ groups() ->
        rel_ops,rel_op_combinations,
        literal_type_tests,basic_andalso_orelse,traverse_dcd,
        check_qlc_hrl,andalso_semi,t_tuple_size,binary_part,
-       bad_constants,bad_guards,guard_in_catch,beam_bool_SUITE]}].
+       bad_constants,bad_guards,guard_in_catch,beam_bool_SUITE,
+       cover_beam_dead]}].
 
 init_per_suite(Config) ->
     Config.
@@ -1291,6 +1293,10 @@ rel_ops(Config) when is_list(Config) ->
     true = any_atom /= id(42),
     true = [] /= id(42),
 
+    %% Coverage of beam_utils:bif_to_test/3
+    Empty = id([]),
+    ?T(==, [], Empty),
+
     ok.
 
 -undef(TestOp).
@@ -1615,7 +1621,9 @@ type_tests() ->
      is_reference,
      is_port,
      is_binary,
-     is_function].
+     is_bitstring,
+     is_function,
+     is_map].
 
 basic_andalso_orelse(Config) when is_list(Config) ->
     T = id({type,integers,23,42}),
@@ -2198,7 +2206,31 @@ maps() ->
 evidence(#{0 := Charge}) when 0; #{[] => Charge} == #{[] => 42} ->
     ok.
 
+cover_beam_dead(_Config) ->
+    Mod = ?FUNCTION_NAME,
+    Attr = [],
+    Fs = [{function,test,1,2,
+           [{label,1},
+            {line,[]},
+            {func_info,{atom,Mod},{atom,test},1},
+            {label,2},
+            %% Cover beam_dead:turn_op/1 using swapped operand order.
+            {test,is_ne_exact,{f,3},[{integer,1},{x,0}]},
+            {test,is_eq_exact,{f,1},[{atom,a},{x,0}]},
+            {label,3},
+            {move,{atom,ok},{x,0}},
+            return]}],
+    Exp = [{test,1}],
+    Asm = {Mod,Exp,Attr,Fs,3},
+    {ok,Mod,Beam} = compile:forms(Asm, [from_asm,binary,report]),
+    {module,Mod} = code:load_binary(Mod, Mod, Beam),
+    ok = Mod:test(1),
+    ok = Mod:test(a),
+    {'EXIT',_} = (catch Mod:test(other)),
+    true = code:delete(Mod),
+    _ = code:purge(Mod),
 
+    ok.
 
 %% Call this function to turn off constant propagation.
 id(I) -> I.

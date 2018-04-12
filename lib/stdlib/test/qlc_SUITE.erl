@@ -1695,28 +1695,7 @@ sort(Config) when is_list(Config) ->
           [true || I <- lists:seq(1, 50000), not ets:insert(E, {I, I})],
           H = qlc:q([{X,Y} || X <- [a,b], Y <- qlc:sort(ets:table(E))]),
           100000 = length(qlc:e(H)),
-          ets:delete(E)">>,
-
-       begin
-       TmpDir = ?privdir,
-       [<<"TE = process_flag(trap_exit, true),
-           E = ets:new(foo, []),
-           [true || I <- lists:seq(1, 50000), not ets:insert(E, {I, I})],
-           Ports = erlang:ports(),
-           H = qlc:q([{X,Y} || X <- [a,b], 
-                               begin
-                                   [P] = erlang:ports() -- Ports,
-                                   exit(P, port_exit),
-                                   true
-                               end,
-                               Y <- qlc:sort(ets:table(E),
-                                             [{tmpdir,\"">>, 
-                                               TmpDir, <<"\"}])]),
-           {error, qlc, {file_error, _, _}} = (catch qlc:e(H)),
-           receive {'EXIT', _, port_exit} -> ok end,
-           ets:delete(E),
-           process_flag(trap_exit, TE)">>]
-       end
+          ets:delete(E)">>
 
         ],
     run(Config, Ts),
@@ -7871,7 +7850,7 @@ run_test(Config, Extra, {cres, Body, Opts, ExpectedCompileReturn}) ->
     {module, _} = code:load_abs(AbsFile, Mod),
 
     Ms0 = erlang:process_info(self(),messages),
-    Before = {{get(), lists:sort(ets:all()), Ms0}, pps()},
+    Before = {{lget(), lists:sort(ets:all()), Ms0}, pps()},
 
     %% Prepare the check that the qlc module does not call qlc_pt.
     _ = [unload_pt() || {file, Name} <- [code:is_loaded(qlc_pt)], 
@@ -7903,7 +7882,7 @@ run_test(Config, Extra, Body) ->
 
 wait_for_expected(R, {Strict0,PPS0}=Before, SourceFile, Wait) ->
     Ms = erlang:process_info(self(),messages),
-    After = {_,PPS1} = {{get(), lists:sort(ets:all()), Ms}, pps()},
+    After = {_,PPS1} = {{lget(), lists:sort(ets:all()), Ms}, pps()},
     case {R, After} of
         {ok, Before} ->
             ok;
@@ -7930,6 +7909,18 @@ wait_for_expected(R, {Strict0,PPS0}=Before, SourceFile, Wait) ->
         _ ->
             expected({ok,Before}, {R,After}, SourceFile)
     end.
+
+%% The qlc modules uses the process dictionary for storing names of files.
+lget() ->
+    lists:sort([T || {K, _} = T <- get(), is_qlc_key(K)]).
+
+%% Copied from the qlc module.
+-define(LCACHE_FILE(Ref), {Ref, '$_qlc_cache_tmpfiles_'}).
+-define(MERGE_JOIN_FILE, '$_qlc_merge_join_tmpfiles_').
+
+is_qlc_key(?LCACHE_FILE(_)) -> true;
+is_qlc_key(?MERGE_JOIN_FILE) -> true;
+is_qlc_key(_) -> false.
 
 unload_pt() ->
     erlang:garbage_collect(), % get rid of references to qlc_pt...

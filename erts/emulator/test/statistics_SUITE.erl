@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2017. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,8 +23,10 @@
 %% Tests the statistics/1 bif.
 
 -export([all/0, suite/0, groups/0,
+         wall_clock_sanity/1,
 	 wall_clock_zero_diff/1, wall_clock_update/1,
-	 runtime_zero_diff/1,
+         runtime_sanity/1,
+         runtime_zero_diff/1,
 	 runtime_update/1, runtime_diff/1,
 	 run_queue_one/1,
 	 scheduler_wall_time/1,
@@ -54,10 +56,22 @@ all() ->
 
 groups() -> 
     [{wall_clock, [],
-      [wall_clock_zero_diff, wall_clock_update]},
+      [wall_clock_sanity, wall_clock_zero_diff, wall_clock_update]},
      {runtime, [],
-      [runtime_zero_diff, runtime_update, runtime_diff]},
+      [runtime_sanity, runtime_zero_diff, runtime_update, runtime_diff]},
      {run_queue, [], [run_queue_one]}].
+
+wall_clock_sanity(Config) when is_list(Config) ->
+    erlang:yield(),
+    {WallClock, _} = statistics(wall_clock),
+    MT = erlang:monotonic_time(),
+    Time = erlang:convert_time_unit(MT - erlang:system_info(start_time),
+                                    native, millisecond),
+    io:format("Time=~p WallClock=~p~n",
+              [Time, WallClock]),
+    true = WallClock =< Time,
+    true = Time - 100 =< WallClock,
+    ok.
 
 %%% Testing statistics(wall_clock).
 
@@ -102,6 +116,20 @@ wall_clock_update1(0) ->
 
 %%% Test statistics(runtime).
 
+runtime_sanity(Config) when is_list(Config) ->
+    case erlang:system_info(logical_processors_available) of
+        unknown ->
+            {skipped, "Don't know available logical processors"};
+        LP when is_integer(LP) ->
+            erlang:yield(),
+            {RunTime, _} = statistics(runtime),
+            MT = erlang:monotonic_time(),
+            Time = erlang:convert_time_unit(MT - erlang:system_info(start_time),
+                                            native, millisecond),
+            io:format("Time=~p RunTime=~p~n",
+                      [Time, RunTime]),
+            true = RunTime =< Time*LP
+    end.
 
 %% Tests that the difference between the times returned from two consectuitive
 %% calls to statistics(runtime) is zero.
@@ -396,7 +424,7 @@ msb_swt_hog(false) ->
     count(1000000),
     msb_swt_hog(false).
 
-msb_scheduler_wall_time(Config) ->
+msb_scheduler_wall_time(_Config) ->
     erlang:system_flag(scheduler_wall_time, true),
     Dirty = erlang:system_info(dirty_cpu_schedulers) /= 0,
     Hogs = lists:map(fun (_) ->
@@ -493,7 +521,7 @@ badarg(Config) when is_list(Config) ->
 tok_loop() ->
     tok_loop().
 
-run_queues_lengths_active_tasks(Config) ->
+run_queues_lengths_active_tasks(_Config) ->
     TokLoops = lists:map(fun (_) ->
                                  spawn_opt(fun () ->
                                                    tok_loop()
@@ -502,20 +530,37 @@ run_queues_lengths_active_tasks(Config) ->
                          end,
                          lists:seq(1,10)),
 
+                   
+
     TRQLs0 = statistics(total_run_queue_lengths),
+    TRQLAs0 = statistics(total_run_queue_lengths_all),
     TATs0 = statistics(total_active_tasks),
+    TATAs0 = statistics(total_active_tasks_all),
     true = is_integer(TRQLs0),
     true = is_integer(TATs0),
     true = TRQLs0 >= 0,
+    true = TRQLAs0 >= 0,
     true = TATs0 >= 11,
+    true = TATAs0 >= 11,
 
     NoScheds = erlang:system_info(schedulers),
+    {DefRqs,
+     AllRqs} = case erlang:system_info(dirty_cpu_schedulers) of
+                   0 -> {NoScheds, NoScheds};
+                   _ -> {NoScheds+1, NoScheds+2}
+               end,
     RQLs0 = statistics(run_queue_lengths),
+    RQLAs0 = statistics(run_queue_lengths_all),
     ATs0 = statistics(active_tasks),
-    NoScheds = length(RQLs0),
-    NoScheds = length(ATs0),
+    ATAs0 = statistics(active_tasks_all),
+    DefRqs = length(RQLs0),
+    AllRqs = length(RQLAs0),
+    DefRqs = length(ATs0),
+    AllRqs = length(ATAs0),
     true = lists:sum(RQLs0) >= 0,
+    true = lists:sum(RQLAs0) >= 0,
     true = lists:sum(ATs0) >= 11,
+    true = lists:sum(ATAs0) >= 11,
 
     SO = erlang:system_flag(schedulers_online, 1),
 
@@ -531,8 +576,8 @@ run_queues_lengths_active_tasks(Config) ->
 
     RQLs1 = statistics(run_queue_lengths),
     ATs1 = statistics(active_tasks),
-    NoScheds = length(RQLs1),
-    NoScheds = length(ATs1),
+    DefRqs = length(RQLs1),
+    DefRqs = length(ATs1),
     TRQLs2 = lists:sum(RQLs1),
     TATs2 = lists:sum(ATs1),
     true = TRQLs2 >= 10,
@@ -593,9 +638,7 @@ msacc(Config) ->
                         (aux, 0) ->
                              %% aux will be zero if we do not have smp support
                              %% or no async threads
-                             case erlang:system_info(smp_support) orelse
-                                  erlang:system_info(thread_pool_size) > 0
-                             of
+                             case erlang:system_info(thread_pool_size) > 0 of
                                  false ->
                                      ok;
                                  true ->
@@ -630,6 +673,16 @@ msacc_test(TmpFile) ->
     Tid = ets:new(table, []),
     ets:insert(Tid, {1, hello}),
     ets:delete(Tid),
+
+    %% Check some IO
+    {ok, L} = gen_tcp:listen(0, [{active, true},{reuseaddr,true}]),
+    {ok, Port} = inet:port(L),
+    Pid = spawn(fun() ->
+                        {ok, S} = gen_tcp:accept(L),
+                        (fun F() -> receive M -> F() end end)()
+                end),
+    {ok, C} = gen_tcp:connect("localhost", Port, []),
+    [begin gen_tcp:send(C,"hello"),timer:sleep(1) end || _ <- lists:seq(1,100)],
 
     %% Collect some garbage
     [erlang:garbage_collect() || _ <- lists:seq(1,100)],

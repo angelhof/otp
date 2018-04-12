@@ -32,8 +32,8 @@
 %%                         (Optional - default efile)
 %%        -hosts [Node]  : List of hosts from which we can boot.
 %%                         (Mandatory if -loader inet)
-%%        -mode embedded : Load all modules at startup, no automatic loading
-%%        -mode interactive : Auto load modules (default system behaviour).
+%%        -mode interactive : Auto load modules not needed at startup (default system behaviour).
+%%        -mode embedded : Load all modules in the boot script, disable auto loading.
 %%        -path          : Override path in bootfile.
 %%        -pa Path+      : Add my own paths first.
 %%        -pz Path+      : Add my own paths last.
@@ -200,8 +200,11 @@ boot(BootArgs) ->
     register(init, self()),
     process_flag(trap_exit, true),
 
-    %% Load the tracer nif
+    %% Load the static nifs
+    zlib:on_load(),
     erl_tracer:on_load(),
+    prim_buffer:on_load(),
+    prim_file:on_load(),
 
     {Start0,Flags,Args} = parse_boot_args(BootArgs),
     %% We don't get to profile parsing of BootArgs
@@ -542,6 +545,8 @@ stop(Reason,State) ->
     do_stop(Reason,State1).
 
 do_stop(restart,#state{start = Start, flags = Flags, args = Args}) ->
+    %% Make sure we don't have any outstanding messages before doing the restart.
+    flush(),
     boot(Start,Flags,Args);
 do_stop(reboot,_) ->
     halt();
@@ -556,6 +561,13 @@ clear_system(BootPid,State) ->
     Heart = get_heart(State#state.kernel),
     shutdown_pids(Heart,BootPid,State),
     unload(Heart).
+
+flush() ->
+    receive
+        _M -> flush()
+    after 0 ->
+            ok
+    end.
 
 stop_heart(State) ->
     case get_heart(State#state.kernel) of

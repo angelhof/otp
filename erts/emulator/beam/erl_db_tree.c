@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1998-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2017. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@
 #include "erl_db_tree.h"
 
 #define GETKEY_WITH_POS(Keypos, Tplp) (*((Tplp) + Keypos))
-#define NITEMS(tb) ((int)erts_smp_atomic_read_nob(&(tb)->common.nitems))
+#define NITEMS(tb) ((int)erts_atomic_read_nob(&(tb)->common.nitems))
 
 /*
 ** A stack of this size is enough for an AVL tree with more than
@@ -85,16 +85,13 @@
 
 #define EMPTY_NODE(Dtt) (TOP_NODE(Dtt) == NULL)
 
-#ifndef MIN
-#define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
-#endif
 
 /* Obtain table static stack if available. NULL if not.
 ** Must be released with release_stack()
 */
 static DbTreeStack* get_static_stack(DbTableTree* tb)
 {
-    if (!erts_smp_atomic_xchg_acqb(&tb->is_stack_busy, 1)) {
+    if (!erts_atomic_xchg_acqb(&tb->is_stack_busy, 1)) {
 	return &tb->static_stack;
     }
     return NULL;
@@ -106,7 +103,7 @@ static DbTreeStack* get_static_stack(DbTableTree* tb)
 static DbTreeStack* get_any_stack(DbTableTree* tb)
 {
     DbTreeStack* stack;
-    if (!erts_smp_atomic_xchg_acqb(&tb->is_stack_busy, 1)) {
+    if (!erts_atomic_xchg_acqb(&tb->is_stack_busy, 1)) {
 	return &tb->static_stack;
     }
     stack = erts_db_alloc(ERTS_ALC_T_DB_STK, (DbTable *) tb,
@@ -120,8 +117,8 @@ static DbTreeStack* get_any_stack(DbTableTree* tb)
 static void release_stack(DbTableTree* tb, DbTreeStack* stack)
 {
     if (stack == &tb->static_stack) {
-	ASSERT(erts_smp_atomic_read_nob(&tb->is_stack_busy) == 1);
-	erts_smp_atomic_set_relb(&tb->is_stack_busy, 0);
+	ASSERT(erts_atomic_read_nob(&tb->is_stack_busy) == 1);
+	erts_atomic_set_relb(&tb->is_stack_busy, 0);
     }
     else {
 	erts_db_free(ERTS_ALC_T_DB_STK, (DbTable *) tb,
@@ -517,7 +514,7 @@ int db_create_tree(Process *p, DbTable *tbl)
 					   sizeof(TreeDbTerm *) * STACK_NEED);
     tb->static_stack.pos = 0;
     tb->static_stack.slot = 0;
-    erts_smp_atomic_init_nob(&tb->is_stack_busy, 0);
+    erts_atomic_init_nob(&tb->is_stack_busy, 0);
     tb->deletion = 0;
     return DB_ERROR_NONE;
 }
@@ -646,8 +643,8 @@ static int db_put_tree(DbTable *tbl, Eterm obj, int key_clash_fail)
     for (;;)
 	if (!*this) { /* Found our place */
 	    state = 1;
-	    if (erts_smp_atomic_inc_read_nob(&tb->common.nitems) >= TREE_MAX_ELEMENTS) {
-		erts_smp_atomic_dec_nob(&tb->common.nitems);
+	    if (erts_atomic_inc_read_nob(&tb->common.nitems) >= TREE_MAX_ELEMENTS) {
+		erts_atomic_dec_nob(&tb->common.nitems);
 		return DB_ERROR_SYSRES;
 	    }
 	    *this = new_dbterm(tb, obj);
@@ -1608,7 +1605,7 @@ static int db_select_delete_continue_tree(Process *p,
     sc.max = 1000;
     sc.keypos = tb->common.keypos;
 
-    ASSERT(!erts_smp_atomic_read_nob(&tb->is_stack_busy));
+    ASSERT(!erts_atomic_read_nob(&tb->is_stack_busy));
     traverse_backwards(tb, &tb->static_stack, lastkey, &doit_select_delete, &sc);
 
     BUMP_REDS(p, 1000 - sc.max);
@@ -2020,7 +2017,7 @@ static SWord db_free_table_continue_tree(DbTable *tbl, SWord reds)
 		     (DbTable *) tb,
 		     (void *) tb->static_stack.array,
 		     sizeof(TreeDbTerm *) * STACK_NEED);
-	ASSERT(erts_smp_atomic_read_nob(&tb->common.memory_size)
+	ASSERT(erts_atomic_read_nob(&tb->common.memory_size)
 	       == sizeof(DbTable));
     }
     return reds;
@@ -2030,7 +2027,7 @@ static int db_delete_all_objects_tree(Process* p, DbTable* tbl)
 {
     db_free_table_tree(tbl);
     db_create_tree(p, tbl);
-    erts_smp_atomic_set_nob(&tbl->tree.common.nitems, 0);
+    erts_atomic_set_nob(&tbl->tree.common.nitems, 0);
     return 0;
 }
 
@@ -2110,7 +2107,7 @@ static TreeDbTerm *linkout_tree(DbTableTree *tb, Eterm key) {
 		tstack[tpos++] = this;
 		state = delsub(this);
 	    }
-	    erts_smp_atomic_dec_nob(&tb->common.nitems);
+	    erts_atomic_dec_nob(&tb->common.nitems);
 	    break;
 	}
     }
@@ -2177,7 +2174,7 @@ static TreeDbTerm *linkout_object_tree(DbTableTree *tb,
 		tstack[tpos++] = this;
 		state = delsub(this);
 	    }
-	    erts_smp_atomic_dec_nob(&tb->common.nitems);
+	    erts_atomic_dec_nob(&tb->common.nitems);
 	    break;
 	}
     }

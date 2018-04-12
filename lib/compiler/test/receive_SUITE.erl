@@ -222,9 +222,8 @@ do_ref_opt(Source, PrivDir) ->
 		    collect_recv_opt_instrs(Code)
 	end,
 	ok
-    catch Class:Error ->
-	    io:format("~s: ~p ~p\n~p\n",
-		      [Source,Class,Error,erlang:get_stacktrace()]),
+    catch Class:Error:Stk ->
+	    io:format("~s: ~p ~p\n~p\n", [Source,Class,Error,Stk]),
 	    error
     end.
 
@@ -265,6 +264,10 @@ export(Config) when is_list(Config) ->
     self() ! {result,Ref,42},
     42 = export_1(Ref),
     {error,timeout} = export_1(Ref),
+
+    self() ! {result,Ref},
+    {ok,Ref} = export_2(),
+
     ok.
 
 export_1(Reference) ->
@@ -280,6 +283,10 @@ export_1(Reference) ->
     %% by beam_block.
     id({build,self()}),
     Result.
+
+export_2() ->
+    receive {result,Result} -> ok end,
+    {ok,Result}.
 
 wait(Config) when is_list(Config) ->
     self() ! <<42>>,

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,8 +27,8 @@
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
 	 init_per_group/2,end_per_group/2, 
 	 crash/1, stacktrace/1, sync_start_nolink/1, sync_start_link/1,
-         spawn_opt/1, sp1/0, sp2/0, sp3/1, sp4/2, sp5/1,
-	 hibernate/1, stop/1, t_format/1]).
+         spawn_opt/1, sp1/0, sp2/0, sp3/1, sp4/2, sp5/1, '\x{447}'/0,
+	 hibernate/1, stop/1, t_format/1, t_format_arbitrary/1]).
 -export([ otp_6345/1, init_dont_hang/1]).
 
 -export([hib_loop/1, awaken/1]).
@@ -51,7 +51,7 @@ suite() -> [{ct_hooks,[ts_install_cth]}].
 
 all() -> 
     [crash, stacktrace, {group, sync_start}, spawn_opt, hibernate,
-     {group, tickets}, stop, t_format].
+     {group, tickets}, stop, t_format, t_format_arbitrary].
 
 groups() -> 
     [{tickets, [], [otp_6345, init_dont_hang]},
@@ -78,6 +78,14 @@ end_per_group(_GroupName, Config) ->
 %% synchronous, and we want to test that the crash report is ok.
 %%-----------------------------------------------------------------
 crash(Config) when is_list(Config) ->
+    ok = application:unset_env(kernel, error_logger_format_depth),
+    crash_1(Config),
+    ok = application:set_env(kernel, error_logger_format_depth, 30),
+    crash_1(Config),
+    ok = application:unset_env(kernel, error_logger_format_depth),
+    ok.
+
+crash_1(_Config) ->
     error_logger:add_report_handler(?MODULE, self()),
 
     %% Make sure that we don't get a crash report if a process
@@ -138,6 +146,14 @@ crash(Config) when is_list(Config) ->
 	    {ancestors,[]},
 	    {error_info,{exit,abnormal,{stacktrace}}}],
     analyse_crash(Pid5, Exp5, []),
+
+    %% Unicode atom
+    Pid6 = proc_lib:spawn(?MODULE, '\x{447}', []),
+    Pid6 ! die,
+    Exp6 = [{initial_call,{?MODULE,'\x{447}',[]}},
+	    {ancestors,[self()]},
+	    {error_info,{exit,die,{stacktrace}}}],
+    analyse_crash(Pid6, Exp6, []),
 
     error_logger:delete_report_handler(?MODULE),
     ok.
@@ -304,6 +320,12 @@ sp4(Parent, Tester) ->
     end,
     proc_lib:init_ack(Parent, self()).
 
+'\x{447}'() ->
+    receive
+	die -> exit(die);
+	_ -> sp1()
+    end.
+
 hibernate(Config) when is_list(Config) ->
     Ref = make_ref(),
     Self = self(),
@@ -424,8 +446,8 @@ init_dont_hang(Config) when is_list(Config) ->
 	StartLinkRes = proc_lib:start(?MODULE, init_dont_hang_init, [self()], 1000),
 	StartLinkRes = proc_lib:start(?MODULE, init_dont_hang_init, [self()], 1000, []),
 	ok
-    catch _:Error ->
-	    io:format("Error ~p /= ~p ~n",[erlang:get_stacktrace(), StartLinkRes]),
+    catch _:Error:Stacktrace ->
+	    io:format("Error ~p /= ~p ~n",[Stacktrace, StartLinkRes]),
 	    exit(Error)
     end.
 
@@ -530,14 +552,17 @@ t_format(_Config) ->
 
 t_format() ->
     error_logger:add_report_handler(?MODULE, self()),
-    Pid = proc_lib:spawn(fun t_format_looper/0),
+    Pid = proc_lib:spawn(fun '\x{aaa}t_format_looper'/0),
     HugeData = gb_sets:from_list(lists:seq(1, 100)),
-    Pid ! {die,HugeData},
+    SomeData1 = list_to_atom([246]),
+    SomeData2 = list_to_atom([1024]),
+    Pid ! {SomeData1,SomeData2},
+    Pid ! {die,{HugeData,SomeData1,SomeData2}},
     Report = receive
 		 {crash_report, Pid, Report0} -> Report0
 	     end,
-    Usz = do_test_format(Report, unlimited),
-    Tsz = do_test_format(Report, 20),
+    Usz = do_test_format(Report, latin1, unlimited),
+    Tsz = do_test_format(Report, latin1, 20),
 
     if
 	Tsz >= Usz ->
@@ -546,21 +571,58 @@ t_format() ->
 	    ok
     end,
 
+    UszU = do_test_format(Report, unicode, unlimited),
+    TszU = do_test_format(Report, unicode, 20),
+
+    if
+	TszU >= UszU ->
+	    ct:fail(failed);
+	true ->
+	    ok
+    end,
+
     ok.
 
+t_format_arbitrary(_Config) ->
+    error_logger:tty(false),
+    try
+        t_format_arbitrary()
+    after
+        error_logger:tty(true)
+    end,
+    ok.
+
+t_format_arbitrary() ->
+    A = list_to_atom([1024]),
+    do_test_format([fake_report, A], unlimited),
+    do_test_format([fake_report, A], 20),
+
+    do_test_format([fake_report, foo], unlimited),
+    do_test_format([fake_report, foo], 20),
+    do_test_format([fake_report, []], unlimited),
+    do_test_format([fake_report, []], 20).
+
 do_test_format(Report, Depth) ->
-    io:format("*** Depth = ~p", [Depth]),
-    S0 = proc_lib:format(Report, latin1, Depth),
+    do_test_format(Report, latin1, Depth),
+    do_test_format(Report, unicode, Depth).
+
+do_test_format(Report, Encoding, Depth) ->
+    io:format("*** Depth = ~p, Encoding = ~p", [Depth, Encoding]),
+    S0 = proc_lib:format(Report, Encoding, Depth),
     S = lists:flatten(S0),
-    io:put_chars(S),
+    case Encoding of
+        latin1 -> io:format("~s\n", [S]);
+        _ -> io:format("~ts\n", [S])
+    end,
     length(S).
 
-t_format_looper() ->
+'\x{aaa}t_format_looper'() ->
     receive
 	{die,Data} ->
 	    exit(Data);
-	_ ->
-	    t_format_looper()
+	M ->
+            put(M, M),
+	    '\x{aaa}t_format_looper'()
     end.
 
 %%-----------------------------------------------------------------
@@ -570,7 +632,7 @@ init(Tester) ->
     {ok, Tester}.
 
 handle_event({error_report, _GL, {Pid, crash_report, Report}}, Tester) ->
-    io:format("~s\n", [proc_lib:format(Report)]),
+    io:format("~ts\n", [proc_lib:format(Report)]),
     Tester ! {crash_report, Pid, Report},
     {ok, Tester};
 handle_event(_Event, State) ->

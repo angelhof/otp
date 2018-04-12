@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2002-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2002-2017. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,8 +28,6 @@
 -include("etop_defs.hrl").
 
 -import(etop,[loadinfo/2,meminfo/2]).
-
--define(PROCFORM,"~-15w~-20s~8w~8w~8w~8w ~-20s~n").
 
 stop(Pid) -> Pid ! stop.
 
@@ -73,7 +71,7 @@ do_update(Fd,Info,Prev,Config) ->
     io:nl(Fd),
     writepinfo_header(Fd),
     writesingleline(Fd),
-    writepinfo(Fd,Info#etop_info.procinfo),
+    writepinfo(Fd,Info#etop_info.procinfo,modifier(Fd)),
     writedoubleline(Fd),
     io:nl(Fd),
     Info.
@@ -93,19 +91,34 @@ writepinfo(Fd,[#etop_proc_info{pid=Pid,
 			       runtime=Time,
 			       cf=MFA,
 			       mq=MQ}
-	       |T]) ->
-    io:fwrite(Fd,?PROCFORM,[Pid,to_list(Name),Time,Reds,Mem,MQ,formatmfa(MFA)]), 
-    writepinfo(Fd,T);
-writepinfo(_Fd,[]) ->
+	       |T],
+           Modifier) ->
+    io:fwrite(Fd,proc_format(Modifier),
+              [Pid,to_string(Name,Modifier),Time,Reds,Mem,MQ,
+               to_string(MFA,Modifier)]),
+    writepinfo(Fd,T,Modifier);
+writepinfo(_Fd,[],_) ->
     ok.
 
+proc_format(Modifier) ->
+    "~-15w~-20"++Modifier++"s~8w~8w~8w~8w ~-20"++Modifier++"s~n".
 
-formatmfa({M, F, A}) ->
-    io_lib:format("~w:~w/~w",[M, F, A]);
-formatmfa(Other) ->
-    %% E.g. when running hipe - the current_function for some
-    %% processes will be 'undefined'
-    io_lib:format("~w",[Other]).
+to_string({M,F,A},Modifier) ->
+    io_lib:format("~w:~"++Modifier++"w/~w",[M,F,A]);
+to_string(Other,Modifier) ->
+    io_lib:format("~"++Modifier++"w",[Other]).
 
-to_list(Name) when is_atom(Name) -> atom_to_list(Name);
-to_list({_M,_F,_A}=MFA) -> formatmfa(MFA).
+modifier(Device) ->
+    case encoding(Device) of
+        latin1 -> "";
+        _ -> "t"
+    end.
+
+encoding(Device) ->
+    case io:getopts(Device) of
+        List when is_list(List) ->
+            proplists:get_value(encoding,List,latin1);
+        _ ->
+            latin1
+    end.
+

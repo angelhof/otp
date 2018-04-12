@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2016
+%% Copyright Ericsson AB 1996-2017
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -683,14 +683,14 @@ retainer_create(_Cp, R, Tab, Name, Ext = {ext, Alias, Mod}) ->
     Cs = val({Tab, cstruct}),
     Mod:load_table(Alias, T, {retainer, create_table},
 		   mnesia_schema:cs2list(Cs)),
-    dbg_out("Checkpoint retainer created ~p ~p~n", [Name, Tab]),
+    dbg_out("Checkpoint retainer created ~p ~tp~n", [Name, Tab]),
     R#retainer{store = {Ext, T}, really_retain = true};
 retainer_create(_Cp, R, Tab, Name, disc_only_copies) ->
     Fname = tab2retainer({Tab, Name}),
     file:delete(Fname),
     Args = [{file, Fname}, {type, set}, {keypos, 2}, {repair, false}],
     {ok, _} = mnesia_lib:dets_sync_open({Tab, Name}, Args),
-    dbg_out("Checkpoint retainer created ~p ~p~n", [Name, Tab]),
+    dbg_out("Checkpoint retainer created ~p ~tp~n", [Name, Tab]),
     R#retainer{store = {dets, {Tab, Name}}, really_retain = true};
 retainer_create(Cp, R, Tab, Name, Storage) ->
     T = ?ets_new_table(mnesia_retainer, [set, public, {keypos, 2}]),
@@ -698,7 +698,7 @@ retainer_create(Cp, R, Tab, Name, Storage) ->
     ReallyR = R#retainer.really_retain,
     ReallyCp = lists:member(Tab, Overriders),
     ReallyR2 = prepare_ram_tab(Tab, T, Storage, ReallyR, ReallyCp),
-    dbg_out("Checkpoint retainer created ~p ~p~n", [Name, Tab]),
+    dbg_out("Checkpoint retainer created ~p ~tp~n", [Name, Tab]),
     R#retainer{store = {ets, T}, really_retain = ReallyR2}.
 
 %% Copy the dumped table into retainer if needed
@@ -849,7 +849,7 @@ retainer_loop(Cp = #checkpoint_args{is_activated=false, name=Name}) ->
 	    retainer_loop(Cp#checkpoint_args{iterators = Iters});
 
 	{system, From, Msg} ->
-	    dbg_out("~p got {system, ~p, ~p}~n", [?MODULE, From, Msg]),
+	    dbg_out("~p got {system, ~p, ~tp}~n", [?MODULE, From, Msg]),
 	    sys:handle_system_msg(Msg, From, Cp#checkpoint_args.supervisor,
 				  ?MODULE, [], Cp)
     end;
@@ -857,9 +857,9 @@ retainer_loop(Cp = #checkpoint_args{is_activated=false, name=Name}) ->
 retainer_loop(Cp = #checkpoint_args{name=Name}) ->
     receive
 	{_From, {retain, Tid, Tab, Key, OldRecs}} ->
-	    R = val({Tab, {retainer, Name}}),
+	    R = ?catch_val({Tab, {retainer, Name}}),
 	    PendingTab = Cp#checkpoint_args.pending_tab,
-	    case R#retainer.really_retain of
+            case is_record(R, retainer) andalso R#retainer.really_retain of
 		true ->
 		    Store = R#retainer.store,
 		    try true = ets:member(PendingTab, Tid),
@@ -938,11 +938,11 @@ retainer_loop(Cp = #checkpoint_args{name=Name}) ->
 	    retainer_loop(Cp#checkpoint_args{iterators = Iters});
 
 	{system, From, Msg} ->
-	    dbg_out("~p got {system, ~p, ~p}~n", [?MODULE, From, Msg]),
+	    dbg_out("~p got {system, ~p, ~tp}~n", [?MODULE, From, Msg]),
 	    sys:handle_system_msg(Msg, From, Cp#checkpoint_args.supervisor,
 				  ?MODULE, [], Cp);
 	Msg ->
-	    dbg_out("~p got ~p~n", [?MODULE, Msg])
+	    dbg_out("~p got ~tp~n", [?MODULE, Msg])
     end.
 
 maybe_activate(Cp)
@@ -1269,9 +1269,9 @@ system_code_change(Cp, _Module, _OldVsn, _Extra) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%% Local function in order to avoid external function call
 val(Var) ->
-    case ?catch_val(Var) of
-	{'EXIT', _} -> mnesia_lib:other_val(Var);
-	_VaLuE_ -> _VaLuE_
+    case ?catch_val_and_stack(Var) of
+	{'EXIT', Stacktrace} -> mnesia_lib:other_val(Var, Stacktrace);
+	Value -> Value
     end.
-
