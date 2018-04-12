@@ -1454,7 +1454,7 @@ native_compile_1(Code, St) ->
 		     Code,
 		     Opts) of
 	{ok,{_Type,Bin}=T} when is_binary(Bin) ->
-            binary_size_collector ! {St#compile.module, size(Bin)},
+            catch binary_size_collector ! {St#compile.module, size(Bin)},
             {ok,embed_native_code(Code, T),St};
 	{error,R} ->
 	    case IgnoreErrors of
