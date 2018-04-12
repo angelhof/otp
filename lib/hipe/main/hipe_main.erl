@@ -282,6 +282,7 @@ icode_ssa(IcodeCfg0, MFA, Options, Servers) ->
   IcodeSSA2 = icode_ssa_dead_code_elimination(IcodeSSA1, Options),
   IcodeSSA3 = icode_ssa_copy_prop(IcodeSSA2, Options),
   IcodeSSA3a = icode_ssa_binary_pass(IcodeSSA3, Options),
+  pp(IcodeSSA3a, MFA, icode, pp_icode_ssa, Options, Servers),
   IcodeSSA4 = icode_ssa_type(IcodeSSA3a, MFA, Options, Servers),
   IcodeSSA5 = icode_ssa_dead_code_elimination(IcodeSSA4, Options),
   IcodeSSA6 = icode_ssa_struct_reuse(IcodeSSA5, Options),

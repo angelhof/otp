@@ -103,7 +103,7 @@ gen_fast_switch_val(I, VarMap, ConstTab, Options) ->
   %% Important that the list of cases is sorted when handling integers.
   UnsortedCases = hipe_icode:switch_val_cases(I),
   Cases = lists:sort(UnsortedCases),
-  
+  %% Cases = UnsortedCases,
   check_duplicates(Cases),
   %% This check is currently not really necessary.  The checking
   %% happens at an earlier phase of the compilation.

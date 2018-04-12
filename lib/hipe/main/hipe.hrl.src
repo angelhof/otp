@@ -300,7 +300,7 @@
 %%----------------------------------------------------------------------------
 
 -type mpid() :: 'none' | pid().
--record(comp_servers, {pp_server :: mpid(), range :: mpid(), type :: mpid()}).
+-record(comp_servers, {pp_server :: mpid(), range :: mpid(), type :: mpid(), inline :: mpid()}).
 
 %%----------------------------------------------------------------------------
 %% Basic types of the 'hipe' application used in other parts of the system

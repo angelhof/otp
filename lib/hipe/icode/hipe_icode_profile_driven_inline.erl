@@ -29,7 +29,8 @@
 -define(TIME_STOP(_Flag, _Text), true).
 -endif.
 
--define(MINIMUM_CALLS_TO_INLINE, 5).
+-define(MINIMUM_CALLS_TO_INLINE, 100).
+
 %%-------------------------------------------------------------------
 %% A pass that inlines functions based on call data that has been
 %% gathered during execution
@@ -94,9 +95,12 @@ pre_pass(N, IcodeMap, Pids) ->
       stop
   end.
 
-
-filter_data(Data, _IcodeMap) ->
-  Data.
+%% Filters the call data and only keeps data for the functions that exist in the IcodeMap
+filter_data(Data, IcodeMap) ->
+    maps:filter(
+      fun(MFA, _) ->
+              maps:is_key(MFA, IcodeMap)
+      end, Data).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -167,7 +171,12 @@ maximum_size(InitialSize) ->
   SmallAverage = 4000.0, % erl_types is 34703 on my metric
   %% This practically means that smaller modules can grow more and
   %% bigger modules can grow less (10% - 310%)
-  round((min(SmallAverage / InitialSize , 3.0) + 1.1) * InitialSize) .
+  %% Small
+  round((min(SmallAverage / InitialSize , 1.0) + 1.1) * InitialSize).
+  %% Med
+  %% round((min(SmallAverage / InitialSize , 3.0) + 1.1) * InitialSize).
+  %% Large
+  %% round((min(SmallAverage / InitialSize , 4.5) + 1.5) * InitialSize).
 
 total_calls(IcodeMap, CallMap) ->
   MfaMap = maps:map(fun(_MFA,_) -> 0 end, IcodeMap),
@@ -201,8 +210,8 @@ process(Data, IcodeMap) ->
 
 pre_loop(IcodeMap, CallMap) ->
     %% This doesn't allow calls to the same function to be inlined
-    CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
-    %% CurrentInlinesList = [],
+    %% CurrentInlinesList = [{MFA, MFA} || {MFA, _Icode} <- maps:to_list(IcodeMap)],
+    CurrentInlinesList = [],
     CurrentInlines = sets:from_list(CurrentInlinesList),
 
     TotalCalls = total_calls(IcodeMap, CallMap),

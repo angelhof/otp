@@ -822,6 +822,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
 	     init(Opts),
 	     Self ! finalize_fun_sequential(IcodeFun, Opts, Servers)
 	 end || IcodeFun <- MfaIcodeList],
+      %% Spawn one process for each function
       lists:foreach(fun (F) -> spawn_link(F) end, CompFuns),
       Final = [receive Res when element(1, Res) =:= MFA -> Res end
 	       || {MFA, _} <- MfaIcodeList],
