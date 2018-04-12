@@ -68,6 +68,7 @@ add_optimistic_typetests(Cfg, MFA, TypesMap) ->
   % io:format("Final: ~p~n", [FinalCfg]),
   FinalCfg.
 
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% This function adds a typetest after every function return to 
@@ -303,24 +304,34 @@ combine_copied_cfg(MFA, CopiedCfg, StartLbl, StartLblOpt, TypesMap) ->
         case check_opt_call_info(MFA) of
           none ->
             [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
-          ArgTypesTemp ->
-            ArgTypesTemp
+          %% The guard here makes sure that argument typetests are not going
+          %% to be produced in case the params are more (e.g. when a tuple has been untupled)
+          %% than the recorded argument types
+          ArgTypesTemp when length(ArgTypesTemp) =:= length(CfgParams)->
+            ArgTypesTemp;
+          _ ->
+            [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))]
         end;
       false ->
         %% New one
         case maps:get(MFA, TypesMap, none) of
           none ->
             [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))];
-          {ArgTypesTemp, _} ->
-            ArgTypesTemp
+          %% The guard here makes sure that argument typetests are not going
+          %% to be produced in case the params are more (e.g. when a tuple has been untupled)
+          %% than the recorded argument types
+          {ArgTypesTemp, _} when length(ArgTypesTemp) =:= length(CfgParams)->
+            ArgTypesTemp;
+          _ ->
+            [erl_types:t_any() || _ <- lists:seq(1,length(CfgParams))]
         end
     end,
-
   %% New version that might add more than one typetest for each argument
   ArgTypetestTrees = lists:zip([erl_types:t_test_tree_from_erl_type(Type) || Type <- ArgTypes], [hipe_icode:mk_move(X, X) || X <- CfgParams]),
   %% Comment one line if you dont want typetests in arguments
   ArgTypetestLists = [traverse_test_tree(Tree, Param, ?TYPETEST_TREE_DEPTH) || {Tree, Param} <- ArgTypetestTrees],
   % ArgTypetestLists = [traverse_test_tree(Tree, Param, 0) || {Tree, Param} <- ArgTypetestTrees],
+
   {UpdatedCfg, NewStartLabel, _} = lists:foldr(fun add_typetests_fun/2, {CopiedCfg, StartLblOpt, StartLbl}, lists:flatten(ArgTypetestLists)),
   %% Check if any typetest has been really added
   case NewStartLabel of
