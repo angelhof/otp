@@ -96,11 +96,7 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   %%hipe_icode_pp:pp(LinearIcode0),
   ?opt_start_timer("Icode"),
 
-  pp(icode_linear_to_cfg(LinearIcode0, Options), MFA, icode, pp_icode_pre_opt_type_tests, Options, Servers),
-  timer:sleep(2000),
   LinearIcode1 = icode_optimistic_types(LinearIcode0, Options),
-  pp(icode_linear_to_cfg(LinearIcode1, Options), MFA, icode, pp_icode_opt_type_tests, Options, Servers),
-  timer:sleep(2000),
   LinearIcode2 = icode_profile_driven_inline(LinearIcode1, Options, Servers),
 
   LinearIcode3 = icode_no_comment(LinearIcode2, Options),
@@ -425,7 +421,7 @@ icode_to_rtl(MFA, Icode, Options, Servers) ->
   RtlCfg0 = hipe_rtl_cfg:remove_unreachable_code(RtlCfg),
   RtlCfg1 = hipe_rtl_cfg:remove_trivial_bbs(RtlCfg0),
   %% hipe_rtl_cfg:pp(RtlCfg1),
-  RtlCfg2 = rtl_ssa(RtlCfg1, Options, Servers),
+  RtlCfg2 = rtl_ssa(RtlCfg1, Options),
   RtlCfg3 = rtl_symbolic(RtlCfg2, Options),
   %% hipe_rtl_cfg:pp(RtlCfg3),
   pp(RtlCfg3, MFA, rtl_liveness, pp_rtl_liveness, Options, Servers),
@@ -483,11 +479,11 @@ rtl_symbolic(RtlCfg, Options) ->
 %%
 %%----------------------------------------------------------------------
 
-rtl_ssa(RtlCfg0, Options, Servers) ->
+rtl_ssa(RtlCfg0, Options) ->
   case proplists:get_bool(rtl_ssa, Options) of
     true ->
       ?opt_start_timer("RTL SSA passes"),
-      RtlSSA0 = rtl_ssa_convert(RtlCfg0, Options, Servers),
+      RtlSSA0 = rtl_ssa_convert(RtlCfg0, Options),
       RtlSSA1 = rtl_ssa_const_prop(RtlSSA0, Options),
       %% RtlSSA1a = rtl_ssa_copy_prop(RtlSSA1, Options),
       RtlSSA2 = rtl_ssa_dead_code_elimination(RtlSSA1, Options),
@@ -498,8 +494,7 @@ rtl_ssa(RtlCfg0, Options, Servers) ->
       case proplists:get_bool(pp_rtl_ssa, Options) of
 	true ->
 	  io:format("%%------------- After  SSA un-conversion -----------\n"),
-          pp(RtlCfg, {hi,hi,3}, rtl, pp_rtl_ssa, Options, Servers);
-	  %% hipe_rtl_cfg:pp(RtlCfg);
+	  hipe_rtl_cfg:pp(RtlCfg);
 	false ->
 	  ok
       end,
@@ -509,17 +504,14 @@ rtl_ssa(RtlCfg0, Options, Servers) ->
       RtlCfg0
   end.
 
-rtl_ssa_convert(RtlCfg, Options, Servers) ->
+rtl_ssa_convert(RtlCfg, Options) ->
   case proplists:get_bool(pp_rtl_ssa, Options) of
     true ->
       io:format("%%------------- Before SSA conversion --------------\n"),
-      pp(RtlCfg, {hi,hi,3}, rtl, pp_rtl_ssa, Options, Servers),
-      timer:sleep(2000),
-      %% hipe_rtl_cfg:pp(RtlCfg),
+      hipe_rtl_cfg:pp(RtlCfg),
       io:format("%%------------- After  SSA conversion --------------\n"),
       RtlCfgSSA = hipe_rtl_ssa:convert(RtlCfg),
-      pp(RtlCfgSSA, {hi,hi,3}, rtl, pp_rtl_ssa, Options, Servers),
-      %% hipe_rtl_cfg:pp(RtlCfgSSA),
+      hipe_rtl_cfg:pp(RtlCfgSSA),
       io:format("%%------------- SSA check warnings below -----------\n"),
       hipe_rtl_ssa:check(RtlCfgSSA),
       RtlCfgSSA;
