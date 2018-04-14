@@ -97,10 +97,20 @@ pre_pass(N, IcodeMap, Pids) ->
 
 %% Filters the call data and only keeps data for the functions that exist in the IcodeMap
 filter_data(Data, IcodeMap) ->
-    maps:filter(
-      fun(MFA, _) ->
-              maps:is_key(MFA, IcodeMap)
-      end, Data).
+    NewData = 
+        maps:filter(
+          fun(MFA, _) ->
+                  maps:is_key(MFA, IcodeMap)
+          end, Data),
+    case maps:size(NewData) =:= maps:size(Data) of
+        true -> ok;
+        false -> 
+            io:format(standard_error,
+                      "HiPE Warning~n" ++
+                      "  - Profile Driven Inlining data contained mfas that do not belong in this module~n", 
+                      [])
+    end,
+    NewData.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%

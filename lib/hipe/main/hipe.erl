@@ -663,6 +663,7 @@ run_compiler_1(Name, DisasmFun, IcodeFun, Options) ->
 		  Opts0
 	      end,
 	    check_options(Opts),
+            check_optimistic_typetest_option(Name, Opts),
 	    ?when_option(verbose, Options,
 			 ?debug_msg("Options: ~p.\n",[Opts])),
 	    init(Opts),
@@ -1615,6 +1616,22 @@ check_options(Opts) ->
       ok;
     L ->
       ?WARNING_MSG("Unknown options: ~p.\n", [L]),
+      ok
+  end.
+
+-spec check_optimistic_typetest_option(mod(), comp_options()) -> 'ok'.
+
+check_optimistic_typetest_option(Name, Opts) ->
+  case lists:keyfind(optimistic_types, 1, Opts) of
+    {optimistic_types, Types} ->
+      case [{M,F,A} || {M,F,A} <- maps:keys(Types), M =/= Name] of
+        [] -> 
+          ok;
+        MFAs ->
+          ?error_msg("Optimistic Types contain MFAs from other modules:~n  ~p.\n",[MFAs]),
+          ?EXIT({optimistic_types_other_mfas,MFAs})
+      end;
+    false ->
       ok
   end.
 
