@@ -110,6 +110,8 @@ pre_pass(N, IcodeMap, Pids) ->
   end.
 
 %% Filters the call data and only keeps data for the functions that exist in the IcodeMap
+filter_data(undefined, _) ->
+    #{};
 filter_data(Data, IcodeMap) ->
     NewData = 
         maps:filter(

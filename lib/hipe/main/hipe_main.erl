@@ -104,7 +104,6 @@ compile_icode(MFA, LinearIcode0, Options, Servers, DebugState) ->
   %% hipe_icode_cfg:pp(IcodeCfg0),
   IcodeCfg1 = icode_handle_exceptions(IcodeCfg0, MFA, Options),
   IcodeCfg2 = icode_inline_bifs(IcodeCfg1, Options),
-
   % IcodeCfg3 = icode_optimistic_types(IcodeCfg2, Options),
   % IcodeCfg4 = icode_profile_driven_inline(IcodeCfg3, Options, Servers),
 
@@ -188,13 +187,8 @@ icode_optimistic_types(Icode, Options) ->
   end.
 
 icode_profile_driven_inline(Icode, Options, Servers) ->
-  case proplists:get_value(profile_driven_inline, Options) of
-    undefined ->
-      Icode;
-    _Data ->
-      ?option_time(hipe_icode_profile_driven_inline:linear(Icode, Servers),
-       "Icode inline based on profiling", Options)
-  end.
+  ?option_time(hipe_icode_profile_driven_inline:linear(Icode, Servers),
+               "Icode inline based on profiling", Options).
 %%---------------------------------------------------------------------
 
 icode_split_arith(IcodeCfg, MFA, Options) ->
@@ -437,6 +431,7 @@ icode_to_rtl(MFA, Icode, Options, Servers) ->
         hipe_llvm_liveness:analyze(RtlCfg4)
     end,
   pp(RtlCfg5, MFA, rtl, pp_rtl, Options, Servers),
+  timer:sleep(1000),
   case proplists:get_bool(no_verify_gcsafe, Options) of
     true -> ok;
     false ->
