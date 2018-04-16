@@ -227,6 +227,7 @@ safe_analyse(Cfg, {MFA,_,_,_}=Data) ->
   catch
     _:Reason ->
       io:format("MFA: ~p~nCfg: ~p~n", [MFA, Cfg]),
+      io:format("Backtrace ~p~n", [erlang:get_stacktrace()]),
       error(Reason)
   end.
 
@@ -2360,12 +2361,12 @@ runtime_server_running() ->
 
 
 find_dynamic_signature_mfa(MFA) ->
-  case check_opt_fun_info(MFA) of
-    none ->
-      find_signature_mfa(MFA);
-    {ArgTypes, RetType} ->
-      t_fun(ArgTypes, RetType)
-  end,
+  %% case check_opt_fun_info(MFA) of
+  %%   none ->
+  %%     find_signature_mfa(MFA);
+  %%   {ArgTypes, RetType} ->
+  %%     t_fun(ArgTypes, RetType)
+  %% end,
   %% WARNING: The above is wrong. We cannot make any assumptions about the types
   find_signature_mfa(MFA).
 
