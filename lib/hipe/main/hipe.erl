@@ -777,7 +777,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
   Self = self(),
   case MfaIcodeList of
     [{{M,_,_},_}|_] ->
-      CallGraph = hipe_icode_callgraph:construct_callgraph(MfaIcodeList),
+      %% CallGraph = hipe_icode_callgraph:construct_callgraph(MfaIcodeList),
       Exported = [{M, F, A} || {F, A} <- Exports],
       Closures = [MFA || {MFA, Icode} <- MfaIcodeList,
 			 hipe_icode:icode_is_closure(Icode)],
@@ -789,7 +789,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
 			    not hipe_icode:icode_is_closure(Icode)],
       TypeServerFun =
 	fun() ->
-	    hipe_icode_coordinator:coordinate(CallGraph, Escaping,
+	    hipe_icode_coordinator:coordinate(Escaping,
 					      NonEscaping, hipe_icode_type)
 	end,
       TypeServer = spawn_link(TypeServerFun),
@@ -800,7 +800,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
       PPServer = spawn_link(PPServerFun),
       RangeServerFun =
 	fun() ->
-	    hipe_icode_coordinator:coordinate(CallGraph, Escaping,
+	    hipe_icode_coordinator:coordinate(Escaping,
 					      NonEscaping, hipe_icode_range)
 	end,
       RangeServer = spawn_link(RangeServerFun),
@@ -808,7 +808,7 @@ finalize_fun_concurrent(MfaIcodeList, Exports, Opts) ->
         fun() ->
             hipe_icode_profile_driven_inline:init(
                 proplists:get_value(profile_driven_inline, Opts),
-                length(MfaIcodeList))
+                length(MfaIcodeList), [RangeServer, TypeServer])
         end,
       InlineServer = spawn_link(InlineServerFun),
       Servers = #comp_servers{pp_server = PPServer,

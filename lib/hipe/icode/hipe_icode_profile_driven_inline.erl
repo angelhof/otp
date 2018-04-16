@@ -4,7 +4,7 @@
 -export([cfg/2, linear/2]).
 
 %% Server Functions
--export([init/2]).
+-export([init/3]).
 
 -include("../flow/cfg.hrl").
 -include("../main/hipe.hrl").
@@ -61,17 +61,31 @@ cfg(Cfg, CompServers) ->
   NewIcode = linear(Icode, CompServers),
   hipe_icode_cfg:linear_to_cfg(NewIcode).
 
--spec init(map(), non_neg_integer()) -> ok.
-init(Data, NumberProcs) ->
+-spec init(map(), non_neg_integer(), [pid()]) -> ok.
+init(Data, NumberProcs, ServerPids) ->
   case pre_pass(NumberProcs) of
     {IcodeMap, Pids} ->
       NewData = filter_data(Data, IcodeMap),
       NewIcodeMap = process(NewData, IcodeMap),
+      update_call_graph(NewIcodeMap, ServerPids),
       post_pass(NewIcodeMap, Pids),
       stop();
     stop ->
       ok
   end.
+
+%% Before adding the inline pass in hipe the module callgraph was
+%% initially computed and then passed to the icode coordination
+%% servers. However after the profile driven inline pass the callgraph
+%% might change and so it must be recomputed and then sent to the
+%% servers.
+update_call_graph(MfaIcodeMap, ServerPids) ->
+    MfaIcodeList = maps:to_list(MfaIcodeMap),
+    CallGraph = hipe_icode_callgraph:construct_callgraph(MfaIcodeList),
+    lists:foreach(
+      fun(Pid) ->
+              Pid ! {callgraph, CallGraph}
+      end, ServerPids).
 
 update_ranges(Icode) ->
   IcodeCode = hipe_icode:icode_code(Icode),

@@ -247,6 +247,20 @@ analyse_blocks(Work, State, MFA) ->
 	    %% io:format("received none type at label: ~p~n", [Label]),
 	    {State,[]}
 	end,
+      %% case MFA of
+      %%   {smith, match0, 7} ->
+      %%     case {State#state.arg_types, NewState#state.arg_types} of
+      %%       {_, %%[_,_,{c, union,[_,_,_,_,{c,nil,_,_}|_],_}|_],
+      %%        [_,_,{c, union,[_,_,_,_,{c,list,_,_}|_],_}|_]} ->
+      %%         io:format("Work: ~p~nState: ~p~n", [Work, NewState#state.arg_types]),
+      %%         io:format("BB: ~p~nInfoIn: ~p~n", [state__bb(State, Label), Info]),
+      %%         io:format("Label: ~p~nState: ~p~n", [Label, State]);
+      %%       _ ->
+      %%         ok
+      %%     end;
+      %%   _ -> 
+      %%     ok
+      %% end,
       NewWork2 = add_work(NewWork, NewLabels),
       analyse_blocks(NewWork2, NewState, MFA)
   end.
@@ -326,34 +340,34 @@ do_basic_call(I, Info, LookupFun) ->
 	{M, F, A} = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
 	None = t_none(),
-  %% WARNING: This is wrong. We cannot make any assumption about the return type
-  % case check_opt_return_info({M,F,A}) of
-  %   none ->
-  %     case erl_bif_types:type(M, F, A, ArgTypes) of
-  %       None -> 
-  %         NewArgTypes = add_funs_to_arg_types(ArgTypes),
-  %         erl_bif_types:type(M, F, A, NewArgTypes);
-  %       Other ->
-  %         Other
-  %     end;
-  %   RetType ->
-  %     % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
-  %     RetType
-  % end;
-  case erl_bif_types:type(M, F, A, ArgTypes) of
-    None -> 
-      NewArgTypes = add_funs_to_arg_types(ArgTypes),
-      erl_bif_types:type(M, F, A, NewArgTypes);
-    Other ->
-      Other
-  end;
+        %% WARNING: This is wrong. We cannot make any assumption about the return type
+        %% case check_opt_return_info({M,F,A}) of
+        %%   none ->
+        %%     case erl_bif_types:type(M, F, A, ArgTypes) of
+        %%       None -> 
+        %%         NewArgTypes = add_funs_to_arg_types(ArgTypes),
+        %%         erl_bif_types:type(M, F, A, NewArgTypes);
+        %%       Other ->
+        %%         Other
+        %%     end;
+        %%   RetType ->
+        %%     % io:format("~p -> Return: ~p~n", [{M,F,A}, RetType]),
+        %%     RetType
+        %% end;
+        case erl_bif_types:type(M, F, A, ArgTypes) of
+          None -> 
+            NewArgTypes = add_funs_to_arg_types(ArgTypes),
+            erl_bif_types:type(M, F, A, NewArgTypes);
+          Other ->
+            Other
+        end;
       local ->
 	MFA = hipe_icode:call_fun(I),
 	ArgTypes = lookup_list(hipe_icode:args(I), Info),
-	% io:format("~p -> Types: ~p~n",[MFA,ArgTypes]),
+        %% io:format("~p -> Types: ~p~n",[MFA,ArgTypes]),
 	Ret = LookupFun(MFA,ArgTypes),
-  % io:format("~p -> Return: ~p~n", [MFA, Ret]),
-  Ret
+        %% io:format("~p -> Return: ~p~n", [MFA, Ret]),
+        Ret
     end.
 
 do_call(I, Info, LookupFun) ->

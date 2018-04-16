@@ -21,7 +21,7 @@
 
 -module(hipe_icode_coordinator).
 
--export([coordinate/4]).
+-export([coordinate/3]).
 
 -include("hipe_icode.hrl").
 
@@ -31,16 +31,25 @@
 
 %%---------------------------------------------------------------------
 
--spec coordinate(hipe_digraph:hdg(), [mfa()], [mfa()], module()) ->
-        no_return().
+-spec coordinate([mfa()], [mfa()], module()) -> no_return().
 
-coordinate(CG, Escaping, NonEscaping, Mod) ->
+coordinate(Escaping, NonEscaping, Mod) ->
+  CG = receive_callgraph(),
   ServerPid = initialize_server(Escaping, Mod),
   All = ordsets:from_list(Escaping ++ NonEscaping),
   Restart = fun (MFALs, PM) -> restart_funs(MFALs, PM, All, ServerPid) end,
   LastAction = fun (PM) -> last_action(PM, ServerPid, Mod, All) end,
   MFALists = {Escaping, All},
   coordinate(MFALists, CG, gb_trees:empty(), Restart, LastAction, ServerPid).
+
+
+-spec receive_callgraph() -> hipe_digraph:hdg().
+
+receive_callgraph() ->
+  receive
+    {callgraph, CallGraph} ->
+      CallGraph
+  end.
 
 -type mfalists() :: {[mfa()], [mfa()]}.
 
