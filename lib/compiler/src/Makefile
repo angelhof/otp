@@ -78,6 +78,7 @@ MODULES =  \
 	cerl_trees \
 	compile \
 	core_case_analysis \
+	core_optimistic_types \
 	core_lib \
 	core_lint \
 	core_parse \

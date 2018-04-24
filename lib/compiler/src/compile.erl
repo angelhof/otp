@@ -711,7 +711,8 @@ core_passes() ->
     %% Optimization and transforms of Core Erlang code.
     [{iff,clint0,?pass(core_lint_module)},
      {delay,
-      [{unless,no_copt,
+      [{iff, opt_types, {pass, core_optimistic_types}},
+       {unless,no_copt,
        [{core_old_inliner,fun test_old_inliner/1,fun core_old_inliner/2},
 	{iff,doldinline,{listing,"oldinline"}},
 	{unless,no_fold,{pass,sys_core_fold}},
@@ -724,7 +725,7 @@ core_passes() ->
         {unless,no_alias,{pass,sys_core_alias}},
         {iff,dalias,{listing,"core_alias"}},
 	?pass(core_transforms)]},
-       {pass,case_clause_reorder},
+       %% {pass,case_clause_reorder},
        {iff,dcopt,{listing,"copt"}},
        {iff,'to_core',{done,"core"}}]}
      | kernel_passes()].
