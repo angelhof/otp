@@ -113,12 +113,13 @@ pre_pass(N, IcodeMap, Pids) ->
 filter_data(undefined, _) ->
     #{};
 filter_data(Data, IcodeMap) ->
+    OptTypeData = map_call_data_for_optimistic_types(Data, IcodeMap),
     NewData = 
         maps:filter(
           fun(MFA, _) ->
                   maps:is_key(MFA, IcodeMap)
-          end, Data),
-    case maps:size(NewData) =:= maps:size(Data) of
+          end, OptTypeData),
+    case maps:size(NewData) =:= maps:size(OptTypeData) of
         true -> ok;
         false -> 
             io:format(standard_error,
@@ -127,6 +128,25 @@ filter_data(Data, IcodeMap) ->
                       [])
     end,
     NewData.
+
+%% WARNING: This is a temporary solution until profile driven inlining moves in cerl
+map_call_data_for_optimistic_types(Data, IcodeMap) ->
+    DataList = maps:to_list(Data),
+    NewDataList = 
+        [{update_mfa_opt(MFA1, IcodeMap), 
+          [{update_mfa_opt(MFA2, IcodeMap), N} 
+           || {MFA2, N} <- Calls]} 
+         || {MFA1, Calls} <- DataList],
+    maps:from_list(NewDataList).
+
+update_mfa_opt({M,F,A}, IcodeMap) ->
+    OF = core_optimistic_types:optimistic_fun_name(F),
+    case maps:is_key({M,OF,A}, IcodeMap) of
+        true -> {M,OF,A};
+        false -> {M,F,A}
+    end.
+            
+        
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
