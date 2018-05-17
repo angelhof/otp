@@ -113,12 +113,22 @@ pre_pass(N, IcodeMap, Pids) ->
 filter_data(undefined, _) ->
     #{};
 filter_data(Data, IcodeMap) ->
+    %% io:format("Call Data: ~n~p~n", [Data]),
+    %% Map the mfas to their optimistic names if existing
     OptTypeData = map_call_data_for_optimistic_types(Data, IcodeMap),
+    %% Filter all the callee mfas that are not included in the IcodeMap
+    FilteredData =
+        maps:map(
+          fun(_, Calls) ->
+                  lists:filter(fun({MFA,_N}) -> maps:is_key(MFA, IcodeMap) end, Calls)
+          end, OptTypeData),
+    %% Filter all the caller mfas that are not included in the Icode Map
     NewData = 
         maps:filter(
-          fun(MFA, _) ->
-                  maps:is_key(MFA, IcodeMap)
-          end, OptTypeData),
+          fun(MFA, Calls) ->
+                  maps:is_key(MFA, IcodeMap) andalso
+                      Calls =/= []
+          end, FilteredData),
     case maps:size(NewData) =:= maps:size(OptTypeData) of
         true -> ok;
         false -> 
@@ -129,6 +139,7 @@ filter_data(Data, IcodeMap) ->
     end,
     NewData.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% WARNING: This is a temporary solution until profile driven inlining moves in cerl
 map_call_data_for_optimistic_types(Data, IcodeMap) ->
     DataList = maps:to_list(Data),
@@ -143,10 +154,26 @@ update_mfa_opt({M,F,A}, IcodeMap) ->
     OF = core_optimistic_types:optimistic_fun_name(F),
     case maps:is_key({M,OF,A}, IcodeMap) of
         true -> {M,OF,A};
-        false -> {M,F,A}
+        false ->
+            NewOF = anonymous_fun_optimistic_name(F),
+            case maps:is_key({M,NewOF,A}, IcodeMap) of
+                true -> {M,NewOF,A};
+                false -> {M,F,A}
+            end
     end.
             
-        
+anonymous_fun_optimistic_name(Name) ->
+    List = atom_to_list(Name),
+    NewList = 
+        case lists:splitwith(fun(C) -> C =/= $/ end, List) of
+            {List, []} -> 
+                List;
+            {Pre, Post} ->
+                Pre ++ "$opt" ++ Post
+        end,
+    list_to_atom(NewList).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -229,7 +256,15 @@ total_calls(IcodeMap, CallMap) ->
   maps:fold(fun sum_calls/3, MfaMap, CallMap).
 
 sum_calls({_Caller, Callee}, Times, TotalCalls) ->
-  maps:update_with(Callee, fun(X) -> X + Times end, TotalCalls).
+  case maps:find(Callee, TotalCalls) of
+      {ok, X} ->
+          TotalCalls#{Callee => X + Times};
+      error ->
+          %% This should only happen in case of anonymous functions and so on
+          io:format("Fun: ~p not found in IcodeMap~n", [Callee]),
+          TotalCalls
+  end.      
+  %% maps:update_with(Callee, fun(X) -> X + Times end, TotalCalls).
 
 compute_icode_sizes(IcodeMap) ->
   FullIcodeMap = maps:map(
