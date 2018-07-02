@@ -2345,6 +2345,10 @@ t_from_term(T) when is_tuple(T) ->
 %%
 -spec t_from_term_shallow(term(), non_neg_integer()) -> erl_type().
 
+%% WARNING: This is kind of wrong
+t_from_term_shallow(max_depth, _) -> t_any();
+
+
 t_from_term_shallow(_, 0) -> t_any();
 t_from_term_shallow([H|T], N) ->                   t_cons(t_from_term_shallow(H, N-1), t_from_term_shallow(T, N-1));
 t_from_term_shallow([], _N) ->                     t_nil();
